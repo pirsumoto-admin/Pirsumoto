@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /Users/jotit/Desktop/Pirsumoto/lib/features/listings/*.dart)",
+      "Bash(wc -l /Users/jotit/Desktop/Pirsumoto/lib/features/*/*.dart)",
+      "Read(//Users/jotit/Desktop/ReactMobile-dev/**)",
+      "Bash(find /Users/jotit/Desktop/Pirsumoto -type f -name *_screen.dart -o -name main.dart -o -name *audio_service* -o -name firebase*.dart -o -name *google-services* -o -name *GoogleService* -o -name *form_provider*)",
+      "Bash(find /Users/jotit/Desktop/ReactMobile-dev/src -name VehicleDataService* -o -name *vehicle* -o -name *gov*)",
+      "Bash(flutter pub:*)",
+      "Bash(flutter analyze:*)"
+    ]
+  }
+}

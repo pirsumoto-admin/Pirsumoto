@@ -1,0 +1,3 @@
+-keep class com.google.mediapipe.** { *; }
+-dontwarn com.google.mediapipe.**
+-dontwarn com.google.auto.value.extension.memoized.Memoized

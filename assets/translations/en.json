@@ -1,0 +1,43 @@
+{
+    "bottom_nav": {
+        "add": "Add",
+        "listings": "Listings",
+        "profile": "Profile",
+        "settings": "Settings"
+    },
+    "add_car": {
+        "title_record": "Record Car Details",
+        "title_form": "Ad Details",
+        "record_instructions": "Speak clearly and describe the car details, including license plate, year on road, price, and other important details.",
+        "fields_list": "- License plate\n- Month on road\n- Test until (MM,YYYY)\n- Hand\n- Current ownership (Private, Company...)\n- Previous ownership (from Hand 2 up)\n- Odometer (KM)\n- Price\n- (Optional) Handicapped accessible\n- (Optional) Description",
+        "recording": "Recording...",
+        "stop_recording": "Stop Recording",
+        "cancel": "Cancel",
+        "tab_record": "Record Data",
+        "tab_type": "Type Data",
+        "license": "License Plate",
+        "license_hint": "Enter license plate",
+        "month_on_road": "Month on Road",
+        "month_on_road_hint": "Enter month on road",
+        "test_until": "Test Until (MM,YYYY)",
+        "test_until_hint": "Enter test until (MM,YYYY)",
+        "hand": "Hand",
+        "hand_hint": "Enter hand",
+        "current_ownership": "Current Ownership (Private, Company...)",
+        "current_ownership_hint": "Enter current ownership",
+        "previous_ownership": "Previous Ownership (from Hand 2 up)",
+        "previous_ownership_hint": "Enter previous ownership",
+        "km": "Odometer (KM)",
+        "km_hint": "Enter KM",
+        "price": "Price",
+        "price_hint": "Enter price",
+        "handicapped": "(Optional) Handicapped Accessible",
+        "handicapped_hint": "Yes / No",
+        "description": "(Optional) Description",
+        "description_hint": "According to all published information",
+        "images_title": "Car Images",
+        "images_subtitle": "At least one image is required",
+        "publish": "Publish",
+        "clear_all": "Clear All!"
+    }
+}

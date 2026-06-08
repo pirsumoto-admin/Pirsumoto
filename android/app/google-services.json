@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "265879971574",
+    "project_id": "car-publisher",
+    "storage_bucket": "car-publisher.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:265879971574:android:92ee7b76d2636b8d1aaed7",
+        "android_client_info": {
+          "package_name": "com.pirsumoto.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAJndnuTu4nCktGpOWm9JhpUR56PB6k8Bk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:265879971574:android:910e7950b8af689f1aaed7",
+        "android_client_info": {
+          "package_name": "com.pirsumotoapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAJndnuTu4nCktGpOWm9JhpUR56PB6k8Bk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

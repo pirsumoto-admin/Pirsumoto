@@ -1,0 +1,42 @@
+{
+    "bottom_nav": {
+        "add": "הוסף",
+        "listings": "רשימות",
+        "profile": "פרופיל",
+        "settings": "הגדרות"
+    },
+    "add_car": {
+        "title_record": "הקלטת פרטי הרכב",
+        "title_form": "פרטי המודעה",
+        "record_instructions": "דבר באופן ברור ותאר את פרטי הרכב, כולל מספר רישוי, שנת עלייה לכביש, מחיר ושאר הפרטים החשובים",
+        "fields_list": "- מספר רישוי\n- חודש עליה לכביש\n- טסט עד לשנה וחודש (חודש, שנה\n- יד\n- בעלות נוכחית (פרטית, חברה...)\n- בעלות מקורית (רק מיד 2 ומעלה)\n- שעון (ק\"מ)\n- מחיר\n- מותאם לנכים",
+        "recording": "מקליט...",
+        "stop_recording": "הפסק הקלטה",
+        "cancel": "ביטול",
+        "tab_record": "הקלטת מידע",
+        "tab_type": "הקלדת מידע",
+        "license": "מספר רישוי",
+        "license_hint": "הזן מספר רישוי",
+        "month_on_road": "חודש עליה לכביש",
+        "month_on_road_hint": "הזן חודש עליה לכביש",
+        "test_until": "טסט עד לשנה וחודש (חודש, שנה)",
+        "test_until_hint": "הזן טסט עד לשנה וחודש (חודש, שנה)",
+        "hand": "יד",
+        "hand_hint": "הזן יד",
+        "current_ownership": "בעלות נוכחית (פרטית, חברה...)",
+        "current_ownership_hint": "הזן בעלות נוכחית",
+        "previous_ownership": "בעלות מקורית (רק מיד 2 ומעלה)",
+        "previous_ownership_hint": "הזן בעלות מקורית",
+        "km": "שעון (ק\"מ)",
+        "km_hint": "הזן ק\"מ",
+        "price": "מחיר",
+        "price_hint": "הזן מחיר",
+        "handicapped": "מותאם לנכים",
+        "handicapped_hint": "כן / לא",
+        "description_hint": "בהתאם לכלל המידע שפורסם פה",
+        "images_title": "תמונות הרכב",
+        "images_subtitle": "דרושה לפחות תמונה אחת",
+        "publish": "פרסום",
+        "clear_all": "ניקוי הכל!"
+    }
+}
