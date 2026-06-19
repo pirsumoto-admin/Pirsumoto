@@ -8,9 +8,11 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter/gestures.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
-import 'yad2_automation_service.dart' show VehiclePublishData, AutomationPhase;
+import 'yad2_automation_models.dart' show VehiclePublishData, AutomationPhase;
 
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Yad2AccessibilityAutomationService {
   final VehiclePublishData formData;
@@ -27,6 +29,59 @@ class Yad2AccessibilityAutomationService {
   bool _isPaused = false;
   AutomationPhase? _pausedPhase;
   AutomationPhase? _currentPhase;
+  Timer? _loginSamplingTimer;
+
+  bool _settingsFetched = false;
+  List<String> _warranties = [];
+  Map<String, String> _warrantyDurations = {};
+  List<String> _treatments = [];
+  List<String> _services = [];
+
+  Future<void> _fetchSettingsIfNeeded() async {
+    if (_settingsFetched) return;
+    _warranties = formData.warranties;
+    _warrantyDurations = formData.warrantyDurations;
+    _treatments = formData.treatments;
+    _services = formData.services;
+
+    if (_warranties.isEmpty && _treatments.isEmpty && _services.isEmpty) {
+      try {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null) {
+          final doc =
+              await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(user.uid)
+                  .get();
+          if (doc.exists) {
+            final data = doc.data();
+            final settings = data?['settings'] as Map<String, dynamic>?;
+            if (settings != null) {
+              if (settings['warranties'] != null) {
+                _warranties = List<String>.from(settings['warranties']);
+              }
+              if (settings['warrantyDurations'] != null) {
+                _warrantyDurations = Map<String, String>.from(
+                  settings['warrantyDurations'],
+                );
+              }
+              if (settings['treatments'] != null) {
+                _treatments = List<String>.from(settings['treatments']);
+              }
+              if (settings['services'] != null) {
+                _services = List<String>.from(settings['services']);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[Yad2-A11y] Error fetching settings: $e');
+      }
+    }
+    _settingsFetched = true;
+  }
+
+  bool _loginGateTickBusy = false;
 
   // The MethodChannel name to communicate with the Android AccessibilityService
   static const MethodChannel _channel = MethodChannel(
@@ -71,6 +126,7 @@ class Yad2AccessibilityAutomationService {
   });
 
   void dispose() {
+    _stopLoginGate();
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
@@ -78,11 +134,13 @@ class Yad2AccessibilityAutomationService {
 
   void pauseAutomation() {
     debugPrint('[Yad2-A11y] ⏸️ Pause requested');
+    _stopLoginGate();
     _isPaused = true;
   }
 
   void resumeAutomation() {
     debugPrint('[Yad2-A11y] ▶️ Resume requested');
+    _stopLoginGate();
     if (!_isPaused) return;
     _isPaused = false;
 
@@ -159,18 +217,24 @@ class Yad2AccessibilityAutomationService {
           await _phase5bSelectMonthValue();
         case AutomationPhase.phase5c:
           await _phase5cCheckNoTest();
-        case AutomationPhase.phase6:
-          await _phase6OpenHandDropdown();
-        case AutomationPhase.phase7:
-          await _phase7SelectHandValue();
-        case AutomationPhase.phase8:
-          await _phase8OpenCurrentOwnershipDropdown();
-        case AutomationPhase.phase9:
-          await _phase9SelectCurrentOwnershipValue();
-        case AutomationPhase.phase10:
-          await _phase10OpenPreviousOwnershipDropdown();
-        case AutomationPhase.phase11:
-          await _phase11SelectPreviousOwnershipValue();
+        case AutomationPhase.phase5d:
+          await _phase5dWarranties();
+        case AutomationPhase.phase5e:
+          await _phase5eTreatments();
+        case AutomationPhase.phase5f:
+          await _phase5fServices();
+        //case AutomationPhase.phase6:
+        //  await _phase6OpenHandDropdown();
+        //case AutomationPhase.phase7:
+        //  await _phase7SelectHandValue();
+        //case AutomationPhase.phase8:
+        //  await _phase8OpenCurrentOwnershipDropdown();
+        //case AutomationPhase.phase9:
+        //  await _phase9SelectCurrentOwnershipValue();
+        //case AutomationPhase.phase10:
+        //  await _phase10OpenPreviousOwnershipDropdown();
+        //case AutomationPhase.phase11:
+        //  await _phase11SelectPreviousOwnershipValue();
         case AutomationPhase.phase12:
           await _phase12EnterKilometers();
         case AutomationPhase.phase13:
@@ -208,10 +272,10 @@ class Yad2AccessibilityAutomationService {
       '[Yad2-A11y] Tool: toolFindElementAndTap("$targetText", instance=$targetInstance, deltaY=$deltaY)',
     );
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
-        'findAndGetBounds',
-        {'target': targetText, 'targetInstance': targetInstance},
-      );
+      final bounds = await _getStableBounds('findAndGetBounds', {
+        'target': targetText,
+        'targetInstance': targetInstance,
+      });
 
       if (bounds != null) {
         final physicalX = (bounds['x'] as num).toDouble();
@@ -256,10 +320,10 @@ class Yad2AccessibilityAutomationService {
       '[Yad2-A11y] Tool: toolEnterText("$targetText", value="$value")',
     );
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
-        'findAndGetBounds',
-        {'target': targetText, 'targetInstance': targetInstance},
-      );
+      final bounds = await _getStableBounds('findAndGetBounds', {
+        'target': targetText,
+        'targetInstance': targetInstance,
+      });
 
       if (bounds != null) {
         final physicalX = (bounds['x'] as num).toDouble();
@@ -295,10 +359,9 @@ class Yad2AccessibilityAutomationService {
       '[Yad2-A11y] Tool: toolEnterTextBefore("$targetText", value="$value")',
     );
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
-        'findInputBeforeAndGetBounds',
-        {'target': targetText},
-      );
+      final bounds = await _getStableBounds('findInputBeforeAndGetBounds', {
+        'target': targetText,
+      });
 
       if (bounds != null) {
         final physicalX = (bounds['x'] as num).toDouble();
@@ -340,10 +403,10 @@ class Yad2AccessibilityAutomationService {
       '[Yad2-A11y] Tool: toolTapNodeBefore("$targetText", instance=$targetInstance, deltaY=$deltaY)',
     );
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
-        'findNodeBeforeAndGetBounds',
-        {'target': targetText, 'targetInstance': targetInstance},
-      );
+      final bounds = await _getStableBounds('findNodeBeforeAndGetBounds', {
+        'target': targetText,
+        'targetInstance': targetInstance,
+      });
 
       if (bounds != null) {
         final physicalX = (bounds['x'] as num).toDouble();
@@ -390,13 +453,12 @@ class Yad2AccessibilityAutomationService {
       '[Yad2-A11y] Tool: toolTapNodeAfter("$targetText", instance=$targetInstance, deltaX=$deltaX, deltaY=$deltaY, offset=$offset)',
     );
     try {
-      final bounds = await _channel
-          .invokeMapMethod<String, dynamic>('findNodeAfterAndGetBounds', {
-            'target': targetText,
-            'targetInstance': targetInstance,
-            'threshold': threshold,
-            'offset': offset,
-          });
+      final bounds = await _getStableBounds('findNodeAfterAndGetBounds', {
+        'target': targetText,
+        'targetInstance': targetInstance,
+        'threshold': threshold,
+        'offset': offset,
+      });
 
       if (bounds != null) {
         final physicalX = (bounds['x'] as num).toDouble() + deltaX;
@@ -455,7 +517,68 @@ class Yad2AccessibilityAutomationService {
     } catch (e) {
       debugPrint('[Yad2-A11y] Scroll error: $e');
     }
-    await Future.delayed(const Duration(milliseconds: 1000));
+    await _waitForScrollSettle();
+  }
+
+  /// Waits for the scroll animation to finish before any element lookup:
+  /// polls the WebView scroll position until two consecutive readings agree,
+  /// then gives the accessibility tree an extra beat to refresh its bounds.
+  Future<void> _waitForScrollSettle({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    // Let the fling animation start before sampling.
+    await Future.delayed(const Duration(milliseconds: 600));
+    final deadline = DateTime.now().add(timeout);
+    double? last;
+    int nullReads = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      double? current;
+      try {
+        final res = await controller.runJavaScriptReturningResult(
+          '(window.scrollY || document.documentElement.scrollTop || 0)',
+        );
+        current = double.tryParse(res.toString());
+      } catch (_) {}
+      if (current == null) {
+        // JS unavailable (page transition) — don't burn the full timeout.
+        if (++nullReads >= 2) break;
+      } else if (last != null && (current - last).abs() < 1.0) {
+        break;
+      }
+      last = current;
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    // Buffer for the native accessibility tree to re-sync after the DOM stops.
+    await Future.delayed(const Duration(milliseconds: 300));
+  }
+
+  /// Fetches node bounds and re-reads until two consecutive readings agree,
+  /// so a tap never uses coordinates captured while the page is still moving
+  /// (e.g. right after a scroll or a layout shift).
+  Future<Map<String, dynamic>?> _getStableBounds(
+    String method,
+    Map<String, dynamic> args, {
+    int maxReads = 4,
+  }) async {
+    Map<String, dynamic>? previous;
+    for (int i = 0; i < maxReads; i++) {
+      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+        method,
+        args,
+      );
+      if (bounds == null) return null;
+      if (previous != null) {
+        final dx = ((bounds['x'] as num) - (previous['x'] as num)).abs();
+        final dy = ((bounds['y'] as num) - (previous['y'] as num)).abs();
+        if (dx < 2 && dy < 2) return bounds;
+        debugPrint(
+          '[Yad2-A11y] ⏳ Bounds still moving (Δx=$dx, Δy=$dy) — re-reading',
+        );
+      }
+      previous = bounds;
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    return previous;
   }
 
   Future<void> toolTapScreen(double x, double y) async {
@@ -546,8 +669,13 @@ class Yad2AccessibilityAutomationService {
   }
 
   /// Uses the Shadow HTML DOM logic to find an element by exact text and dispatches native React/JS click events
-  Future<bool> toolFindAndTapJs(String targetText) async {
-    debugPrint('[Yad2-A11y] Tool: toolFindAndTapJs($targetText)');
+  Future<bool> toolFindAndTapJs(
+    String targetText, {
+    int targetInstance = 1,
+  }) async {
+    debugPrint(
+      '[Yad2-A11y] Tool: toolFindAndTapJs($targetText, instance: $targetInstance)',
+    );
     final escaped = targetText.replaceAll("'", "\\'");
     final js = '''
       (function() {
@@ -564,16 +692,23 @@ class Yad2AccessibilityAutomationService {
         
         var targetEl = null;
         var targetRect = null;
+        var cleanTarget = '$escaped'.replace(/\\s+/g, '');
+        var matchCount = 0;
         for (var i = 0; i < all.length; i++) {
           var el = all[i];
           var rect = el.getBoundingClientRect();
           if (rect.width === 0 || rect.height === 0) continue;
           
           var text = (el.innerText || '').trim();
-          if (text === '$escaped') {
-            targetEl = el;
-            targetRect = rect;
-            break;
+          var cleanText = text.replace(/\\s+/g, '');
+          if (cleanText === cleanTarget) {
+            matchCount++;
+            if (matchCount === $targetInstance) {
+              targetEl = el;
+              try { targetEl.scrollIntoView({behavior: 'auto', block: 'center'}); } catch(e) {}
+              targetRect = targetEl.getBoundingClientRect();
+              break;
+            }
           }
         }
         
@@ -634,7 +769,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> _dismissMaybeLaterPopup() async {
-    const popupTexts = ['אולי אחר כך', 'אולי אחר כך', 'אולי אחר כך'];
+    const popupTexts = ['אולי אחר כך'];
     for (var text in popupTexts) {
       if (await toolFindElementAndTap(text, deltaY: -15)) {
         // Often needs a slight upward adjustment
@@ -680,13 +815,126 @@ class Yad2AccessibilityAutomationService {
   Future<bool> _performWithPopupHandling(Future<bool> Function() action) async {
     bool result = await action();
     if (!result) {
-      final dismissed = await _dismissGotItPopup();
+      bool dismissed = await _dismissGotItPopup();
+      if (!dismissed) {
+        dismissed = await _dismissMaybeLaterPopup();
+      }
       if (dismissed) {
         debugPrint('[Yad2-A11y] 🔄 Re-trying action after dismissing popup');
         result = await action();
       }
     }
     return result;
+  }
+
+  /// Polls [action] until it succeeds or [timeout] elapses.
+  ///
+  /// Replaces fixed sleeps and fixed-count loops: the phase proceeds as soon
+  /// as the UI is ready instead of waiting a guessed duration, yet tolerates
+  /// slow page loads up to [timeout]. [action] must only have side effects
+  /// on success (lookups that fail are pure), so re-polling is safe.
+  Future<bool> _retryUntil(
+    Future<bool> Function() action, {
+    Duration timeout = const Duration(seconds: 8),
+    Duration pollInterval = const Duration(milliseconds: 400),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    do {
+      if (_isPaused) return false;
+      if (await action()) return true;
+      await Future.delayed(pollInterval);
+    } while (DateTime.now().isBefore(deadline));
+    return false;
+  }
+
+  /// Pure native-tree lookup with no tap side effect — safe to poll.
+  Future<bool> _isElementPresent(
+    String target, {
+    int targetInstance = 1,
+  }) async {
+    try {
+      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+        'findAndGetBounds',
+        {'target': target, 'targetInstance': targetInstance},
+      );
+      return bounds != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Locator fallback ladder: native Accessibility tap first, then a
+  /// shadow-DOM JS click on each `|` alternative when the native tree
+  /// does not expose the element.
+  Future<bool> tapSmart(
+    String targetText, {
+    int targetInstance = 1,
+    double deltaY = 0,
+  }) async {
+    if (await toolFindElementAndTap(
+      targetText,
+      targetInstance: targetInstance,
+      deltaY: deltaY,
+    )) {
+      return true;
+    }
+    for (final alt in targetText.split('|')) {
+      final candidate = alt.trim();
+      if (candidate.isEmpty) continue;
+      if (await toolFindAndTapJs(candidate, targetInstance: targetInstance)) {
+        debugPrint(
+          '[Yad2-A11y] 🕸️ Shadow-DOM JS fallback clicked "$candidate"',
+        );
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _stopLoginGate() {
+    _loginSamplingTimer?.cancel();
+    _loginSamplingTimer = null;
+  }
+
+  /// Login gate: beep once to prompt the user, then silently poll until the
+  /// publish flow's first-step element appears (login completed) and
+  /// auto-resume. Deliberately NOT reported via [onPhaseError] — a login wall
+  /// is an expected state, not a failure, so no error UI is shown.
+  void _startLoginGate() {
+    if (_loginSamplingTimer != null) return;
+    debugPrint('[Yad2-A11y] 🔐 Login gate active — waiting for manual login');
+    _isPaused = true;
+    _pausedPhase = AutomationPhase.phase1;
+    unawaited(_beepUser());
+    _loginSamplingTimer = Timer.periodic(const Duration(seconds: 3), (
+      timer,
+    ) async {
+      // Popup dismissal takes longer than one tick — never overlap ticks.
+      if (_loginGateTickBusy) return;
+      _loginGateTickBusy = true;
+      try {
+        if (!await _isElementPresent('פרטיים ומסחריים')) {
+          // Post-login popups can cover the card and hide it from the
+          // native tree — dismiss them so the next tick can see it.
+          if (await _dismissGotItPopup()) {
+            debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "הבנתי" popup');
+            return;
+          }
+          if (await _dismissMaybeLaterPopup()) {
+            debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "אולי אחר כך" popup');
+          }
+          return;
+        }
+        debugPrint('[Yad2-A11y] 🎉 Login completed — resuming automation');
+        timer.cancel();
+        _loginSamplingTimer = null;
+        _isPaused = false;
+        _pausedPhase = null;
+        _processPhase(AutomationPhase.phase1);
+      } finally {
+        _loginGateTickBusy = false;
+      }
+    });
   }
 
   Future<bool> _checkIsLoginScreen() async {
@@ -739,73 +987,57 @@ class Yad2AccessibilityAutomationService {
   // ── Phase Implementations ────────────────────────────────────────────────
 
   Future<void> _phase1SelectVehicleType() async {
-    // Wait for initial load
-    await Future.delayed(const Duration(milliseconds: 650));
+    // Poll until the page settles — checking for blocking popups,
+    // login wall, or until either of the target screens is settled.
+    bool loginDetected = false;
+    await _retryUntil(
+      () async {
+        if (await _isElementPresent('פרטיים ומסחריים')) return true;
+        if (await _isElementPresent('חיפוש')) return true;
+        if (await _dismissGotItPopup()) return false; // re-poll after dismiss
+        if (await _dismissMaybeLaterPopup()) return false;
+        if (await _checkIsLoginScreen()) {
+          loginDetected = true;
+          return true;
+        }
+        return false;
+      },
+      timeout: const Duration(milliseconds: 800),
+      pollInterval: const Duration(milliseconds: 500),
+    );
 
-    if (await _checkIsLoginScreen()) {
-      _handleError(
-        AutomationPhase.phase1,
-        'Login screen detected. Please log in manually.',
-      );
+    if (loginDetected) {
+      _startLoginGate();
       return;
     }
 
-    // Dismiss the "Got it" popup first explicitly (in case it blocks taps but elements are still found)
-    await Future.delayed(const Duration(milliseconds: 800));
-    final dismissed = await _dismissGotItPopup();
-    if (dismissed) {
-      debugPrint(
-        '[Yad2-A11y] 🔄 Dismissed popup in phase 1, waiting before proceeding',
-      );
-      await Future.delayed(const Duration(milliseconds: 800));
-    }
-
-    // Dismiss the "Maybe later Install the app" first explicitly (in case it blocks taps but elements are still found)
-    await Future.delayed(const Duration(milliseconds: 800));
-    final dismissedLater = await _dismissMaybeLaterPopup();
-    if (dismissedLater) {
-      debugPrint(
-        '[Yad2-A11y] 🔄 Dismissed maybe later in phase 1, waiting before proceeding',
-      );
-      await Future.delayed(const Duration(milliseconds: 800));
-    }
-
-    // Log the entire accessibility tree so you can inspect what the service actually sees
-    // await toolLogAccessibilityTree();
-
-    // The text is at the bottom of the card. A deltaY of -180 taps exactly the center of the car image.
-    final success = await _performWithPopupHandling(
-      () => toolFindElementAndTap('פרטיים ומסחריים', deltaY: -180),
-    );
-    if (success) {
-      onFirstStepDetected?.call();
-      _handlePhaseComplete(AutomationPhase.phase1);
-    } else {
-      _handleRetry(
-        AutomationPhase.phase1,
-        'Could not find vehicle type button',
-      );
-    }
+    // Skip tapping the vehicle type button and transition directly to phase 2
+    onFirstStepDetected?.call();
+    _handlePhaseComplete(AutomationPhase.phase1);
   }
 
   Future<void> _phase2EnterLicenseAndSearch() async {
     // Log the entire accessibility tree to inspect the UI at phase 2
     // await toolLogTree();
-
+    await Future.delayed(const Duration(milliseconds: 800));
     // Handle reset popup ("resume existing publication" popup)
     if (await toolFindElementAndTap('התחלה מחדש|מחדש')) {
       debugPrint(
         '[Yad2-A11y] ⚠️ Reset popup found — tapped "מחדש" to start over.',
       );
       await Future.delayed(const Duration(milliseconds: 800));
-      _processPhase(AutomationPhase.phase1);
-      return;
+      //_processPhase(AutomationPhase.phase1);
+      //return;
     }
 
     final licenseText =
         formData.licenseNumber.isNotEmpty ? formData.licenseNumber : '5211639';
-    final entered = await _performWithPopupHandling(
-      () => toolEnterTextBefore('חיפוש', licenseText),
+    // The license form renders after a page transition — poll for it.
+    final entered = await _retryUntil(
+      () => _performWithPopupHandling(
+        () => toolEnterTextBefore('חיפוש', licenseText),
+      ),
+      timeout: const Duration(seconds: 8),
     );
     if (!entered) {
       _handleRetry(AutomationPhase.phase2, 'License input field not found');
@@ -817,15 +1049,17 @@ class Yad2AccessibilityAutomationService {
       return;
     }
 
-    await Future.delayed(const Duration(milliseconds: 1200));
-
     _handlePhaseComplete(AutomationPhase.phase2);
   }
 
   Future<void> _phase3SubmitVehicleLookup() async {
-    if (!await _performWithPopupHandling(
-      () => toolFindElementAndTap('לשלב הבא|שלב הבא'),
-    )) {
+    // The vehicle lookup runs server-side after phase 2 — poll for the next
+    // button instead of guessing the latency with a fixed sleep.
+    final tapped = await _retryUntil(
+      () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא')),
+      timeout: const Duration(seconds: 12),
+    );
+    if (!tapped) {
       _handleRetry(AutomationPhase.phase3, 'Submit button לשלב not found');
       return;
     }
@@ -833,12 +1067,24 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase4OpenColorDropdown() async {
-    await Future.delayed(const Duration(milliseconds: 800));
-    await toolLogTree();
-    if (await _performWithPopupHandling(
-      () => toolTapNodeBefore(formData.color),
-    )) {
-      await Future.delayed(const Duration(milliseconds: 400));
+    // The details form renders after a page transition — poll instead of
+    // a fixed sleep + full-tree dump.
+    // OLD CODE:
+    // final opened = await _retryUntil(
+    //   () => _performWithPopupHandling(() => toolTapNodeBefore(formData.color)),
+    //   timeout: const Duration(seconds: 10),
+    // );
+    final opened = await _retryUntil(
+      () => _performWithPopupHandling(() async {
+        if (await toolTapNodeAfter('צבע*')) return true;
+        if (await toolTapNodeAfter('צבע')) return true;
+        if (await toolTapNodeAfter('צבע הרכב*')) return true;
+        if (await toolTapNodeAfter('צבע הרכב')) return true;
+        return false;
+      }),
+      timeout: const Duration(seconds: 10),
+    );
+    if (opened) {
       _handlePhaseComplete(AutomationPhase.phase4);
       return;
     }
@@ -846,28 +1092,75 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase5SelectColorShade() async {
-    await _scrollDown(0.25);
-    if (await _performWithPopupHandling(
-      () => toolTapNodeBefore(formData.color, targetInstance: 2),
-    )) {
-      await Future.delayed(const Duration(milliseconds: 400));
+    // OLD CODE:
+    // await _scrollDown(0.25);
+    // final selected = await _retryUntil(
+    //   () => _performWithPopupHandling(
+    //     () => toolTapNodeBefore(formData.color, targetInstance: 2),
+    //   ),
+    //   timeout: const Duration(seconds: 6),
+    // );
+
+    final colorSelected = await _retryUntil(
+      () => _performWithPopupHandling(() => tapSmart(formData.color)),
+      timeout: const Duration(seconds: 6),
+    );
+    if (!colorSelected) {
+      _handleRetry(AutomationPhase.phase5, 'Main color option failed to click');
+      return;
+    }
+
+    // Wait for the dropdown to close and the "גוון" field to appear/render
+    await Future.delayed(const Duration(milliseconds: 800));
+
+    // Tap the "גוון" dropdown container to open the shade picker
+    final shadeDropdownOpened = await _retryUntil(
+      () => _performWithPopupHandling(() async {
+        if (await toolTapNodeAfter('גוון*')) return true;
+        if (await toolTapNodeAfter('גוון')) return true;
+        return false;
+      }),
+      timeout: const Duration(seconds: 8),
+    );
+    if (!shadeDropdownOpened) {
+      _handleRetry(
+        AutomationPhase.phase5,
+        'Shade (גוון) dropdown failed to open',
+      );
+      return;
+    }
+
+    // Wait for the shade dropdown options to appear/animate open
+    await Future.delayed(const Duration(milliseconds: 1000));
+
+    // Select the shade value (formData.shade) from the open shade dropdown list
+    debugPrint('Yad2-A11y - aric: Tapping shade: ${formData.shade}');
+    final shadeSelected = await _retryUntil(
+      () => _performWithPopupHandling(() async {
+        if (await tapSmart(formData.shade, targetInstance: 2)) return true;
+        return false;
+      }),
+      timeout: const Duration(seconds: 6),
+    );
+
+    if (shadeSelected) {
       _handlePhaseComplete(AutomationPhase.phase5);
       return;
     }
-    _handleRetry(AutomationPhase.phase5, 'Color shade option failed to click');
+    _handleRetry(AutomationPhase.phase5, 'Shade (גוון) option failed to click');
   }
 
   Future<void> _phase5aOpenMonthDropdown() async {
-    await _scrollDown(0.35);
+    //await _scrollDown(0.35);
 
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolTapNodeAfter('חודש עלייה לכביש'),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 700));
-        _handlePhaseComplete(AutomationPhase.phase5a);
-        return;
-      }
+    final opened = await _retryUntil(
+      () =>
+          _performWithPopupHandling(() => toolTapNodeAfter('חודש עלייה לכביש')),
+      timeout: const Duration(seconds: 8),
+    );
+    if (opened) {
+      _handlePhaseComplete(AutomationPhase.phase5a);
+      return;
     }
     _handleRetry(AutomationPhase.phase5a, 'Month dropdown failed to open');
   }
@@ -879,10 +1172,13 @@ class Yad2AccessibilityAutomationService {
             ? '$monthHebrew|${formData.month.trim()}'
             : monthHebrew;
 
-    if (await _performWithPopupHandling(
-      () => toolFindElementAndTap(monthSearch),
-    )) {
-      await Future.delayed(const Duration(milliseconds: 300));
+    // The option list animates open after phase 5a — poll for the value,
+    // with a shadow-DOM JS click fallback for options the native tree misses.
+    final selected = await _retryUntil(
+      () => _performWithPopupHandling(() => tapSmart(monthSearch)),
+      timeout: const Duration(seconds: 6),
+    );
+    if (selected) {
       _handlePhaseComplete(AutomationPhase.phase5b);
       return;
     }
@@ -892,20 +1188,136 @@ class Yad2AccessibilityAutomationService {
 
   Future<void> _phase5cCheckNoTest() async {
     if (formData.noTest) {
-      await toolFindElementAndTap('ללא טסט');
-      await Future.delayed(const Duration(milliseconds: 650));
+      await _retryUntil(
+        () => tapSmart('ללא טסט'),
+        timeout: const Duration(seconds: 4),
+      );
     }
     _handlePhaseComplete(AutomationPhase.phase5c);
   }
 
-  Future<void> _phase6OpenHandDropdown() async {
-    await _scrollDown(0.35);
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(() => toolTapNodeAfter('יד*'))) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase6);
-        return;
+  String _getWarrantyDropdownLabel(String warranty) {
+    if (warranty.contains('שלדה')) return 'אחריות שלדה, מנוע וגיר';
+    if (warranty.contains('יבואן')) return 'אחריות מהיבואן';
+    if (warranty.contains('סוכנות')) return 'אחריות מהסוכנות';
+    if (warranty.contains('סוללה')) return 'אחירות על סוללה'; // user typo match
+    return warranty;
+  }
+
+  Future<void> _phase5dWarranties() async {
+    await _scrollDown(0.2);
+    await _fetchSettingsIfNeeded();
+    debugPrint('[Yad2-A11y] 🔧 Phase 5d: Filling warranties');
+    debugPrint('[Yad2-A11y]   Selected warranties: $_warranties');
+    debugPrint('[Yad2-A11y]   Warranty durations: $_warrantyDurations');
+    if (_warranties.isNotEmpty) {
+      await _scrollDown(0.2);
+
+      Map<String, int> durationSelectionCounts = {};
+
+      Future<void> processWarrantiesList(List<String> list) async {
+        for (final warranty in list) {
+          // 1. Select the warranty checkbox
+          await _retryUntil(
+            () => tapSmart(warranty),
+            timeout: const Duration(seconds: 4),
+          );
+
+          // Wait a moment for the specific dropdown for this warranty to dynamically appear
+          await Future.delayed(const Duration(milliseconds: 1000));
+
+          // 2. Select the duration for THIS warranty before moving to the next
+          final duration = _warrantyDurations[warranty];
+          if (duration != null && duration.isNotEmpty) {
+            final cleanDuration = duration.trim();
+            final instanceIndex =
+                (durationSelectionCounts[cleanDuration] ?? 0) + 1;
+            durationSelectionCounts[cleanDuration] = instanceIndex;
+
+            await _scrollDown(
+              0.1,
+            ); // add some scroll down to reach the newly appeared dropdown
+
+            // Tap the dropdown using toolTapNodeAfter on the parent label
+            final label = _getWarrantyDropdownLabel(warranty);
+            await toolLogTree();
+            final dropdownOpened = await _retryUntil(
+              () => _performWithPopupHandling(
+                () => toolTapNodeAfter(label) /* fallback if needed */,
+              ),
+              timeout: const Duration(seconds: 3),
+            );
+
+            // The dropdown opens, now select the duration
+            if (dropdownOpened) {
+              await Future.delayed(const Duration(milliseconds: 500));
+              debugPrint('Tap duration $duration with instance $instanceIndex');
+              await _retryUntil(
+                () => tapSmart(duration, targetInstance: instanceIndex),
+                timeout: const Duration(seconds: 3),
+              );
+            } else {
+              // Alternatively, try tapping the duration directly if it's already visible
+              await _retryUntil(
+                () => tapSmart(duration, targetInstance: instanceIndex),
+                timeout: const Duration(seconds: 3),
+              );
+            }
+          }
+        }
       }
+
+      final batteryWarranties =
+          _warranties.where((w) => w == 'אחריות על הסוללה').toList();
+      final otherWarranties =
+          _warranties.where((w) => w != 'אחריות על הסוללה').toList();
+
+      if (batteryWarranties.isNotEmpty) {
+        await processWarrantiesList(batteryWarranties);
+      }
+      if (otherWarranties.isNotEmpty) {
+        await processWarrantiesList(otherWarranties);
+      }
+    }
+    _handlePhaseComplete(AutomationPhase.phase5d);
+  }
+
+  Future<void> _phase5eTreatments() async {
+    await _fetchSettingsIfNeeded();
+    if (_treatments.isNotEmpty) {
+      await _scrollDown(0.2);
+      for (final treatment in _treatments) {
+        await _retryUntil(
+          () => tapSmart(treatment),
+          timeout: const Duration(seconds: 3),
+        );
+      }
+    }
+    _handlePhaseComplete(AutomationPhase.phase5e);
+  }
+
+  Future<void> _phase5fServices() async {
+    await _fetchSettingsIfNeeded();
+    if (_services.isNotEmpty) {
+      await _scrollDown(0.2);
+      for (final service in _services) {
+        await _retryUntil(
+          () => tapSmart(service),
+          timeout: const Duration(seconds: 3),
+        );
+      }
+    }
+    _handlePhaseComplete(AutomationPhase.phase5f);
+  }
+
+  Future<void> _phase6OpenHandDropdown() async {
+    final opened = await _retryUntil(
+      () => _performWithPopupHandling(() => toolTapNodeAfter('יד*')),
+      timeout: const Duration(seconds: 8),
+    );
+    if (opened) {
+      _handlePhaseComplete(AutomationPhase.phase6);
+      return;
     }
     _handleRetry(AutomationPhase.phase6, 'Hand dropdown label not found');
   }
@@ -917,27 +1329,25 @@ class Yad2AccessibilityAutomationService {
     final handSearch =
         handParts.length > 1 ? '$handFull|${handParts.last}' : handFull;
 
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolFindElementAndTap(handSearch),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase7);
-        return;
-      }
+    final selected = await _retryUntil(
+      () => _performWithPopupHandling(() => tapSmart(handSearch)),
+      timeout: const Duration(seconds: 6),
+    );
+    if (selected) {
+      _handlePhaseComplete(AutomationPhase.phase7);
+      return;
     }
     _handleRetry(AutomationPhase.phase7, 'Hand value option not found');
   }
 
   Future<void> _phase8OpenCurrentOwnershipDropdown() async {
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolTapNodeAfter('בעלות נוכחית'),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase8);
-        return;
-      }
+    final opened = await _retryUntil(
+      () => _performWithPopupHandling(() => toolTapNodeAfter('בעלות נוכחית')),
+      timeout: const Duration(seconds: 8),
+    );
+    if (opened) {
+      _handlePhaseComplete(AutomationPhase.phase8);
+      return;
     }
     _handleRetry(
       AutomationPhase.phase8,
@@ -946,14 +1356,14 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase9SelectCurrentOwnershipValue() async {
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolFindElementAndTap(formData.currentOwnership),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase9);
-        return;
-      }
+    final selected = await _retryUntil(
+      () =>
+          _performWithPopupHandling(() => tapSmart(formData.currentOwnership)),
+      timeout: const Duration(seconds: 6),
+    );
+    if (selected) {
+      _handlePhaseComplete(AutomationPhase.phase9);
+      return;
     }
     _handleRetry(
       AutomationPhase.phase9,
@@ -962,14 +1372,13 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase10OpenPreviousOwnershipDropdown() async {
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolTapNodeAfter('בעלות מקורית'),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase10);
-        return;
-      }
+    final opened = await _retryUntil(
+      () => _performWithPopupHandling(() => toolTapNodeAfter('בעלות מקורית')),
+      timeout: const Duration(seconds: 8),
+    );
+    if (opened) {
+      _handlePhaseComplete(AutomationPhase.phase10);
+      return;
     }
     _handleRetry(
       AutomationPhase.phase10,
@@ -978,14 +1387,14 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase11SelectPreviousOwnershipValue() async {
-    for (int i = 0; i < 3; i++) {
-      if (await _performWithPopupHandling(
-        () => toolFindElementAndTap(formData.previousOwnership),
-      )) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        _handlePhaseComplete(AutomationPhase.phase11);
-        return;
-      }
+    final selected = await _retryUntil(
+      () =>
+          _performWithPopupHandling(() => tapSmart(formData.previousOwnership)),
+      timeout: const Duration(seconds: 6),
+    );
+    if (selected) {
+      _handlePhaseComplete(AutomationPhase.phase11);
+      return;
     }
     _handleRetry(
       AutomationPhase.phase11,
@@ -995,15 +1404,19 @@ class Yad2AccessibilityAutomationService {
 
   Future<void> _phase12EnterKilometers() async {
     await _scrollDown(0.2);
-    if (!await _performWithPopupHandling(() async {
-      if (await toolTapNodeAfter('קילומטראז')) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        // Use JS injection to avoid native paste doubling issues on masked fields
-        await toolEnterTextAtFocusedJs(formData.kilometers);
-        return true;
-      }
-      return false;
-    })) {
+    final entered = await _retryUntil(
+      () => _performWithPopupHandling(() async {
+        if (await toolTapNodeAfter('קילומטראז')) {
+          await Future.delayed(const Duration(milliseconds: 650));
+          // Use JS injection to avoid native paste doubling issues on masked fields
+          await toolEnterTextAtFocusedJs(formData.kilometers);
+          return true;
+        }
+        return false;
+      }),
+      timeout: const Duration(seconds: 8),
+    );
+    if (!entered) {
       _handleRetry(AutomationPhase.phase12, 'Kilometers input field not found');
       return;
     }
@@ -1017,14 +1430,17 @@ class Yad2AccessibilityAutomationService {
 
   Future<void> _phase13Disability() async {
     if (formData.handicapped) {
-      toolFindElementAndTap('מותאם לנכים');
+      await _retryUntil(
+        () => tapSmart('מותאם לנכים'),
+        timeout: const Duration(seconds: 4),
+      );
     }
 
     _handlePhaseComplete(AutomationPhase.phase13);
   }
 
   Future<void> _phase14EnterAdditionalInfo() async {
-    await _scrollDown(0.4);
+    await _scrollDown(0.1);
     // 1. Check for PRE-submit popup
     if (await toolFindElementAndTap(
       'עדכנתי, בוא נמשיך|עדכנתי|בוא נמשיך',
@@ -1034,12 +1450,16 @@ class Yad2AccessibilityAutomationService {
         '[Yad2-A11y] 👆 Tapped "עדכנתי בוא נמשיך" popup button before submit...',
       );
       await Future.delayed(const Duration(milliseconds: 800));
-      await _scrollDown(0.75);
+      await _scrollDown(0.2);
     } else {
-      await _scrollDown(0.75);
+      await _scrollDown(0.2);
     }
 
-    if (!await toolFindElementAndTap('לשלב הבא|שלב הבא')) {
+    final submitted = await _retryUntil(
+      () => tapSmart('לשלב הבא|שלב הבא'),
+      timeout: const Duration(seconds: 8),
+    );
+    if (!submitted) {
       _handleRetry(AutomationPhase.phase14, 'Submit button לשלב הבא not found');
       return;
     }
@@ -1055,7 +1475,7 @@ class Yad2AccessibilityAutomationService {
         '[Yad2-A11y] 👆 Tapped "עדכנתי בואו נמשיך" popup button post-submit...',
       );
       await Future.delayed(const Duration(milliseconds: 1500));
-      await _scrollDown(0.75);
+      await _scrollDown(0.2);
       await Future.delayed(const Duration(milliseconds: 650));
 
       if (await toolFindElementAndTap('לשלב הבא|שלב הבא')) {
@@ -1074,7 +1494,11 @@ class Yad2AccessibilityAutomationService {
         cityVal.length > 1 ? cityVal.substring(0, cityVal.length - 1) : cityVal;
 
     // 1. Tap the initial city field to open the autocomplete search UI
-    if (!await _performWithPopupHandling(() => toolTapNodeAfter('ישוב*'))) {
+    final fieldTapped = await _retryUntil(
+      () => _performWithPopupHandling(() => toolTapNodeAfter('ישוב*')),
+      timeout: const Duration(seconds: 8),
+    );
+    if (!fieldTapped) {
       _handleRetry(AutomationPhase.phase15, 'City input label not found');
       return;
     }
@@ -1089,33 +1513,35 @@ class Yad2AccessibilityAutomationService {
       await Future.delayed(const Duration(milliseconds: 300));
     }
 
-    // Wait for the autocomplete API to fetch and render the list below
-    await Future.delayed(const Duration(milliseconds: 650));
-
-    // Dump the accessibility tree to log so we can inspect it
-    // await toolLogAccessibilityTree();
-
-    // 4. Tap the dropdown item (the user found it's the 4th/5th meaningful element after the label)
-    if (await toolFindElementAndTap(cityVal)) {
-      await Future.delayed(const Duration(milliseconds: 650));
+    // 4. Poll for the dropdown suggestion — the autocomplete API latency
+    // varies, so a fixed wait either wastes time or fires too early.
+    final picked = await _retryUntil(
+      () => tapSmart(cityVal),
+      timeout: const Duration(seconds: 8),
+    );
+    if (picked) {
       _handlePhaseComplete(AutomationPhase.phase15);
       return;
     }
 
-    //_handleRetry(AutomationPhase.phase15, 'City value option not found');
+    _handleRetry(AutomationPhase.phase15, 'City value option not found');
   }
 
   Future<void> _phase16EnterPrice() async {
     debugPrint('[Yad2-A11y] Entered Price logic');
     final priceText = formData.price.isNotEmpty ? formData.price : '80000';
-    if (!await _performWithPopupHandling(() async {
-      if (await toolTapNodeAfter('מחיר', offset: 1)) {
-        await Future.delayed(const Duration(milliseconds: 650));
-        await toolEnterTextAtFocusedJs(priceText);
-        return true;
-      }
-      return false;
-    })) {
+    final entered = await _retryUntil(
+      () => _performWithPopupHandling(() async {
+        if (await toolTapNodeAfter('מחיר', offset: 1)) {
+          await Future.delayed(const Duration(milliseconds: 650));
+          await toolEnterTextAtFocusedJs(priceText);
+          return true;
+        }
+        return false;
+      }),
+      timeout: const Duration(seconds: 8),
+    );
+    if (!entered) {
       _handleRetry(AutomationPhase.phase16, 'Price input field not found');
       return;
     }
@@ -1126,11 +1552,18 @@ class Yad2AccessibilityAutomationService {
 
     await _scrollDown(0.5);
 
-    if (await toolFindElementAndTap('לשלב הבא|שלב הבא|לשלב')) {
-      await Future.delayed(const Duration(milliseconds: 1500));
+    final submitted = await _retryUntil(
+      () => tapSmart('לשלב הבא|שלב הבא|לשלב'),
+      timeout: const Duration(seconds: 8),
+    );
+    if (submitted) {
       _handlePhaseComplete(AutomationPhase.phase16);
       return;
     }
+    _handleRetry(
+      AutomationPhase.phase16,
+      'Submit button after price not found',
+    );
   }
 
   Future<void> _phase17() async {
@@ -1226,9 +1659,13 @@ class Yad2AccessibilityAutomationService {
     await _scrollDown(0.75);
     await Future.delayed(const Duration(milliseconds: 650));
 
-    if (!await _performWithPopupHandling(
-      () => toolFindElementAndTap('לשלב הבא|שלב הבא|המשך|לשלב'),
-    )) {
+    final submitted = await _retryUntil(
+      () => _performWithPopupHandling(
+        () => tapSmart('לשלב הבא|שלב הבא|המשך|לשלב'),
+      ),
+      timeout: const Duration(seconds: 10),
+    );
+    if (!submitted) {
       _handleRetry(
         AutomationPhase.phase17,
         'Submit button not found on photos page',
@@ -1276,7 +1713,19 @@ class Yad2AccessibilityAutomationService {
         delayMs = 500;
         break;
       case AutomationPhase.phase5c:
-        next = AutomationPhase.phase6;
+        next = AutomationPhase.phase5d;
+        delayMs = 700;
+        break;
+      case AutomationPhase.phase5d:
+        next = AutomationPhase.phase5e;
+        delayMs = 700;
+        break;
+      case AutomationPhase.phase5e:
+        next = AutomationPhase.phase5f;
+        delayMs = 700;
+        break;
+      case AutomationPhase.phase5f:
+        next = AutomationPhase.phase12;
         delayMs = 700;
         break;
       case AutomationPhase.phase6:
@@ -1361,10 +1810,13 @@ class Yad2AccessibilityAutomationService {
     }
     if (_phaseRetryCount < _maxRetries) {
       _phaseRetryCount++;
+      // Escalating backoff: later retries usually fail because the page is
+      // still loading, so give it progressively more time to settle.
+      final backoffMs = 1000 * _phaseRetryCount;
       debugPrint(
-        '[Yad2-A11y] 🔄 Retrying phase $_phaseRetryCount/$_maxRetries — $reason',
+        '[Yad2-A11y] 🔄 Retrying phase $_phaseRetryCount/$_maxRetries in ${backoffMs}ms — $reason',
       );
-      Future.delayed(const Duration(milliseconds: 1000), () {
+      Future.delayed(Duration(milliseconds: backoffMs), () {
         _executePhase(phase);
       });
     } else {

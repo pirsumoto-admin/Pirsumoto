@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:typed_data';
+import 'package:http/http.dart' as http;
 import 'package:easy_localization/easy_localization.dart' hide TextDirection;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -18,6 +20,7 @@ import '../listings/listings_screen.dart';
 import '../profile/profile_screen.dart';
 import '../settings/settings_screen.dart';
 import '../publish/yad2_screen.dart';
+import '../publish/facebook_screen.dart';
 import '../../services/yad2_automation_service.dart';
 // import 'package:flutter_gemma/flutter_gemma.dart';
 // import '../../services/gemma_service.dart';
@@ -334,6 +337,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _priceController = TextEditingController();
   final _handicappedController = ValueNotifier<bool>(false);
   final _noTestController = ValueNotifier<bool>(false);
+  final _vehicleConditionController = TextEditingController();
+  final List<String> _conditions = ['מצוין', 'טוב מאוד', 'טוב', 'סביר', 'גרוע'];
 
   final List<String> _months = List.generate(12, (i) => (i + 1).toString());
   final List<String> _years = List.generate(
@@ -371,8 +376,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
 
   /// Tracks whether the user has explicitly chosen an input mode
   bool _modeSelected = false;
-  bool _isPublishing = false;
+  bool _isProcessing = false;
   bool _isFetchingVehicle = false;
+  bool _hasSearchedSuccessfully = false;
+  bool _isPublishing = false;
   bool _useGemmaAutomation = true; // Use Gemma Automation for testing
 
   @override
@@ -382,6 +389,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _testYearController.text = (DateTime.now().year + 1).toString();
     _handicappedController.value = false;
     _noTestController.value = false;
+    _vehicleConditionController.text = 'טוב';
   }
 
   @override
@@ -398,6 +406,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _priceController.dispose();
     _handicappedController.dispose();
     _noTestController.dispose();
+    _vehicleConditionController.dispose();
     super.dispose();
   }
 
@@ -419,6 +428,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _kmController.text = s.km;
     _priceController.text = s.price;
     _handicappedController.value = s.handicapped == 'כן';
+    _vehicleConditionController.text =
+        s.vehicleCondition.isNotEmpty ? s.vehicleCondition : 'טוב';
   }
 
   void _syncControllersFromAIData(Map<String, dynamic> data) {
@@ -459,6 +470,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     if (data['handicapped'] != null) {
       _handicappedController.value = data['handicapped'].toString() == 'כן';
     }
+    if (data['vehicleCondition'] != null) {
+      _vehicleConditionController.text = data['vehicleCondition'].toString();
+    }
   }
 
   // ── License plate lookup ──────────────────────────────────────────────────
@@ -468,36 +482,441 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     fp.FormController notifier,
   ) async {
     if (license.length < 7) return;
+
+    setState(() {
+      _hasSearchedSuccessfully = false;
+    });
+
+    // Clear form except license
+    notifier.clearForm();
+    notifier.updateField('license', license);
+    notifier.toggleTypingMode();
+
+    _colorController.clear();
+    _monthController.clear();
+    _testMonthController.text = DateTime.now().month.toString();
+    _testYearController.text = (DateTime.now().year + 1).toString();
+    _handController.clear();
+    _ownershipController.clear();
+    _prevOwnershipController.clear();
+    _kmController.clear();
+    _priceController.clear();
+    _handicappedController.value = false;
+    _noTestController.value = false;
+    _vehicleConditionController.text = 'טוב';
+
     setState(() => _isFetchingVehicle = true);
-    final data = await VehicleDataService.fetchVehicleData(license);
-    if (data != null && mounted) {
-      notifier.updateField('maker', data['maker'] ?? '');
-      notifier.updateField('model', data['model'] ?? '');
-      notifier.updateField('year', data['year'] ?? '');
-      notifier.updateField('ownership', data['ownership'] ?? '');
-      if ((data['testExpiry'] ?? '').isNotEmpty) {
-        final testExpiry = data['testExpiry']!;
-        notifier.updateField('test', testExpiry);
-        if (testExpiry.contains(',')) {
-          final parts = testExpiry.split(',');
-          if (parts.length == 2) {
-            _testMonthController.text = parts[0];
-            _testYearController.text = parts[1];
+
+    try {
+      final url =
+          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$license%5D%7D';
+      final response = await http.get(Uri.parse(url));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        final result = decoded['result'];
+        final records = result['records'] as List;
+
+        if (records.isNotEmpty) {
+          final data = records.first;
+
+          final maker = data['tozeret_nm']?.toString() ?? '';
+          final model =
+              data['kinuy_mishari']?.toString() ??
+              data['degem_nm']?.toString() ??
+              '';
+          final year = data['shnat_yitzur']?.toString() ?? '';
+          final fuelType = data['sug_delek_nm']?.toString() ?? '';
+          notifier.updateField('maker', maker);
+          notifier.updateField('model', model);
+          notifier.updateField('year', year);
+          notifier.updateField('fuelType', fuelType);
+
+          final fullColor = data['tzeva_rechev']?.toString() ?? '';
+          if (fullColor.isNotEmpty) {
+            final colorPart = fullColor.split(' ').first;
+            _colorController.text = colorPart;
           }
+
+          final moed = data['moed_aliya_lakvish']?.toString() ?? '';
+          if (moed.contains('-')) {
+            final monthStr = moed.split('-').last;
+            _monthController.text =
+                int.tryParse(monthStr)?.toString() ?? monthStr;
+          }
+
+          final tokef = data['tokef_dt']?.toString() ?? '';
+          if (tokef.contains('-')) {
+            final parts = tokef.split('-');
+            if (parts.length >= 2) {
+              final testY = parts[0];
+              final testM = int.tryParse(parts[1])?.toString() ?? parts[1];
+              notifier.updateField('test', '$testM,$testY');
+              _testMonthController.text = testM;
+              _testYearController.text = testY;
+            }
+          }
+
+          var baalut = data['baalut']?.toString() ?? '';
+          if (baalut == 'פרטי') baalut = 'פרטית';
+          if (_ownerships.contains(baalut)) {
+            _ownershipController.text = baalut;
+            notifier.updateField('ownership', baalut);
+          }
+
+          if (mounted) {
+            setState(() {
+              _hasSearchedSuccessfully = true;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'נמצא: $maker $model $year',
+                  textAlign: TextAlign.right,
+                ),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        } else if (mounted) {
+          setState(() {
+            _hasSearchedSuccessfully = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'לא נמצאו נתונים עבור רכב זה',
+                textAlign: TextAlign.right,
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
         }
+      } else {
+        throw Exception('Failed to fetch data');
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'נמצא: ${data['maker']} ${data['model']} ${data['year']}',
-            textAlign: TextAlign.right,
+    } catch (e) {
+      debugPrint('Error fetching vehicle data: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('שגיאה במשיכת נתוני רכב', textAlign: TextAlign.right),
+            backgroundColor: Colors.red,
           ),
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 2),
-        ),
-      );
+        );
+      }
     }
+
     if (mounted) setState(() => _isFetchingVehicle = false);
+  }
+
+  void _showQuickPublishDialog() {
+    final quickLicenseCtrl = TextEditingController();
+    final quickKmCtrl = TextEditingController();
+    final quickPriceCtrl = TextEditingController();
+    bool isProcessing = false;
+    String errorText = '';
+    List<String?> quickImages = [null, null, null];
+    String selectedCondition = 'טוב';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16),
+              title: const Text('פרסום מהיר', textAlign: TextAlign.right),
+              content: SizedBox(
+                width: MediaQuery.of(context).size.width,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (errorText.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8.0),
+                          child: Text(
+                            errorText,
+                            style: const TextStyle(color: Colors.red),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      TextField(
+                        controller: quickLicenseCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'מספר רישוי',
+                          alignLabelWithHint: true,
+                          counterText: '',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 18,
+                          ),
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        maxLength: 8,
+                        textAlign: TextAlign.right,
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: quickKmCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'שעון (ק"מ)',
+                          alignLabelWithHint: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 18,
+                          ),
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        textAlign: TextAlign.right,
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: quickPriceCtrl,
+                        decoration: InputDecoration(
+                          labelText: 'מחיר (₪)',
+                          alignLabelWithHint: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 18,
+                          ),
+                        ),
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                        textAlign: TextAlign.right,
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: selectedCondition,
+                        decoration: InputDecoration(
+                          labelText: 'מצב הרכב',
+                          alignLabelWithHint: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 18,
+                          ),
+                        ),
+                        dropdownColor: Colors.white,
+                        items:
+                            ['מצוין', 'טוב מאוד', 'טוב', 'סביר', 'גרוע'].map((
+                              String item,
+                            ) {
+                              return DropdownMenuItem<String>(
+                                value: item,
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Text(
+                                    item,
+                                    style: const TextStyle(color: Colors.black),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                        onChanged: (String? val) {
+                          if (val != null) {
+                            setDialogState(() {
+                              selectedCondition = val;
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'תמונות (עד 3)',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children:
+                            List.generate(3, (i) {
+                              return Expanded(
+                                child: GestureDetector(
+                                  onTap: () async {
+                                    try {
+                                      final img = await _picker.pickImage(
+                                        source: ImageSource.gallery,
+                                      );
+                                      if (img != null) {
+                                        setDialogState(() {
+                                          quickImages[i] = img.path;
+                                        });
+                                      }
+                                    } catch (e) {
+                                      debugPrint('Error picking image: $e');
+                                    }
+                                  },
+                                  child: Container(
+                                    margin: EdgeInsets.only(
+                                      left: i < 2 ? 8.0 : 0,
+                                    ),
+                                    height: 80,
+                                    decoration: BoxDecoration(
+                                      border: Border.all(
+                                        color: Colors.grey.shade400,
+                                      ),
+                                      borderRadius: BorderRadius.circular(8),
+                                      image:
+                                          quickImages[i] != null
+                                              ? DecorationImage(
+                                                image: FileImage(
+                                                  File(quickImages[i]!),
+                                                ),
+                                                fit: BoxFit.cover,
+                                              )
+                                              : null,
+                                    ),
+                                    child:
+                                        quickImages[i] == null
+                                            ? const Icon(
+                                              Icons.add_a_photo,
+                                              color: Colors.grey,
+                                            )
+                                            : null,
+                                  ),
+                                ),
+                              );
+                            }).reversed.toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isProcessing ? null : () => Navigator.pop(ctx),
+                  child: const Text('ביטול'),
+                ),
+                ElevatedButton(
+                  onPressed:
+                      isProcessing
+                          ? null
+                          : () async {
+                            final license = quickLicenseCtrl.text;
+                            final km = quickKmCtrl.text;
+                            final price = quickPriceCtrl.text;
+
+                            if (license.length < 7 || license.length > 8) {
+                              setDialogState(
+                                () =>
+                                    errorText =
+                                        'מספר רישוי חייב להיות 7 או 8 ספרות',
+                              );
+                              return;
+                            }
+                            if (km.isEmpty) {
+                              setDialogState(
+                                () => errorText = 'נא להזין קילומטראז׳',
+                              );
+                              return;
+                            }
+                            if (price.isEmpty) {
+                              setDialogState(() => errorText = 'נא להזין מחיר');
+                              return;
+                            }
+
+                            setDialogState(() {
+                              errorText = '';
+                              isProcessing = true;
+                            });
+
+                            final notifier = ref.read(
+                              fp.formControllerProvider.notifier,
+                            );
+                            await _onLicenseSubmitted(license, notifier);
+
+                            if (!mounted) return;
+
+                            if (_hasSearchedSuccessfully) {
+                              _kmController.text = km;
+                              _priceController.text = price;
+                              _vehicleConditionController.text =
+                                  selectedCondition;
+                              notifier.updateField('km', km);
+                              notifier.updateField('price', price);
+                              notifier.updateField(
+                                'vehicleCondition',
+                                selectedCondition,
+                              );
+
+                              for (final img in quickImages) {
+                                if (img != null) notifier.addImage(img);
+                              }
+
+                              Navigator.pop(ctx);
+                              await _publishListing(skipImagePrompt: false);
+                            } else {
+                              Navigator.pop(ctx);
+
+                              setState(() {
+                                _modeSelected = true;
+                              });
+                              if (!ref
+                                  .read(fp.formControllerProvider)
+                                  .isTypingMode) {
+                                notifier.toggleTypingMode();
+                              }
+
+                              _licenseController.text = license;
+                              _kmController.text = km;
+                              _priceController.text = price;
+                              _vehicleConditionController.text =
+                                  selectedCondition;
+                              notifier.updateField('km', km);
+                              notifier.updateField('price', price);
+                              notifier.updateField(
+                                'vehicleCondition',
+                                selectedCondition,
+                              );
+
+                              for (final img in quickImages) {
+                                if (img != null) notifier.addImage(img);
+                              }
+                            }
+                          },
+                  child:
+                      isProcessing
+                          ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                          : const Text('פרסום'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   // ── Image picker ──────────────────────────────────────────────────────────
@@ -553,46 +972,293 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     // If cancelled: recording stopped, _modeSelected stays false → no card highlighted
   }
 
-  // ── Publish ───────────────────────────────────────────────────────────────
-
-  Future<void> _publishListing() async {
-    final formState = ref.read(fp.formControllerProvider);
-    final user = ref.read(authStateProvider).valueOrNull;
-
-    if (user == null || _licenseController.text.length < 7) {
+  // ── Facebook automation test ─────────────────────────────────────────────
+  // TEST ONLY: launches the Facebook Marketplace automation screen.
+  // Does NOT change any recording logic — _onRecordTapped() is untouched.
+  Future<void> _onFacebookTestTapped() async {
+    if (!mounted) return;
+    final license = _licenseController.text.trim();
+    if (license.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'נא להזין מספר רישוי מינימום 7 ספרות',
+            'נא להזין מספר רישוי תחילה',
             textAlign: TextAlign.right,
           ),
+          backgroundColor: Colors.orange,
         ),
       );
       return;
     }
 
+    setState(() => _isFetchingVehicle = true);
+
+    String maker = ref.read(fp.formControllerProvider).maker;
+    String model = ref.read(fp.formControllerProvider).model;
+    String year = ref.read(fp.formControllerProvider).year;
+    String fuelType = ref.read(fp.formControllerProvider).fuelType;
+
+    try {
+      final url =
+          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$license%5D%7D';
+      final response = await http.get(Uri.parse(url));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        final result = decoded['result'];
+        final records = result['records'] as List;
+
+        if (records.isNotEmpty) {
+          final data = records.first;
+          maker = data['tozeret_nm']?.toString() ?? '';
+          model =
+              data['kinuy_mishari']?.toString() ??
+              data['degem_nm']?.toString() ??
+              '';
+          year = data['shnat_yitzur']?.toString() ?? '';
+          fuelType = data['sug_delek_nm']?.toString() ?? '';
+
+          final tozeret = data['tozeret_cd'];
+          final degemcd = data['degem_cd'];
+          final sug = data['sug_degem']?.toString() ?? '';
+          final degemNm = data['degem_nm']?.toString() ?? '';
+
+          final filtersObj = {
+            if (degemNm.isNotEmpty) 'degem_nm': degemNm,
+            if (tozeret != null) 'tozeret_cd': tozeret,
+            if (degemcd != null) 'degem_cd': degemcd,
+            if (sug.isNotEmpty) 'sug_degem': sug,
+            if (year.isNotEmpty) 'shnat_yitzur': int.tryParse(year) ?? year,
+          };
+
+          final url2 =
+              'https://data.gov.il/api/3/action/datastore_search?resource_id=142afde2-6228-49f9-8a29-9b6c3a0cbe40&filters=${Uri.encodeComponent(jsonEncode(filtersObj))}';
+
+          final notifier = ref.read(fp.formControllerProvider.notifier);
+          notifier.updateField('maker', maker);
+          notifier.updateField('model', model);
+          notifier.updateField('year', year);
+          notifier.updateField('fuelType', fuelType);
+
+          try {
+            final response2 = await http.get(Uri.parse(url2));
+            if (response2.statusCode == 200) {
+              final decoded2 = jsonDecode(response2.body);
+              final result2 = decoded2['result'];
+              final records2 = result2['records'] as List;
+              if (records2.isNotEmpty) {
+                final data2 = records2.first;
+                final automatic = data2['automatic_ind'];
+                final gear =
+                    (automatic == 0 || automatic == "0")
+                        ? "שידור ידני"
+                        : "הילוכים אוטומטיים";
+                notifier.updateField('gear', gear);
+              }
+            }
+          } catch (e) {
+            debugPrint('Error fetching automatic_ind from url2: $e');
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error fetching vehicle data for FB: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isFetchingVehicle = false);
+      }
+    }
+
+    final formState = ref.read(fp.formControllerProvider);
+    final publishData = VehiclePublishData(
+      licenseNumber: license,
+      color: _colorController.text.isNotEmpty ? _colorController.text : 'כחול',
+      shade: _colorController.text.isNotEmpty ? _colorController.text : 'כחול',
+      hand: _handController.text.isNotEmpty ? _handController.text : 'יד שנייה',
+      currentOwnership:
+          _ownershipController.text.isNotEmpty
+              ? _ownershipController.text
+              : 'פרטית',
+      previousOwnership:
+          _prevOwnershipController.text.isNotEmpty
+              ? _prevOwnershipController.text
+              : 'פרטית',
+      kilometers: _kmController.text,
+      month: _monthController.text,
+      price: _priceController.text,
+      handicapped: _handicappedController.value,
+      noTest: _noTestController.value,
+      images: formState.images,
+      maker: maker.isNotEmpty ? maker : formState.maker,
+      model: model.isNotEmpty ? model : formState.model,
+      year: year.isNotEmpty ? year : formState.year,
+      fuelType: fuelType.isNotEmpty ? fuelType : formState.fuelType,
+      gear: formState.gear.isNotEmpty ? formState.gear : 'הילוכים אוטומטיים',
+      vehicleCondition:
+          _vehicleConditionController.text.isNotEmpty
+              ? _vehicleConditionController.text
+              : 'טוב',
+      warranties: formState.warranties,
+      warrantyDurations: formState.warrantyDurations,
+      treatments: formState.treatments,
+      services: formState.services,
+    );
+
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => FacebookScreen(publishData: publishData),
+      ),
+    );
+  }
+
+  // ── Publish ───────────────────────────────────────────────────────────────
+
+  Future<void> _publishListing({bool skipImagePrompt = false}) async {
+    final formState = ref.read(fp.formControllerProvider);
+    final user = ref.read(authStateProvider).value;
+
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('נא להתחבר למערכת', textAlign: TextAlign.right),
+        ),
+      );
+      return;
+    }
+
+    final finalColor =
+        _colorController.text.isNotEmpty
+            ? _colorController.text
+            : _colors.first;
+    final finalMonth =
+        _monthController.text.isNotEmpty
+            ? _monthController.text
+            : _months.first;
+    final finalHand =
+        _handController.text.isNotEmpty ? _handController.text : _hands.first;
+    final finalOwnership =
+        _ownershipController.text.isNotEmpty
+            ? _ownershipController.text
+            : _ownerships.first;
+    final finalPrevOwnership =
+        _prevOwnershipController.text.isNotEmpty
+            ? _prevOwnershipController.text
+            : _ownerships.first;
+    final finalTestMonth =
+        _testMonthController.text.isNotEmpty
+            ? _testMonthController.text
+            : DateTime.now().month.toString();
+    final finalTestYear =
+        _testYearController.text.isNotEmpty
+            ? _testYearController.text
+            : (DateTime.now().year + 1).toString();
+
+    if (_licenseController.text.length < 7 ||
+        _kmController.text.isEmpty ||
+        _priceController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('נא למלא את כל שדות החובה', textAlign: TextAlign.right),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    if (!skipImagePrompt && formState.images.isEmpty) {
+      final shouldContinue = await showDialog<bool>(
+        context: context,
+        builder:
+            (ctx) => AlertDialog(
+              title: const Text('לא הועלו תמונות', textAlign: TextAlign.right),
+              content: const Text(
+                'לא הועלתה אף תמונה, להמשיך?',
+                textAlign: TextAlign.right,
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('לא'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('כן'),
+                ),
+              ],
+            ),
+      );
+
+      if (shouldContinue != true) {
+        return;
+      }
+    }
+
     setState(() => _isPublishing = true);
+
+    final db = ref.read(dbServiceProvider);
+    Map<String, dynamic>? settings;
+    try {
+      settings = await db.getSettingsData(user.uid);
+    } catch (e) {
+      debugPrint('Error loading settings for listing: $e');
+    }
+
+    final List<String> warranties;
+    final Map<String, String> warrantyDurations;
+    final List<String> treatments;
+    final List<String> services;
+
+    if (formState.warranties.isNotEmpty ||
+        formState.treatments.isNotEmpty ||
+        formState.services.isNotEmpty) {
+      warranties = formState.warranties;
+      warrantyDurations = formState.warrantyDurations;
+      treatments = formState.treatments;
+      services = formState.services;
+    } else {
+      warranties =
+          settings?['warranties'] != null
+              ? List<String>.from(settings!['warranties'])
+              : <String>[];
+      warrantyDurations =
+          settings?['warrantyDurations'] != null
+              ? Map<String, String>.from(settings!['warrantyDurations'])
+              : <String, String>{};
+      treatments =
+          settings?['treatments'] != null
+              ? List<String>.from(settings!['treatments'])
+              : <String>[];
+      services =
+          settings?['services'] != null
+              ? List<String>.from(settings!['services'])
+              : <String>[];
+    }
 
     final listingData = {
       'license': _licenseController.text,
-      'color': _colorController.text,
+      'color': finalColor,
       'maker': formState.maker,
       'model': formState.model,
       'year': formState.year,
-      'month': _monthController.text,
-      'test': '${_testMonthController.text},${_testYearController.text}',
-      'hand': _handController.text,
-      'ownership': _ownershipController.text,
-      'prevOwnership': _prevOwnershipController.text,
+      'month': finalMonth,
+      'test': '$finalTestMonth,$finalTestYear',
+      'hand': finalHand,
+      'ownership': finalOwnership,
+      'prevOwnership': finalPrevOwnership,
       'km': _kmController.text,
       'price': _priceController.text,
       'handicapped': _handicappedController.value ? 'כן' : 'לא',
+      'vehicleCondition': _vehicleConditionController.text,
       'noTest': _noTestController.value,
       'description': formState.description,
       'images': formState.images.map((p) => {'url': p}).toList(),
+      'warranties': warranties,
+      'warrantyDurations': warrantyDurations,
+      'treatments': treatments,
+      'services': services,
     };
 
-    final db = ref.read(dbServiceProvider);
     final success = await db.saveUserListing(listingData, user.uid);
     setState(() => _isPublishing = false);
 
@@ -611,17 +1277,30 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     // Navigate to Yad2 automation
     final publishData = VehiclePublishData(
       licenseNumber: _licenseController.text,
-      color: _colorController.text,
-      shade: _colorController.text,
-      hand: _handController.text,
-      currentOwnership: _ownershipController.text,
-      previousOwnership: _prevOwnershipController.text,
+      color: finalColor,
+      shade: finalColor,
+      hand: finalHand,
+      currentOwnership: finalOwnership,
+      previousOwnership: finalPrevOwnership,
       kilometers: _kmController.text,
-      month: _monthController.text,
+      month: finalMonth,
       price: _priceController.text,
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
       images: formState.images,
+      maker: formState.maker,
+      model: formState.model,
+      year: formState.year,
+      fuelType: formState.fuelType,
+      gear: formState.gear.isNotEmpty ? formState.gear : 'הילוכים אוטומטיים',
+      vehicleCondition:
+          _vehicleConditionController.text.isNotEmpty
+              ? _vehicleConditionController.text
+              : 'טוב',
+      warranties: warranties,
+      warrantyDurations: warrantyDurations,
+      treatments: treatments,
+      services: services,
     );
 
     Navigator.of(context).push(
@@ -641,13 +1320,14 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _monthController.text = '11';
     _handController.text = 'יד שנייה';
     _ownershipController.text = 'פרטית';
-    _prevOwnershipController.text = 'חברה';
+    _prevOwnershipController.text = 'פרטית';
     _kmController.text = '50000';
     _priceController.text = '80000';
     _testMonthController.text = '11';
     _testYearController.text = '2027';
     _handicappedController.value = false;
     _noTestController.value = false;
+    _vehicleConditionController.text = 'טוב';
 
     ref.read(fp.formControllerProvider.notifier).updateFromAI({
       'license': '79674102',
@@ -660,6 +1340,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       'price': 80000,
       'test': '11,2027',
       'handicapped': 'לא',
+      'vehicleCondition': 'טוב',
       'description': 'גוף נקי, ללא תאונות',
     });
     setState(() => _modeSelected = true);
@@ -708,19 +1389,19 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           ),
         ),
 
-        // Processing overlay shown while transcribing
-        if (formState.isProcessing)
+        // Processing overlay shown while transcribing or fetching
+        if (formState.isProcessing || _isFetchingVehicle)
           Container(
             color: const Color(0x66000000),
-            child: const Center(
+            child: Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CircularProgressIndicator(color: Colors.white),
-                  SizedBox(height: 16),
+                  const CircularProgressIndicator(color: Colors.white),
+                  const SizedBox(height: 16),
                   Text(
-                    'מעבד הקלטה...',
-                    style: TextStyle(
+                    _isFetchingVehicle ? 'מחפש רכב...' : 'מעבד הקלטה...',
+                    style: const TextStyle(
                       color: Colors.white,
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -842,16 +1523,28 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       padding: const EdgeInsets.symmetric(horizontal: 16.0),
       child: Row(
         children: [
-          // Record card (mic) — navigates to RecordingScreen, never stays "active"
+          Expanded(
+            child: _buildToggleCard(
+              title: 'פרסום מהיר',
+              icon: Icons.flash_on,
+              isActive: false,
+              onTap: _showQuickPublishDialog,
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Record card (mic) — TEST: launches Facebook automation.
+          // Original recording logic (_onRecordTapped) is untouched; swap back
+          // by replacing _onFacebookTestTapped with _onRecordTapped below.
           Expanded(
             child: _buildToggleCard(
               title: 'add_car.tab_record'.tr(),
               icon: Icons.mic,
               isActive: false,
-              onTap: _onRecordTapped,
+              onTap:
+                  _onFacebookTestTapped, // 🧪 TEST: swap with _onRecordTapped to restore
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 8),
           // Type card (keyboard) — shows form inline
           Expanded(
             child: _buildToggleCard(
@@ -878,7 +1571,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 24),
+        padding: const EdgeInsets.symmetric(vertical: 16),
         decoration: BoxDecoration(
           color: isActive ? const Color(0xFFF4F6FF) : Colors.white,
           borderRadius: BorderRadius.circular(8),
@@ -892,14 +1585,15 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             Icon(
               icon,
               color: isActive ? Colors.black54 : Colors.grey.shade400,
-              size: 32,
+              size: 28,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             Text(
               title,
+              textAlign: TextAlign.center,
               style: const TextStyle(
                 color: Colors.black87,
-                fontSize: 16,
+                fontSize: 14,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -946,6 +1640,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                           ),
                     ),
           ),
+
           _buildDropdownField(
             'צבע',
             _colorController,
@@ -957,40 +1652,6 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             _monthController,
             _months,
             isRequired: true,
-          ),
-          _buildToggleField('ללא טסט', _noTestController),
-          ValueListenableBuilder<bool>(
-            valueListenable: _noTestController,
-            builder: (context, noTestVal, child) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 16.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: _buildDropdownField(
-                        'טסט עד (חודש)',
-                        _testMonthController,
-                        _months,
-                        isRequired: !noTestVal,
-                        isCompact: true,
-                        isEnabled: !noTestVal,
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _buildDropdownField(
-                        'טסט עד (שנה)',
-                        _testYearController,
-                        _years,
-                        isRequired: !noTestVal,
-                        isCompact: true,
-                        isEnabled: !noTestVal,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
           ),
           _buildDropdownField(
             'add_car.hand'.tr(),
@@ -1009,6 +1670,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             _prevOwnershipController,
             _ownerships,
           ),
+
           _buildTextField(
             'add_car.km'.tr(),
             _kmController,
@@ -1028,6 +1690,12 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           ),
           _buildToggleField('add_car.handicapped'.tr(), _handicappedController),
+          _buildDropdownField(
+            'מצב הרכב',
+            _vehicleConditionController,
+            _conditions,
+            onChanged: (val) => notifier.updateField('vehicleCondition', val),
+          ),
 
           const SizedBox(height: 24),
 
@@ -1245,7 +1913,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                 _priceController.clear();
                 _handicappedController.value = false;
                 _noTestController.value = false;
-                setState(() => _modeSelected = false);
+                setState(() {
+                  _modeSelected = false;
+                  _hasSearchedSuccessfully = false;
+                });
               },
               style: OutlinedButton.styleFrom(
                 side: const BorderSide(color: Colors.red),
@@ -1448,6 +2119,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     bool isRequired = false,
     bool isCompact = false,
     bool isEnabled = true,
+    ValueChanged<String>? onChanged,
   }) {
     return Padding(
       padding: EdgeInsets.only(bottom: isCompact ? 0.0 : 16.0),
@@ -1475,7 +2147,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           ),
           const SizedBox(height: 8),
           DropdownButtonFormField<String>(
-            initialValue:
+            value:
                 items.contains(controller.text) ? controller.text : items.first,
             style: const TextStyle(color: Colors.black),
             dropdownColor: Colors.white,
@@ -1525,9 +2197,12 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                 }).toList(),
             onChanged:
                 isEnabled
-                    ? (String? value) {
-                      if (value != null) {
-                        controller.text = value;
+                    ? (String? val) {
+                      if (val != null) {
+                        setState(() {
+                          controller.text = val;
+                        });
+                        onChanged?.call(val);
                       }
                     }
                     : null,

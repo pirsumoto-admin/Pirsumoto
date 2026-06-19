@@ -6,21 +6,46 @@ part of 'audio_service.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$audioServiceHash() => r'b744f27739274a3510a5898a2794b09ac07c7ee6';
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
 
-/// See also [audioService].
 @ProviderFor(audioService)
-final audioServiceProvider = AutoDisposeProvider<AudioService>.internal(
-  audioService,
-  name: r'audioServiceProvider',
-  debugGetCreateSourceHash:
-      const bool.fromEnvironment('dart.vm.product') ? null : _$audioServiceHash,
-  dependencies: null,
-  allTransitiveDependencies: null,
-);
+final audioServiceProvider = AudioServiceProvider._();
 
-@Deprecated('Will be removed in 3.0. Use Ref instead')
-// ignore: unused_element
-typedef AudioServiceRef = AutoDisposeProviderRef<AudioService>;
-// ignore_for_file: type=lint
-// ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
+final class AudioServiceProvider
+    extends $FunctionalProvider<AudioService, AudioService, AudioService>
+    with $Provider<AudioService> {
+  AudioServiceProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'audioServiceProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$audioServiceHash();
+
+  @$internal
+  @override
+  $ProviderElement<AudioService> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  AudioService create(Ref ref) {
+    return audioService(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(AudioService value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<AudioService>(value),
+    );
+  }
+}
+
+String _$audioServiceHash() => r'b744f27739274a3510a5898a2794b09ac07c7ee6';

@@ -6,21 +6,46 @@ part of 'db_service.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$dbServiceHash() => r'855c0963b9cc0812966987d61238fe2572e56957';
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
 
-/// See also [dbService].
 @ProviderFor(dbService)
-final dbServiceProvider = AutoDisposeProvider<DBService>.internal(
-  dbService,
-  name: r'dbServiceProvider',
-  debugGetCreateSourceHash:
-      const bool.fromEnvironment('dart.vm.product') ? null : _$dbServiceHash,
-  dependencies: null,
-  allTransitiveDependencies: null,
-);
+final dbServiceProvider = DbServiceProvider._();
 
-@Deprecated('Will be removed in 3.0. Use Ref instead')
-// ignore: unused_element
-typedef DbServiceRef = AutoDisposeProviderRef<DBService>;
-// ignore_for_file: type=lint
-// ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
+final class DbServiceProvider
+    extends $FunctionalProvider<DBService, DBService, DBService>
+    with $Provider<DBService> {
+  DbServiceProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'dbServiceProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$dbServiceHash();
+
+  @$internal
+  @override
+  $ProviderElement<DBService> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  DBService create(Ref ref) {
+    return dbService(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(DBService value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<DBService>(value),
+    );
+  }
+}
+
+String _$dbServiceHash() => r'855c0963b9cc0812966987d61238fe2572e56957';

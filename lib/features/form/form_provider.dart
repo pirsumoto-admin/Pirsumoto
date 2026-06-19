@@ -21,11 +21,18 @@ abstract class FormState with _$FormState {
     @Default('') String km,
     @Default('') String price,
     @Default('') String handicapped,
+    @Default('טוב') String vehicleCondition,
     @Default('') String description,
+    @Default('') String fuelType,
+    @Default('') String gear,
     @Default([]) List<String> images,
     @Default('') String aiResponse,
     @Default(false) bool isRecording,
     @Default(false) bool isProcessing,
+    @Default([]) List<String> warranties,
+    @Default({}) Map<String, String> warrantyDurations,
+    @Default([]) List<String> treatments,
+    @Default([]) List<String> services,
   }) = _FormState;
 }
 
@@ -76,8 +83,17 @@ class FormController extends _$FormController {
       case 'handicapped':
         state = state.copyWith(handicapped: value);
         break;
+      case 'vehicleCondition':
+        state = state.copyWith(vehicleCondition: value);
+        break;
       case 'description':
         state = state.copyWith(description: value);
+        break;
+      case 'fuelType':
+        state = state.copyWith(fuelType: value);
+        break;
+      case 'gear':
+        state = state.copyWith(gear: value);
         break;
     }
   }
@@ -105,7 +121,9 @@ class FormController extends _$FormController {
       km: data['km']?.toString() ?? state.km,
       price: data['price']?.toString() ?? state.price,
       handicapped: data['handicapped']?.toString() ?? state.handicapped,
+      vehicleCondition: data['vehicleCondition']?.toString() ?? state.vehicleCondition,
       description: data['description']?.toString() ?? state.description,
+      gear: data['gear']?.toString() ?? state.gear,
       isTypingMode: true,
       currentStep: 2,
     );
@@ -154,8 +172,22 @@ class FormController extends _$FormController {
       km: listing['km']?.toString() ?? '',
       price: listing['price']?.toString() ?? '',
       handicapped: listing['handicapped']?.toString() ?? '',
+      vehicleCondition: listing['vehicleCondition']?.toString() ?? 'טוב',
       description: listing['description']?.toString() ?? '',
+      gear: listing['gear']?.toString() ?? '',
       images: images,
+      warranties: listing['warranties'] != null
+          ? List<String>.from(listing['warranties'])
+          : [],
+      warrantyDurations: listing['warrantyDurations'] != null
+          ? Map<String, String>.from(listing['warrantyDurations'])
+          : {},
+      treatments: listing['treatments'] != null
+          ? List<String>.from(listing['treatments'])
+          : [],
+      services: listing['services'] != null
+          ? List<String>.from(listing['services'])
+          : [],
       isTypingMode: true,
       currentStep: 2,
     );

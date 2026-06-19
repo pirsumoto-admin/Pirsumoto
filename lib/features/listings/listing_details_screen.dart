@@ -67,7 +67,7 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
     );
     if (confirm != true) return;
 
-    final user = ref.read(authStateProvider).valueOrNull;
+    final user = ref.read(authStateProvider).value;
     if (user == null) return;
     final license = widget.listing['license']?.toString() ?? '';
     await ref.read(dbServiceProvider).deleteUserListing(license, user.uid);
@@ -88,7 +88,7 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
     final handicapped = listing['handicapped'] ?? '';
     final description = listing['description'] ?? '';
     final images = _images;
-    final user = ref.watch(authStateProvider).valueOrNull;
+    final user = ref.watch(authStateProvider).value;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -387,6 +387,69 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
                                 Text(description.toString(),
                                     textAlign: TextAlign.right,
                                     style: const TextStyle(fontSize: 16)),
+                              ],
+                            ),
+                          ),
+                        ],
+                        // Benefits & Services Section
+                        if ((listing['warranties'] != null && (listing['warranties'] as List).isNotEmpty) ||
+                            (listing['treatments'] != null && (listing['treatments'] as List).isNotEmpty) ||
+                            (listing['services'] != null && (listing['services'] as List).isNotEmpty)) ...[
+                          const Divider(),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 12.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                const Text(
+                                  'הטבות ושירותים:',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                if (listing['warranties'] != null && (listing['warranties'] as List).isNotEmpty) ...[
+                                  const Text(
+                                    'אחריות:',
+                                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.black54),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  ...(listing['warranties'] as List).map((w) {
+                                    final duration = (listing['warrantyDurations'] as Map?)?[w] ?? 'לא הוגדר זמן';
+                                    return Text(
+                                      '• $w ($duration)',
+                                      style: const TextStyle(fontSize: 14),
+                                      textAlign: TextAlign.right,
+                                    );
+                                  }),
+                                  const SizedBox(height: 8),
+                                ],
+                                if (listing['treatments'] != null && (listing['treatments'] as List).isNotEmpty) ...[
+                                  const Text(
+                                    'טיפולים:',
+                                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.black54),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  ...(listing['treatments'] as List).map((t) => Text(
+                                    '• $t',
+                                    style: const TextStyle(fontSize: 14),
+                                    textAlign: TextAlign.right,
+                                  )),
+                                  const SizedBox(height: 8),
+                                ],
+                                if (listing['services'] != null && (listing['services'] as List).isNotEmpty) ...[
+                                  const Text(
+                                    'שירות:',
+                                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.black54),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  ...(listing['services'] as List).map((s) => Text(
+                                    '• $s',
+                                    style: const TextStyle(fontSize: 14),
+                                    textAlign: TextAlign.right,
+                                  )),
+                                ],
                               ],
                             ),
                           ),

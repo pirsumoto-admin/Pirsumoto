@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-gatekeeper-v2",
+  "version": "1.0.0",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.0",
+    "@google-cloud/pubsub": "^4.9.0",
+    "firebase-admin": "^12.1.0",
+    "firebase-functions": "^6.1.0"
+  }
+}

@@ -81,6 +81,12 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
         // Allow exact matches or substrings with high scores
         if (s1 == s2) return 1.0
+
+        // Match exact text ignoring whitespace (e.g. "השכרה/החכר" vs "השכרה / החכר")
+        val clean1 = s1.replace("\\s".toRegex(), "")
+        val clean2 = s2.replace("\\s".toRegex(), "")
+        if (clean1.isNotEmpty() && clean1 == clean2) return 1.0
+
         if (s1.contains(s2) || s2.contains(s1)) return 0.95
 
         // Fast fail: if length difference is too big, it won't meet the threshold

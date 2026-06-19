@@ -42,7 +42,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       setState(() => _profileImagePath = imgFile.path);
     }
 
-    final user = ref.read(authStateProvider).valueOrNull;
+    final user = ref.read(authStateProvider).value;
     if (user != null) {
       final db = ref.read(dbServiceProvider);
       final profile = await db.getProfileData(user.uid);
@@ -108,7 +108,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   Future<void> _saveProfile() async {
-    final user = ref.read(authStateProvider).valueOrNull;
+    final user = ref.read(authStateProvider).value;
     if (user != null) {
       setState(() => _isSaving = true);
       final db = ref.read(dbServiceProvider);
@@ -362,30 +362,41 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey.shade300),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: _selectedLanguage,
-                    isExpanded: true,
-                    alignment: Alignment.centerRight,
-                    items: _languages
-                        .map((lang) => DropdownMenuItem(
-                              value: lang,
-                              child: Text(lang,
-                                  textAlign: TextAlign.right),
-                            ))
-                        .toList(),
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() => _selectedLanguage = val);
-                      }
-                    },
+              Theme(
+                data: ThemeData.light(),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _selectedLanguage,
+                      dropdownColor: Colors.white,
+                      style: const TextStyle(color: Colors.black87, fontSize: 16),
+                      isExpanded: true,
+                      alignment: Alignment.centerRight,
+                      items: _languages
+                          .map((lang) => DropdownMenuItem(
+                                value: lang,
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Text(
+                                    lang,
+                                    style: const TextStyle(color: Colors.black87),
+                                    textAlign: TextAlign.right,
+                                  ),
+                                ),
+                              ))
+                          .toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() => _selectedLanguage = val);
+                        }
+                      },
+                    ),
                   ),
                 ),
               ),

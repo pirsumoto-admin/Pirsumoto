@@ -111,7 +111,11 @@ class Yad2Screen extends StatefulWidget {
   final VehiclePublishData publishData;
   final bool useGemmaAutomation;
 
-  const Yad2Screen({super.key, required this.publishData, this.useGemmaAutomation = false});
+  const Yad2Screen({
+    super.key,
+    required this.publishData,
+    this.useGemmaAutomation = false,
+  });
 
   @override
   State<Yad2Screen> createState() => _Yad2ScreenState();
@@ -120,7 +124,8 @@ class Yad2Screen extends StatefulWidget {
 class _Yad2ScreenState extends State<Yad2Screen> {
   late WebViewController _controller;
   final GlobalKey _webViewKey = GlobalKey();
-  dynamic _automationService; // Can be Yad2AutomationService or Yad2AccessibilityAutomationService
+  dynamic
+  _automationService; // Can be Yad2AutomationService or Yad2AccessibilityAutomationService
   String _statusMessage = 'טוען...';
   bool _automationStarted = false;
   bool _automationComplete = false;
@@ -168,28 +173,35 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             ),
           )
           ..loadRequest(
-            Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
+            //Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
+            Uri.parse(
+              'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
+            ),
           );
 
-      if (_controller.platform is AndroidWebViewController) {
-        (_controller.platform as AndroidWebViewController).setOnShowFileSelector(
-          (FileSelectorParams params) async {
-            debugPrint('[Yad2Screen] WebView requested file selector: ${params.mode}');
-            final picker = ImagePicker();
-            
-            if (params.mode == FileSelectorMode.openMultiple) {
-              final List<XFile> images = await picker.pickMultiImage();
-              return images.map((e) => Uri.file(e.path).toString()).toList();
-            } else {
-              final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-              if (image != null) {
-                return [Uri.file(image.path).toString()];
-              }
-            }
-            return [];
-          },
+    if (_controller.platform is AndroidWebViewController) {
+      (_controller.platform as AndroidWebViewController).setOnShowFileSelector((
+        FileSelectorParams params,
+      ) async {
+        debugPrint(
+          '[Yad2Screen] WebView requested file selector: ${params.mode}',
         );
-      }
+        final picker = ImagePicker();
+
+        if (params.mode == FileSelectorMode.openMultiple) {
+          final List<XFile> images = await picker.pickMultiImage();
+          return images.map((e) => Uri.file(e.path).toString()).toList();
+        } else {
+          final XFile? image = await picker.pickImage(
+            source: ImageSource.gallery,
+          );
+          if (image != null) {
+            return [Uri.file(image.path).toString()];
+          }
+        }
+        return [];
+      });
+    }
   }
 
   @override
@@ -372,7 +384,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 content: Text(
                   '🔄 שים לב: המערכת משתמשת בזיהוי תמונה (OCR) לשלב זה',
                   textAlign: TextAlign.right,
-                  style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 backgroundColor: Colors.orange,
                 duration: Duration(seconds: 2),
@@ -420,49 +435,63 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     _automationService!.startAutomation();
   }
 
-  Future<void> _checkA11yAndStart(double devicePixelRatio, OcrService ocrService) async {
-    final hasPermission = await Yad2AccessibilityAutomationService.checkPermission();
+  Future<void> _checkA11yAndStart(
+    double devicePixelRatio,
+    OcrService ocrService,
+  ) async {
+    final hasPermission =
+        await Yad2AccessibilityAutomationService.checkPermission();
     if (!hasPermission) {
       if (!mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (ctx) => AlertDialog(
-          title: const Text('נדרשת הרשאת נגישות', textAlign: TextAlign.right),
-          content: const Text(
-            'כדי שהאוטומציה תפעל, עליך לאפשר הרשאת נגישות (Accessibility) לאפליקציה במסך ההגדרות של המכשיר. לאחר מתן ההרשאה חזור לכאן ולחץ על "אישרתי".',
-            textAlign: TextAlign.right,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(ctx).pop();
-                Navigator.of(context).pop(); // Exit screen
-              },
-              child: const Text('ביטול'),
+        builder:
+            (ctx) => AlertDialog(
+              title: const Text(
+                'נדרשת הרשאת נגישות',
+                textAlign: TextAlign.right,
+              ),
+              content: const Text(
+                'כדי שהאוטומציה תפעל, עליך לאפשר הרשאת נגישות (Accessibility) לאפליקציה במסך ההגדרות של המכשיר. לאחר מתן ההרשאה חזור לכאן ולחץ על "אישרתי".',
+                textAlign: TextAlign.right,
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    Navigator.of(context).pop(); // Exit screen
+                  },
+                  child: const Text('ביטול'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Yad2AccessibilityAutomationService.openSettings();
+                  },
+                  child: const Text('פתח הגדרות'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final checkAgain =
+                        await Yad2AccessibilityAutomationService.checkPermission();
+                    if (checkAgain) {
+                      Navigator.of(ctx).pop();
+                      _startAutomationService(devicePixelRatio, ocrService);
+                    } else {
+                      ScaffoldMessenger.of(ctx).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'עדיין לא ניתנה הרשאה',
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      );
+                    }
+                  },
+                  child: const Text('אישרתי'),
+                ),
+              ],
             ),
-            TextButton(
-              onPressed: () {
-                Yad2AccessibilityAutomationService.openSettings();
-              },
-              child: const Text('פתח הגדרות'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final checkAgain = await Yad2AccessibilityAutomationService.checkPermission();
-                if (checkAgain) {
-                  Navigator.of(ctx).pop();
-                  _startAutomationService(devicePixelRatio, ocrService);
-                } else {
-                  ScaffoldMessenger.of(ctx).showSnackBar(
-                    const SnackBar(content: Text('עדיין לא ניתנה הרשאה', textAlign: TextAlign.right)),
-                  );
-                }
-              },
-              child: const Text('אישרתי'),
-            ),
-          ],
-        ),
       );
     } else {
       _startAutomationService(devicePixelRatio, ocrService);
@@ -503,13 +532,19 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             ),
           if (_showPauseButton)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
+              top: MediaQuery.of(context).padding.top + 4,
               left: 16,
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _isPaused ? const Color(0xFF1B5E20) : const Color(0xFFE65100),
+                  backgroundColor:
+                      _isPaused
+                          ? const Color(0xFF1B5E20)
+                          : const Color(0xFFE65100),
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(30),
                   ),
@@ -526,7 +561,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     _automationService?.pauseAutomation();
                     setState(() {
                       _isPaused = true;
-                      _statusMessage = 'האוטומציה מושהית. לחץ על המשך כדי לחזור';
+                      _statusMessage =
+                          'האוטומציה מושהית. לחץ על המשך כדי לחזור';
                     });
                   }
                 },
@@ -537,7 +573,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     const SizedBox(width: 8),
                     Text(
                       _isPaused ? 'המשך' : 'הפסק',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
                     ),
                   ],
                 ),
@@ -545,16 +584,21 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             ),
           if (_showPauseButton && _isPaused)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
+              top: MediaQuery.of(context).padding.top + 4,
               right: 16,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFC62828), // Premium red color for exit
+                      backgroundColor: const Color(
+                        0xFFC62828,
+                      ), // Premium red color for exit
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
@@ -570,7 +614,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                         SizedBox(width: 8),
                         Text(
                           'סיים',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
                         ),
                       ],
                     ),
@@ -578,9 +625,14 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                   const SizedBox(width: 12),
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF3B5BDB), // Premium brand blue
+                      backgroundColor: const Color(
+                        0xFF3B5BDB,
+                      ), // Premium brand blue
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 12,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
@@ -601,7 +653,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                         SizedBox(width: 8),
                         Text(
                           'צעד אחורה',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                          ),
                         ),
                       ],
                     ),
@@ -638,19 +693,24 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       left: 0,
       right: 0,
       child: Container(
-        padding: EdgeInsets.fromLTRB(16, MediaQuery.of(context).padding.top + 12, 16, 12),
+        padding: EdgeInsets.fromLTRB(
+          12,
+          MediaQuery.of(context).padding.top + 6,
+          12,
+          6,
+        ),
         color: bgColor,
         child: Row(
           children: [
             if (_automationComplete)
-              Icon(icon, color: iconColor, size: 20)
+              Icon(icon, color: iconColor, size: 16)
             else
-              const SizedBox(width: 20, height: 20),
-            const SizedBox(width: 12),
+              const SizedBox(width: 16, height: 16),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
                 _statusMessage,
-                style: const TextStyle(color: Colors.white, fontSize: 14),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
                 textAlign: TextAlign.right,
               ),
             ),

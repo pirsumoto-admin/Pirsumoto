@@ -6,23 +6,46 @@ part of 'webview_service.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$webviewServiceHash() => r'2f27d3f24f6f3c4e341e425203983d34c1780527';
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
 
-/// See also [webviewService].
 @ProviderFor(webviewService)
-final webviewServiceProvider = AutoDisposeProvider<WebviewService>.internal(
-  webviewService,
-  name: r'webviewServiceProvider',
-  debugGetCreateSourceHash:
-      const bool.fromEnvironment('dart.vm.product')
-          ? null
-          : _$webviewServiceHash,
-  dependencies: null,
-  allTransitiveDependencies: null,
-);
+final webviewServiceProvider = WebviewServiceProvider._();
 
-@Deprecated('Will be removed in 3.0. Use Ref instead')
-// ignore: unused_element
-typedef WebviewServiceRef = AutoDisposeProviderRef<WebviewService>;
-// ignore_for_file: type=lint
-// ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
+final class WebviewServiceProvider
+    extends $FunctionalProvider<WebviewService, WebviewService, WebviewService>
+    with $Provider<WebviewService> {
+  WebviewServiceProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'webviewServiceProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$webviewServiceHash();
+
+  @$internal
+  @override
+  $ProviderElement<WebviewService> $createElement($ProviderPointer pointer) =>
+      $ProviderElement(pointer);
+
+  @override
+  WebviewService create(Ref ref) {
+    return webviewService(ref);
+  }
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(WebviewService value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<WebviewService>(value),
+    );
+  }
+}
+
+String _$webviewServiceHash() => r'2f27d3f24f6f3c4e341e425203983d34c1780527';

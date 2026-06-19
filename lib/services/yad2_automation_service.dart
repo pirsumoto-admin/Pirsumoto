@@ -11,133 +11,8 @@ import 'ui_context.dart';
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
-class VehiclePublishData {
-  final String licenseNumber;
-  final String color;
-  final String shade;
-  final String hand;
-  final String currentOwnership;
-  final String previousOwnership;
-  final String kilometers;
-  final String month;
-  final String price;
-  final String city;
-  final bool handicapped;
-  final bool noTest;
-  final List<String>? images;
-
-  const VehiclePublishData({
-    required this.licenseNumber,
-    required this.color,
-    required this.shade,
-    required this.hand,
-    required this.currentOwnership,
-    required this.previousOwnership,
-    required this.kilometers,
-    required this.month,
-    required this.price,
-    required this.handicapped,
-    required this.noTest,
-    this.city = 'חיפה',
-    this.images,
-  });
-
-  /// Maps a numeric or plain hand value to Hebrew text for Yad2.
-  static String handToHebrew(String hand) {
-    if (hand.startsWith('יד')) return hand;
-    switch (hand.trim()) {
-      case '1':
-        return 'יד ראשונה';
-      case '2':
-        return 'יד שניה';
-      case '3':
-        return 'יד שלישית';
-      case '4':
-        return 'יד רביעית';
-      default:
-        return 'יד $hand';
-    }
-  }
-
-  /// Maps a numeric month value to Hebrew month name for Yad2.
-  static String monthToHebrew(String month) {
-    switch (month.trim()) {
-      case '1':
-      case '01':
-        return 'ינואר';
-      case '2':
-      case '02':
-        return 'פברואר';
-      case '3':
-      case '03':
-        return 'מרץ';
-      case '4':
-      case '04':
-        return 'אפריל';
-      case '5':
-      case '05':
-        return 'מאי';
-      case '6':
-      case '06':
-        return 'יוני';
-      case '7':
-      case '07':
-        return 'יולי';
-      case '8':
-      case '08':
-        return 'אוגוסט';
-      case '9':
-      case '09':
-        return 'ספטמבר';
-      case '10':
-        return 'אוקטובר';
-      case '11':
-        return 'נובמבר';
-      case '12':
-        return 'דצמבר';
-      default:
-        return month.trim();
-    }
-  }
-}
-
-// ── Phase enum (mirrors Android AutomationPhase) ─────────────────────────────
-
-enum AutomationPhase {
-  phase1('Initial Screen', 'פרטיים ומסחריים', 1),
-  //phase2('Form Entry or Reset', '00-000-00|מחדש', 1),
-  phase2('Form Entry or Reset', '00-000-00', 1),
-  phase3('Submission', 'לשלב', 1),
-  phase4('Color Selection - First', 'אדום', 1),
-  phase5('Color Selection - Second', 'אדום', 2),
-  phase5a('Month Dropdown Open', 'חודש עלייה לכביש', 1),
-  phase5b('Month Selection', null, 1),
-  phase5c('No Test Check', 'ללא טסט', 1),
-
-  phase6('Hand Selection', 'בחירת יד', 1),
-  phase7('Second Hand Selection', 'יד שניה', 1),
-  phase8('Current Ownership Label', 'בעלות נוכחית', 1),
-  phase9('Current Ownership Value', null, 1),
-  phase10('Previous Ownership Label', 'בעלות מקורית', 1),
-  phase11('Previous Ownership Value', null, 1),
-  phase12('Kilometers Field', 'קילומטראז', 1),
-  phase13('Scroll After Kilometers', null, 1),
-  phase14('Additional Info Text', 'מה חשוב לך שידעו', 1),
-  phase15('Price Input', 'מחיר', 1),
-  phase16('City Selection', 'חיפה', 1),
-  phase17(
-    'Photo Upload',
-    'תמונות|העלאת תמונות|הוספת תמונות|תמונות הרכב|העלו תמונות|המשך',
-    1,
-  ),
-  complete('Automation Complete', null, 1);
-
-  final String description;
-  final String? targetText;
-  final int targetInstance;
-
-  const AutomationPhase(this.description, this.targetText, this.targetInstance);
-}
+import 'yad2_automation_models.dart';
+export 'yad2_automation_models.dart';
 
 // ── Service ───────────────────────────────────────────────────────────────────
 
@@ -466,6 +341,12 @@ class Yad2AutomationService {
         await _phase5bSelectMonthValue();
       case AutomationPhase.phase5c:
         _handlePhaseComplete(AutomationPhase.phase5c);
+      case AutomationPhase.phase5d:
+        _handlePhaseComplete(AutomationPhase.phase5d);
+      case AutomationPhase.phase5e:
+        _handlePhaseComplete(AutomationPhase.phase5e);
+      case AutomationPhase.phase5f:
+        _handlePhaseComplete(AutomationPhase.phase5f);
 
       case AutomationPhase.phase6:
         await _phase6OpenHandDropdown();
@@ -1957,6 +1838,15 @@ class Yad2AutomationService {
         next = AutomationPhase.phase5c;
         delayMs = 1000; // wait for month to settle
       case AutomationPhase.phase5c:
+        next = AutomationPhase.phase5d;
+        delayMs = 500;
+      case AutomationPhase.phase5d:
+        next = AutomationPhase.phase5e;
+        delayMs = 500;
+      case AutomationPhase.phase5e:
+        next = AutomationPhase.phase5f;
+        delayMs = 500;
+      case AutomationPhase.phase5f:
         next = AutomationPhase.phase6;
         delayMs = 500;
       case AutomationPhase.phase6:

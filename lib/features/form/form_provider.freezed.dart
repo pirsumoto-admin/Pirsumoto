@@ -14,7 +14,7 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$FormState {
 
- int get currentStep; bool get isTypingMode; String get license; String get maker; String get model; String get year; String get month; String get test; String get hand; String get ownership; String get prevOwnership; String get km; String get price; String get handicapped; String get description; List<String> get images; String get aiResponse; bool get isRecording; bool get isProcessing;
+ int get currentStep; bool get isTypingMode; String get license; String get maker; String get model; String get year; String get month; String get test; String get hand; String get ownership; String get prevOwnership; String get km; String get price; String get handicapped; String get vehicleCondition; String get description; String get fuelType; String get gear; List<String> get images; String get aiResponse; bool get isRecording; bool get isProcessing; List<String> get warranties; Map<String, String> get warrantyDurations; List<String> get treatments; List<String> get services;
 /// Create a copy of FormState
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -25,16 +25,16 @@ $FormStateCopyWith<FormState> get copyWith => _$FormStateCopyWithImpl<FormState>
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormState&&(identical(other.currentStep, currentStep) || other.currentStep == currentStep)&&(identical(other.isTypingMode, isTypingMode) || other.isTypingMode == isTypingMode)&&(identical(other.license, license) || other.license == license)&&(identical(other.maker, maker) || other.maker == maker)&&(identical(other.model, model) || other.model == model)&&(identical(other.year, year) || other.year == year)&&(identical(other.month, month) || other.month == month)&&(identical(other.test, test) || other.test == test)&&(identical(other.hand, hand) || other.hand == hand)&&(identical(other.ownership, ownership) || other.ownership == ownership)&&(identical(other.prevOwnership, prevOwnership) || other.prevOwnership == prevOwnership)&&(identical(other.km, km) || other.km == km)&&(identical(other.price, price) || other.price == price)&&(identical(other.handicapped, handicapped) || other.handicapped == handicapped)&&(identical(other.description, description) || other.description == description)&&const DeepCollectionEquality().equals(other.images, images)&&(identical(other.aiResponse, aiResponse) || other.aiResponse == aiResponse)&&(identical(other.isRecording, isRecording) || other.isRecording == isRecording)&&(identical(other.isProcessing, isProcessing) || other.isProcessing == isProcessing));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormState&&(identical(other.currentStep, currentStep) || other.currentStep == currentStep)&&(identical(other.isTypingMode, isTypingMode) || other.isTypingMode == isTypingMode)&&(identical(other.license, license) || other.license == license)&&(identical(other.maker, maker) || other.maker == maker)&&(identical(other.model, model) || other.model == model)&&(identical(other.year, year) || other.year == year)&&(identical(other.month, month) || other.month == month)&&(identical(other.test, test) || other.test == test)&&(identical(other.hand, hand) || other.hand == hand)&&(identical(other.ownership, ownership) || other.ownership == ownership)&&(identical(other.prevOwnership, prevOwnership) || other.prevOwnership == prevOwnership)&&(identical(other.km, km) || other.km == km)&&(identical(other.price, price) || other.price == price)&&(identical(other.handicapped, handicapped) || other.handicapped == handicapped)&&(identical(other.vehicleCondition, vehicleCondition) || other.vehicleCondition == vehicleCondition)&&(identical(other.description, description) || other.description == description)&&(identical(other.fuelType, fuelType) || other.fuelType == fuelType)&&(identical(other.gear, gear) || other.gear == gear)&&const DeepCollectionEquality().equals(other.images, images)&&(identical(other.aiResponse, aiResponse) || other.aiResponse == aiResponse)&&(identical(other.isRecording, isRecording) || other.isRecording == isRecording)&&(identical(other.isProcessing, isProcessing) || other.isProcessing == isProcessing)&&const DeepCollectionEquality().equals(other.warranties, warranties)&&const DeepCollectionEquality().equals(other.warrantyDurations, warrantyDurations)&&const DeepCollectionEquality().equals(other.treatments, treatments)&&const DeepCollectionEquality().equals(other.services, services));
 }
 
 
 @override
-int get hashCode => Object.hashAll([runtimeType,currentStep,isTypingMode,license,maker,model,year,month,test,hand,ownership,prevOwnership,km,price,handicapped,description,const DeepCollectionEquality().hash(images),aiResponse,isRecording,isProcessing]);
+int get hashCode => Object.hashAll([runtimeType,currentStep,isTypingMode,license,maker,model,year,month,test,hand,ownership,prevOwnership,km,price,handicapped,vehicleCondition,description,fuelType,gear,const DeepCollectionEquality().hash(images),aiResponse,isRecording,isProcessing,const DeepCollectionEquality().hash(warranties),const DeepCollectionEquality().hash(warrantyDurations),const DeepCollectionEquality().hash(treatments),const DeepCollectionEquality().hash(services)]);
 
 @override
 String toString() {
-  return 'FormState(currentStep: $currentStep, isTypingMode: $isTypingMode, license: $license, maker: $maker, model: $model, year: $year, month: $month, test: $test, hand: $hand, ownership: $ownership, prevOwnership: $prevOwnership, km: $km, price: $price, handicapped: $handicapped, description: $description, images: $images, aiResponse: $aiResponse, isRecording: $isRecording, isProcessing: $isProcessing)';
+  return 'FormState(currentStep: $currentStep, isTypingMode: $isTypingMode, license: $license, maker: $maker, model: $model, year: $year, month: $month, test: $test, hand: $hand, ownership: $ownership, prevOwnership: $prevOwnership, km: $km, price: $price, handicapped: $handicapped, vehicleCondition: $vehicleCondition, description: $description, fuelType: $fuelType, gear: $gear, images: $images, aiResponse: $aiResponse, isRecording: $isRecording, isProcessing: $isProcessing, warranties: $warranties, warrantyDurations: $warrantyDurations, treatments: $treatments, services: $services)';
 }
 
 
@@ -45,7 +45,7 @@ abstract mixin class $FormStateCopyWith<$Res>  {
   factory $FormStateCopyWith(FormState value, $Res Function(FormState) _then) = _$FormStateCopyWithImpl;
 @useResult
 $Res call({
- int currentStep, bool isTypingMode, String license, String maker, String model, String year, String month, String test, String hand, String ownership, String prevOwnership, String km, String price, String handicapped, String description, List<String> images, String aiResponse, bool isRecording, bool isProcessing
+ int currentStep, bool isTypingMode, String license, String maker, String model, String year, String month, String test, String hand, String ownership, String prevOwnership, String km, String price, String handicapped, String vehicleCondition, String description, String fuelType, String gear, List<String> images, String aiResponse, bool isRecording, bool isProcessing, List<String> warranties, Map<String, String> warrantyDurations, List<String> treatments, List<String> services
 });
 
 
@@ -62,7 +62,7 @@ class _$FormStateCopyWithImpl<$Res>
 
 /// Create a copy of FormState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? currentStep = null,Object? isTypingMode = null,Object? license = null,Object? maker = null,Object? model = null,Object? year = null,Object? month = null,Object? test = null,Object? hand = null,Object? ownership = null,Object? prevOwnership = null,Object? km = null,Object? price = null,Object? handicapped = null,Object? description = null,Object? images = null,Object? aiResponse = null,Object? isRecording = null,Object? isProcessing = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? currentStep = null,Object? isTypingMode = null,Object? license = null,Object? maker = null,Object? model = null,Object? year = null,Object? month = null,Object? test = null,Object? hand = null,Object? ownership = null,Object? prevOwnership = null,Object? km = null,Object? price = null,Object? handicapped = null,Object? vehicleCondition = null,Object? description = null,Object? fuelType = null,Object? gear = null,Object? images = null,Object? aiResponse = null,Object? isRecording = null,Object? isProcessing = null,Object? warranties = null,Object? warrantyDurations = null,Object? treatments = null,Object? services = null,}) {
   return _then(_self.copyWith(
 currentStep: null == currentStep ? _self.currentStep : currentStep // ignore: cast_nullable_to_non_nullable
 as int,isTypingMode: null == isTypingMode ? _self.isTypingMode : isTypingMode // ignore: cast_nullable_to_non_nullable
@@ -78,12 +78,19 @@ as String,prevOwnership: null == prevOwnership ? _self.prevOwnership : prevOwner
 as String,km: null == km ? _self.km : km // ignore: cast_nullable_to_non_nullable
 as String,price: null == price ? _self.price : price // ignore: cast_nullable_to_non_nullable
 as String,handicapped: null == handicapped ? _self.handicapped : handicapped // ignore: cast_nullable_to_non_nullable
+as String,vehicleCondition: null == vehicleCondition ? _self.vehicleCondition : vehicleCondition // ignore: cast_nullable_to_non_nullable
 as String,description: null == description ? _self.description : description // ignore: cast_nullable_to_non_nullable
+as String,fuelType: null == fuelType ? _self.fuelType : fuelType // ignore: cast_nullable_to_non_nullable
+as String,gear: null == gear ? _self.gear : gear // ignore: cast_nullable_to_non_nullable
 as String,images: null == images ? _self.images : images // ignore: cast_nullable_to_non_nullable
 as List<String>,aiResponse: null == aiResponse ? _self.aiResponse : aiResponse // ignore: cast_nullable_to_non_nullable
 as String,isRecording: null == isRecording ? _self.isRecording : isRecording // ignore: cast_nullable_to_non_nullable
 as bool,isProcessing: null == isProcessing ? _self.isProcessing : isProcessing // ignore: cast_nullable_to_non_nullable
-as bool,
+as bool,warranties: null == warranties ? _self.warranties : warranties // ignore: cast_nullable_to_non_nullable
+as List<String>,warrantyDurations: null == warrantyDurations ? _self.warrantyDurations : warrantyDurations // ignore: cast_nullable_to_non_nullable
+as Map<String, String>,treatments: null == treatments ? _self.treatments : treatments // ignore: cast_nullable_to_non_nullable
+as List<String>,services: null == services ? _self.services : services // ignore: cast_nullable_to_non_nullable
+as List<String>,
   ));
 }
 
@@ -168,10 +175,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String description,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String vehicleCondition,  String description,  String fuelType,  String gear,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing,  List<String> warranties,  Map<String, String> warrantyDurations,  List<String> treatments,  List<String> services)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _FormState() when $default != null:
-return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.description,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing);case _:
+return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.vehicleCondition,_that.description,_that.fuelType,_that.gear,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing,_that.warranties,_that.warrantyDurations,_that.treatments,_that.services);case _:
   return orElse();
 
 }
@@ -189,10 +196,10 @@ return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String description,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String vehicleCondition,  String description,  String fuelType,  String gear,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing,  List<String> warranties,  Map<String, String> warrantyDurations,  List<String> treatments,  List<String> services)  $default,) {final _that = this;
 switch (_that) {
 case _FormState():
-return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.description,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing);case _:
+return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.vehicleCondition,_that.description,_that.fuelType,_that.gear,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing,_that.warranties,_that.warrantyDurations,_that.treatments,_that.services);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -209,10 +216,10 @@ return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String description,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int currentStep,  bool isTypingMode,  String license,  String maker,  String model,  String year,  String month,  String test,  String hand,  String ownership,  String prevOwnership,  String km,  String price,  String handicapped,  String vehicleCondition,  String description,  String fuelType,  String gear,  List<String> images,  String aiResponse,  bool isRecording,  bool isProcessing,  List<String> warranties,  Map<String, String> warrantyDurations,  List<String> treatments,  List<String> services)?  $default,) {final _that = this;
 switch (_that) {
 case _FormState() when $default != null:
-return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.description,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing);case _:
+return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_that.model,_that.year,_that.month,_that.test,_that.hand,_that.ownership,_that.prevOwnership,_that.km,_that.price,_that.handicapped,_that.vehicleCondition,_that.description,_that.fuelType,_that.gear,_that.images,_that.aiResponse,_that.isRecording,_that.isProcessing,_that.warranties,_that.warrantyDurations,_that.treatments,_that.services);case _:
   return null;
 
 }
@@ -224,7 +231,7 @@ return $default(_that.currentStep,_that.isTypingMode,_that.license,_that.maker,_
 
 
 class _FormState implements FormState {
-  const _FormState({this.currentStep = 1, this.isTypingMode = false, this.license = '', this.maker = '', this.model = '', this.year = '', this.month = '', this.test = '', this.hand = '', this.ownership = '', this.prevOwnership = '', this.km = '', this.price = '', this.handicapped = '', this.description = '', final  List<String> images = const [], this.aiResponse = '', this.isRecording = false, this.isProcessing = false}): _images = images;
+  const _FormState({this.currentStep = 1, this.isTypingMode = false, this.license = '', this.maker = '', this.model = '', this.year = '', this.month = '', this.test = '', this.hand = '', this.ownership = '', this.prevOwnership = '', this.km = '', this.price = '', this.handicapped = '', this.vehicleCondition = 'טוב', this.description = '', this.fuelType = '', this.gear = '', final  List<String> images = const [], this.aiResponse = '', this.isRecording = false, this.isProcessing = false, final  List<String> warranties = const [], final  Map<String, String> warrantyDurations = const {}, final  List<String> treatments = const [], final  List<String> services = const []}): _images = images,_warranties = warranties,_warrantyDurations = warrantyDurations,_treatments = treatments,_services = services;
   
 
 @override@JsonKey() final  int currentStep;
@@ -241,7 +248,10 @@ class _FormState implements FormState {
 @override@JsonKey() final  String km;
 @override@JsonKey() final  String price;
 @override@JsonKey() final  String handicapped;
+@override@JsonKey() final  String vehicleCondition;
 @override@JsonKey() final  String description;
+@override@JsonKey() final  String fuelType;
+@override@JsonKey() final  String gear;
  final  List<String> _images;
 @override@JsonKey() List<String> get images {
   if (_images is EqualUnmodifiableListView) return _images;
@@ -252,6 +262,34 @@ class _FormState implements FormState {
 @override@JsonKey() final  String aiResponse;
 @override@JsonKey() final  bool isRecording;
 @override@JsonKey() final  bool isProcessing;
+ final  List<String> _warranties;
+@override@JsonKey() List<String> get warranties {
+  if (_warranties is EqualUnmodifiableListView) return _warranties;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_warranties);
+}
+
+ final  Map<String, String> _warrantyDurations;
+@override@JsonKey() Map<String, String> get warrantyDurations {
+  if (_warrantyDurations is EqualUnmodifiableMapView) return _warrantyDurations;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableMapView(_warrantyDurations);
+}
+
+ final  List<String> _treatments;
+@override@JsonKey() List<String> get treatments {
+  if (_treatments is EqualUnmodifiableListView) return _treatments;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_treatments);
+}
+
+ final  List<String> _services;
+@override@JsonKey() List<String> get services {
+  if (_services is EqualUnmodifiableListView) return _services;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableListView(_services);
+}
+
 
 /// Create a copy of FormState
 /// with the given fields replaced by the non-null parameter values.
@@ -263,16 +301,16 @@ _$FormStateCopyWith<_FormState> get copyWith => __$FormStateCopyWithImpl<_FormSt
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _FormState&&(identical(other.currentStep, currentStep) || other.currentStep == currentStep)&&(identical(other.isTypingMode, isTypingMode) || other.isTypingMode == isTypingMode)&&(identical(other.license, license) || other.license == license)&&(identical(other.maker, maker) || other.maker == maker)&&(identical(other.model, model) || other.model == model)&&(identical(other.year, year) || other.year == year)&&(identical(other.month, month) || other.month == month)&&(identical(other.test, test) || other.test == test)&&(identical(other.hand, hand) || other.hand == hand)&&(identical(other.ownership, ownership) || other.ownership == ownership)&&(identical(other.prevOwnership, prevOwnership) || other.prevOwnership == prevOwnership)&&(identical(other.km, km) || other.km == km)&&(identical(other.price, price) || other.price == price)&&(identical(other.handicapped, handicapped) || other.handicapped == handicapped)&&(identical(other.description, description) || other.description == description)&&const DeepCollectionEquality().equals(other._images, _images)&&(identical(other.aiResponse, aiResponse) || other.aiResponse == aiResponse)&&(identical(other.isRecording, isRecording) || other.isRecording == isRecording)&&(identical(other.isProcessing, isProcessing) || other.isProcessing == isProcessing));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _FormState&&(identical(other.currentStep, currentStep) || other.currentStep == currentStep)&&(identical(other.isTypingMode, isTypingMode) || other.isTypingMode == isTypingMode)&&(identical(other.license, license) || other.license == license)&&(identical(other.maker, maker) || other.maker == maker)&&(identical(other.model, model) || other.model == model)&&(identical(other.year, year) || other.year == year)&&(identical(other.month, month) || other.month == month)&&(identical(other.test, test) || other.test == test)&&(identical(other.hand, hand) || other.hand == hand)&&(identical(other.ownership, ownership) || other.ownership == ownership)&&(identical(other.prevOwnership, prevOwnership) || other.prevOwnership == prevOwnership)&&(identical(other.km, km) || other.km == km)&&(identical(other.price, price) || other.price == price)&&(identical(other.handicapped, handicapped) || other.handicapped == handicapped)&&(identical(other.vehicleCondition, vehicleCondition) || other.vehicleCondition == vehicleCondition)&&(identical(other.description, description) || other.description == description)&&(identical(other.fuelType, fuelType) || other.fuelType == fuelType)&&(identical(other.gear, gear) || other.gear == gear)&&const DeepCollectionEquality().equals(other._images, _images)&&(identical(other.aiResponse, aiResponse) || other.aiResponse == aiResponse)&&(identical(other.isRecording, isRecording) || other.isRecording == isRecording)&&(identical(other.isProcessing, isProcessing) || other.isProcessing == isProcessing)&&const DeepCollectionEquality().equals(other._warranties, _warranties)&&const DeepCollectionEquality().equals(other._warrantyDurations, _warrantyDurations)&&const DeepCollectionEquality().equals(other._treatments, _treatments)&&const DeepCollectionEquality().equals(other._services, _services));
 }
 
 
 @override
-int get hashCode => Object.hashAll([runtimeType,currentStep,isTypingMode,license,maker,model,year,month,test,hand,ownership,prevOwnership,km,price,handicapped,description,const DeepCollectionEquality().hash(_images),aiResponse,isRecording,isProcessing]);
+int get hashCode => Object.hashAll([runtimeType,currentStep,isTypingMode,license,maker,model,year,month,test,hand,ownership,prevOwnership,km,price,handicapped,vehicleCondition,description,fuelType,gear,const DeepCollectionEquality().hash(_images),aiResponse,isRecording,isProcessing,const DeepCollectionEquality().hash(_warranties),const DeepCollectionEquality().hash(_warrantyDurations),const DeepCollectionEquality().hash(_treatments),const DeepCollectionEquality().hash(_services)]);
 
 @override
 String toString() {
-  return 'FormState(currentStep: $currentStep, isTypingMode: $isTypingMode, license: $license, maker: $maker, model: $model, year: $year, month: $month, test: $test, hand: $hand, ownership: $ownership, prevOwnership: $prevOwnership, km: $km, price: $price, handicapped: $handicapped, description: $description, images: $images, aiResponse: $aiResponse, isRecording: $isRecording, isProcessing: $isProcessing)';
+  return 'FormState(currentStep: $currentStep, isTypingMode: $isTypingMode, license: $license, maker: $maker, model: $model, year: $year, month: $month, test: $test, hand: $hand, ownership: $ownership, prevOwnership: $prevOwnership, km: $km, price: $price, handicapped: $handicapped, vehicleCondition: $vehicleCondition, description: $description, fuelType: $fuelType, gear: $gear, images: $images, aiResponse: $aiResponse, isRecording: $isRecording, isProcessing: $isProcessing, warranties: $warranties, warrantyDurations: $warrantyDurations, treatments: $treatments, services: $services)';
 }
 
 
@@ -283,7 +321,7 @@ abstract mixin class _$FormStateCopyWith<$Res> implements $FormStateCopyWith<$Re
   factory _$FormStateCopyWith(_FormState value, $Res Function(_FormState) _then) = __$FormStateCopyWithImpl;
 @override @useResult
 $Res call({
- int currentStep, bool isTypingMode, String license, String maker, String model, String year, String month, String test, String hand, String ownership, String prevOwnership, String km, String price, String handicapped, String description, List<String> images, String aiResponse, bool isRecording, bool isProcessing
+ int currentStep, bool isTypingMode, String license, String maker, String model, String year, String month, String test, String hand, String ownership, String prevOwnership, String km, String price, String handicapped, String vehicleCondition, String description, String fuelType, String gear, List<String> images, String aiResponse, bool isRecording, bool isProcessing, List<String> warranties, Map<String, String> warrantyDurations, List<String> treatments, List<String> services
 });
 
 
@@ -300,7 +338,7 @@ class __$FormStateCopyWithImpl<$Res>
 
 /// Create a copy of FormState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? currentStep = null,Object? isTypingMode = null,Object? license = null,Object? maker = null,Object? model = null,Object? year = null,Object? month = null,Object? test = null,Object? hand = null,Object? ownership = null,Object? prevOwnership = null,Object? km = null,Object? price = null,Object? handicapped = null,Object? description = null,Object? images = null,Object? aiResponse = null,Object? isRecording = null,Object? isProcessing = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? currentStep = null,Object? isTypingMode = null,Object? license = null,Object? maker = null,Object? model = null,Object? year = null,Object? month = null,Object? test = null,Object? hand = null,Object? ownership = null,Object? prevOwnership = null,Object? km = null,Object? price = null,Object? handicapped = null,Object? vehicleCondition = null,Object? description = null,Object? fuelType = null,Object? gear = null,Object? images = null,Object? aiResponse = null,Object? isRecording = null,Object? isProcessing = null,Object? warranties = null,Object? warrantyDurations = null,Object? treatments = null,Object? services = null,}) {
   return _then(_FormState(
 currentStep: null == currentStep ? _self.currentStep : currentStep // ignore: cast_nullable_to_non_nullable
 as int,isTypingMode: null == isTypingMode ? _self.isTypingMode : isTypingMode // ignore: cast_nullable_to_non_nullable
@@ -316,12 +354,19 @@ as String,prevOwnership: null == prevOwnership ? _self.prevOwnership : prevOwner
 as String,km: null == km ? _self.km : km // ignore: cast_nullable_to_non_nullable
 as String,price: null == price ? _self.price : price // ignore: cast_nullable_to_non_nullable
 as String,handicapped: null == handicapped ? _self.handicapped : handicapped // ignore: cast_nullable_to_non_nullable
+as String,vehicleCondition: null == vehicleCondition ? _self.vehicleCondition : vehicleCondition // ignore: cast_nullable_to_non_nullable
 as String,description: null == description ? _self.description : description // ignore: cast_nullable_to_non_nullable
+as String,fuelType: null == fuelType ? _self.fuelType : fuelType // ignore: cast_nullable_to_non_nullable
+as String,gear: null == gear ? _self.gear : gear // ignore: cast_nullable_to_non_nullable
 as String,images: null == images ? _self._images : images // ignore: cast_nullable_to_non_nullable
 as List<String>,aiResponse: null == aiResponse ? _self.aiResponse : aiResponse // ignore: cast_nullable_to_non_nullable
 as String,isRecording: null == isRecording ? _self.isRecording : isRecording // ignore: cast_nullable_to_non_nullable
 as bool,isProcessing: null == isProcessing ? _self.isProcessing : isProcessing // ignore: cast_nullable_to_non_nullable
-as bool,
+as bool,warranties: null == warranties ? _self._warranties : warranties // ignore: cast_nullable_to_non_nullable
+as List<String>,warrantyDurations: null == warrantyDurations ? _self._warrantyDurations : warrantyDurations // ignore: cast_nullable_to_non_nullable
+as Map<String, String>,treatments: null == treatments ? _self._treatments : treatments // ignore: cast_nullable_to_non_nullable
+as List<String>,services: null == services ? _self._services : services // ignore: cast_nullable_to_non_nullable
+as List<String>,
   ));
 }
 

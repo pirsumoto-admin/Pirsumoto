@@ -6,22 +6,57 @@ part of 'form_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$formControllerHash() => r'c977a89329e81c52f6948e91dee20d6e5a8e2020';
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint, type=warning
 
-/// See also [FormController].
 @ProviderFor(FormController)
-final formControllerProvider =
-    AutoDisposeNotifierProvider<FormController, FormState>.internal(
-      FormController.new,
-      name: r'formControllerProvider',
-      debugGetCreateSourceHash:
-          const bool.fromEnvironment('dart.vm.product')
-              ? null
-              : _$formControllerHash,
-      dependencies: null,
-      allTransitiveDependencies: null,
-    );
+final formControllerProvider = FormControllerProvider._();
 
-typedef _$FormController = AutoDisposeNotifier<FormState>;
-// ignore_for_file: type=lint
-// ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
+final class FormControllerProvider
+    extends $NotifierProvider<FormController, FormState> {
+  FormControllerProvider._()
+    : super(
+        from: null,
+        argument: null,
+        retry: null,
+        name: r'formControllerProvider',
+        isAutoDispose: true,
+        dependencies: null,
+        $allTransitiveDependencies: null,
+      );
+
+  @override
+  String debugGetCreateSourceHash() => _$formControllerHash();
+
+  @$internal
+  @override
+  FormController create() => FormController();
+
+  /// {@macro riverpod.override_with_value}
+  Override overrideWithValue(FormState value) {
+    return $ProviderOverride(
+      origin: this,
+      providerOverride: $SyncValueProvider<FormState>(value),
+    );
+  }
+}
+
+String _$formControllerHash() => r'defce4915b2aaa68304da4d9384e0fc57e472935';
+
+abstract class _$FormController extends $Notifier<FormState> {
+  FormState build();
+  @$mustCallSuper
+  @override
+  void runBuild() {
+    final ref = this.ref as $Ref<FormState, FormState>;
+    final element =
+        ref.element
+            as $ClassProviderElement<
+              AnyNotifier<FormState, FormState>,
+              FormState,
+              Object?,
+              Object?
+            >;
+    element.handleCreate(ref, build);
+  }
+}
