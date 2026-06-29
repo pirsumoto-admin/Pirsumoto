@@ -1,15 +1,51 @@
 package com.pirsumoto.app
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import android.util.Log
+import android.view.WindowManager
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.pirsumoto/accessibility"
+    private val WHATSAPP_CHANNEL = "com.pirsumoto/whatsapp_bridge"
+    private val WHATSAPP_EVENTS_CHANNEL = "com.pirsumoto/whatsapp_bridge/events"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        prepareForAutoPublishIntent(intent)
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        prepareForAutoPublishIntent(intent)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        WhatsAppAutoPublishStore.captureIntent(intent)
+        val whatsappBridgeController = WhatsAppBridgeController(this)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_CHANNEL).setMethodCallHandler { call, result ->
+            whatsappBridgeController.handle(call, result)
+        }
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_EVENTS_CHANNEL).setStreamHandler(
+            object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    WhatsAppBridgeEvents.attach(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    WhatsAppBridgeEvents.detach()
+                }
+            }
+        )
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             
             if (call.method == "checkPermission") {
@@ -253,6 +289,15 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                 }
+                "findNodeTextAfterTarget" -> {
+                    val target = call.argument<String>("target") ?: ""
+                    val targetInstance = call.argument<Int>("targetInstance") ?: 1
+                    val threshold = call.argument<Double>("threshold") ?: 0.82
+                    val offset = call.argument<Int>("offset") ?: 1
+
+                    val textVal = service.findNodeTextAfterTarget(rootNode!!, target, targetInstance, threshold, offset)
+                    result.success(textVal)
+                }
                 "pressBack" -> {
                     val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
                     result.success(pressed)
@@ -272,6 +317,95 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                 }
+                "tapByLabel" -> {
+                    // Additive generic native tap: resolve the label, walk up to the
+                    // nearest clickable ancestor, and try a semantic ACTION_CLICK
+                    // first (most reliable — fires the element's real handler).
+                    // Only when the semantic click is rejected do we fall back to a
+                    // gesture tap on the (guarded) bounds. Returns the bounds tapped
+                    // so Dart can keep the on-screen tap preview marker working.
+                    val target = call.argument<String>("target") ?: ""
+                    val targetInstance = call.argument<Int>("targetInstance") ?: 1
+                    val threshold = call.argument<Double>("threshold") ?: 0.82
+                    val deltaY = call.argument<Double>("deltaY") ?: 0.0
+
+                    val matches = service.findBestHebrewMatches(rootNode!!, target, threshold)
+                    if (matches.size >= targetInstance) {
+                        val match = matches[targetInstance - 1]
+                        val clickable = service.findClickableAncestor(match.node)
+
+                        val dm = service.resources.displayMetrics
+                        val bounds = if (clickable != null) {
+                            val rect = android.graphics.Rect()
+                            clickable.getBoundsInScreen(rect)
+                            // Guard: a full-screen clickable wrapper would hijack the
+                            // gesture tap, so prefer the precise label bounds then.
+                            if (rect.width() > dm.widthPixels * 0.97 &&
+                                rect.height() > dm.heightPixels * 0.6) {
+                                match.bounds
+                            } else {
+                                rect
+                            }
+                        } else {
+                            match.bounds
+                        }
+                        bounds.offset(0, deltaY.toInt())
+
+                        var method = "gesture"
+                        var clicked = false
+                        if (clickable != null) {
+                            clicked = service.clickNode(clickable)
+                            if (clicked) method = "semantic"
+                        }
+                        if (!clicked) {
+                            service.tapBounds(bounds)
+                        }
+
+                        result.success(
+                            mapOf(
+                                "x" to bounds.centerX().toDouble(),
+                                "y" to bounds.centerY().toDouble(),
+                                "method" to method
+                            )
+                        )
+                    } else {
+                        Log.d("A11Y", "tapByLabel: '$target' not found (instance $targetInstance). Total matches: ${matches.size}")
+                        result.success(null)
+                    }
+                }
+                "findClickableAndGetBounds" -> {
+                    // Additive generic locator: resolve the label match, then walk
+                    // up to the nearest clickable ancestor so taps land on the
+                    // real interactive container instead of an inert text node.
+                    val target = call.argument<String>("target") ?: ""
+                    val targetInstance = call.argument<Int>("targetInstance") ?: 1
+                    val threshold = call.argument<Double>("threshold") ?: 0.82
+
+                    val matches = service.findBestHebrewMatches(rootNode!!, target, threshold)
+                    if (matches.size >= targetInstance) {
+                        val match = matches[targetInstance - 1]
+                        val clickable = service.findClickableAncestor(match.node)
+                        val bounds = if (clickable != null) {
+                            val rect = android.graphics.Rect()
+                            clickable.getBoundsInScreen(rect)
+                            // Guard: a full-screen clickable wrapper would hijack the
+                            // tap, so fall back to the precise label bounds then.
+                            val dm = service.resources.displayMetrics
+                            if (rect.width() > dm.widthPixels * 0.97 &&
+                                rect.height() > dm.heightPixels * 0.6) {
+                                match.bounds
+                            } else {
+                                rect
+                            }
+                        } else {
+                            match.bounds
+                        }
+                        result.success(mapOf("x" to bounds.centerX().toDouble(), "y" to bounds.centerY().toDouble()))
+                    } else {
+                        Log.d("A11Y", "Clickable target '$target' not found (instance $targetInstance). Total matches: ${matches.size}")
+                        result.success(null)
+                    }
+                }
                 "pasteText" -> {
                     var pasted = false
                     val focusedNode = service.rootInActiveWindow?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
@@ -287,6 +421,29 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    private fun prepareForAutoPublishIntent(intent: Intent?) {
+        if (!WhatsAppAutoPublishStore.captureIntent(intent)) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            try {
+                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+                keyguardManager.requestDismissKeyguard(this, null)
+            } catch (e: Exception) {
+                Log.w("WA-AutoPublish", "Could not request keyguard dismiss", e)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
         }
     }
 

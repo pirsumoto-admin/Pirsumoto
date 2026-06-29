@@ -433,6 +433,88 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         return null
     }
 
+    fun findNodeTextAfterTarget(
+        root: AccessibilityNodeInfo?,
+        target: String,
+        targetInstance: Int = 1,
+        threshold: Double = 0.82,
+        offset: Int = 1
+    ): String? {
+        if (root == null) return null
+
+        val normalizedTargetList = target.split("|").map { normalizeHebrew(it) }
+        
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+        fun visitAndCollect(node: AccessibilityNodeInfo) {
+            allNodes.add(node)
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { visitAndCollect(it) }
+            }
+        }
+        visitAndCollect(root)
+
+        data class TargetMatch(val match: Match, val nodeIndex: Int)
+        val allMatches = mutableListOf<TargetMatch>()
+
+        for ((index, node) in allNodes.withIndex()) {
+            val labels = listOfNotNull(
+                node.text?.toString(),
+                node.contentDescription?.toString()
+            )
+
+            for (label in labels) {
+                val normalizedLabel = normalizeHebrew(label)
+                var bestScore = 0.0
+                for (normalizedTarget in normalizedTargetList) {
+                    val score = similarity(normalizedLabel, normalizedTarget)
+                    if (score > bestScore) {
+                        bestScore = score
+                    }
+                }
+
+                if (bestScore >= threshold) {
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+
+                    val isDuplicate = allMatches.any { 
+                        Math.abs(it.match.bounds.centerX() - rect.centerX()) < 25 &&
+                        Math.abs(it.match.bounds.centerY() - rect.centerY()) < 25 
+                    }
+
+                    if (!isDuplicate) {
+                        allMatches.add(
+                            TargetMatch(
+                                match = Match(node = node, label = label, bounds = rect, score = bestScore),
+                                nodeIndex = index
+                            )
+                        )
+                    }
+                    break
+                }
+            }
+        }
+
+        val sortedMatches = allMatches.sortedByDescending { it.match.score }
+        
+        if (sortedMatches.size >= targetInstance) {
+            val targetMatch = sortedMatches[targetInstance - 1]
+            var currentOffset = 0
+            for (i in (targetMatch.nodeIndex + 1) until allNodes.size) {
+                val node = allNodes[i]
+                val hasText = !node.text.isNullOrEmpty() || !node.contentDescription.isNullOrEmpty()
+                val isTextView = node.className?.toString()?.contains("TextView") == true
+                val isEditText = node.className?.toString()?.contains("EditText") == true
+                if (hasText || isTextView || isEditText || node.isClickable || node.isEditable) {
+                    currentOffset++
+                    if (currentOffset == offset) {
+                        return node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var current: AccessibilityNodeInfo? = node
         while (current != null) {

@@ -414,6 +414,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
 
   void _syncControllers(fp.FormState s) {
     _licenseController.text = s.license;
+    _colorController.text = s.color;
     _monthController.text = s.month;
     if (s.test.contains(',')) {
       final parts = s.test.split(',');
@@ -536,6 +537,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           if (fullColor.isNotEmpty) {
             final colorPart = fullColor.split(' ').first;
             _colorController.text = colorPart;
+            notifier.updateField('color', colorPart);
           }
 
           final moed = data['moed_aliya_lakvish']?.toString() ?? '';

@@ -10,9 +10,10 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ui_context.dart';
+import '../../services/whatsapp_message_bridge_service.dart';
 import '../../services/yad2_automation_service.dart';
-import '../../services/yad2_automation_gemma_service.dart';
-import '../../services/yad2_accessibility_automation_service.dart';
+//import '../../services/yad2_accessibility_automation_service.dart';
+import '../../services/yad2_accessibility_automation_service_optimized.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -110,11 +111,15 @@ const _kShadowExtractorJs = '''
 class Yad2Screen extends StatefulWidget {
   final VehiclePublishData publishData;
   final bool useGemmaAutomation;
+  final bool startedFromWhatsApp;
+  final String? whatsAppSenderKey;
 
   const Yad2Screen({
     super.key,
     required this.publishData,
     this.useGemmaAutomation = false,
+    this.startedFromWhatsApp = false,
+    this.whatsAppSenderKey,
   });
 
   @override
@@ -132,6 +137,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   bool _automationError = false;
   bool _showPauseButton = false;
   bool _isPaused = false;
+  bool _whatsAppStopReported = false;
 
   // Tap preview marker — CSS coordinates, null when hidden
   double? _tapMarkerX;
@@ -284,11 +290,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     });
     // Auto-hide after 700ms (200ms after the actual click fires)
     Future.delayed(const Duration(milliseconds: 700), () {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _tapMarkerX = null;
           _tapMarkerY = null;
         });
+      }
     });
   }
 
@@ -307,6 +314,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       debugPrint('[Yad2Screen] Error requesting audio permissions: $e');
     }
 
+    if (!mounted) return;
     final ocrService = OcrService();
     final devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
 
@@ -321,16 +329,75 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
   }
 
+  Future<void> _notifyWhatsAppAutomationStopped({
+    required String stepName,
+    required String error,
+  }) async {
+    final senderKey = widget.whatsAppSenderKey?.trim();
+    if (!widget.startedFromWhatsApp ||
+        senderKey == null ||
+        senderKey.isEmpty ||
+        _whatsAppStopReported ||
+        !Platform.isAndroid) {
+      return;
+    }
+
+    _whatsAppStopReported = true;
+    try {
+      await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+        senderKey: senderKey,
+        message:
+            'האוטומציה נעצרה בשלב: $stepName\n'
+            'נא לבדוק את המסך ולהמשיך משם.\n'
+            'שגיאה: $error',
+      );
+    } catch (e) {
+      debugPrint('[Yad2Screen] Failed to notify WhatsApp automation stop: $e');
+    }
+  }
+
   void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
     if (widget.useGemmaAutomation) {
       _automationService = Yad2AccessibilityAutomationService(
         formData: widget.publishData,
         controller: _controller,
+        observeUI: _observeUI,
+        ocrService: ocrService,
+        startedFromWhatsApp: widget.startedFromWhatsApp,
+        whatsAppSenderKey: widget.whatsAppSenderKey,
         onTapPreview: _showTapMarker,
+        onAutomationFallback: (source, target) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  source == 'OCR'
+                      ? '🔄 שים לב: המערכת משתמשת בזיהוי תמונה (OCR) עבור "$target"'
+                      : '🔄 שים לב: המערכת משתמשת ב-JavaScript עבור "$target"',
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                backgroundColor:
+                    source == 'OCR' ? Colors.orange : Colors.blueGrey,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        },
         onPhaseComplete: (phase) {
           if (mounted) setState(() => _statusMessage = phase.description);
         },
         onPhaseError: (phase, error) {
+          unawaited(
+            _notifyWhatsAppAutomationStopped(
+              stepName: phase.description,
+              error: error,
+            ),
+          );
           if (mounted) {
             setState(() {
               _isPaused = true;
@@ -348,6 +415,14 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onAutomationComplete: (success) {
+          if (!success) {
+            unawaited(
+              _notifyWhatsAppAutomationStopped(
+                stepName: 'סיום האוטומציה',
+                error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
+              ),
+            );
+          }
           if (mounted) {
             setState(() {
               _automationComplete = true;
@@ -396,6 +471,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onPhaseError: (phase, error) {
+          unawaited(
+            _notifyWhatsAppAutomationStopped(
+              stepName: phase.description,
+              error: error,
+            ),
+          );
           if (mounted) {
             setState(() {
               _isPaused = true;
@@ -413,6 +494,14 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onAutomationComplete: (success) {
+          if (!success) {
+            unawaited(
+              _notifyWhatsAppAutomationStopped(
+                stepName: 'סיום האוטומציה',
+                error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
+              ),
+            );
+          }
           if (mounted) {
             setState(() {
               _automationComplete = true;
@@ -474,6 +563,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                   onPressed: () async {
                     final checkAgain =
                         await Yad2AccessibilityAutomationService.checkPermission();
+                    if (!ctx.mounted || !mounted) return;
                     if (checkAgain) {
                       Navigator.of(ctx).pop();
                       _startAutomationService(devicePixelRatio, ocrService);

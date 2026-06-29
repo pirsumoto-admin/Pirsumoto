@@ -213,10 +213,17 @@ class ListingsScreen extends ConsumerWidget {
     final ownership = listing['ownership'] ?? 'חברה';
     final km = listing['km'] ?? '124,550';
     final isFavorite = listing['isFavorite'] == true;
-    final imageUrl =
-        listing['images'] != null && (listing['images'] as List).isNotEmpty
-            ? listing['images'][0]
-            : 'https://via.placeholder.com/150';
+    dynamic firstImage;
+    if (listing['images'] != null && (listing['images'] as List).isNotEmpty) {
+      firstImage = (listing['images'] as List).first;
+    }
+    
+    String imageUrl = 'https://via.placeholder.com/150';
+    if (firstImage is String) {
+      imageUrl = firstImage;
+    } else if (firstImage is Map<String, dynamic>) {
+      imageUrl = firstImage['url'] ?? firstImage['path'] ?? 'https://via.placeholder.com/150';
+    }
 
     return GestureDetector(
       onTap: () {

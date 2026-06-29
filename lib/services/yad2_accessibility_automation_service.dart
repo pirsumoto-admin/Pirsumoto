@@ -13,6 +13,7 @@ import 'yad2_automation_models.dart' show VehiclePublishData, AutomationPhase;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'whatsapp_message_bridge_service.dart';
 
 class Yad2AccessibilityAutomationService {
   final VehiclePublishData formData;
@@ -115,9 +116,14 @@ class Yad2AccessibilityAutomationService {
   bool get isPaused => _isPaused;
   AutomationPhase? get pausedPhase => _pausedPhase;
 
+  final bool startedFromWhatsApp;
+  final String? whatsAppSenderKey;
+
   Yad2AccessibilityAutomationService({
     required this.formData,
     required this.controller,
+    this.startedFromWhatsApp = false,
+    this.whatsAppSenderKey,
     this.onPhaseComplete,
     this.onPhaseError,
     this.onAutomationComplete,
@@ -152,6 +158,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   void stepBack() {
+    //toolLogTree();
     final current = _pausedPhase ?? _currentPhase;
     if (current == null) return;
     final currentIndex = current.index;
@@ -223,18 +230,18 @@ class Yad2AccessibilityAutomationService {
           await _phase5eTreatments();
         case AutomationPhase.phase5f:
           await _phase5fServices();
-        //case AutomationPhase.phase6:
-        //  await _phase6OpenHandDropdown();
-        //case AutomationPhase.phase7:
-        //  await _phase7SelectHandValue();
-        //case AutomationPhase.phase8:
-        //  await _phase8OpenCurrentOwnershipDropdown();
-        //case AutomationPhase.phase9:
-        //  await _phase9SelectCurrentOwnershipValue();
-        //case AutomationPhase.phase10:
-        //  await _phase10OpenPreviousOwnershipDropdown();
-        //case AutomationPhase.phase11:
-        //  await _phase11SelectPreviousOwnershipValue();
+        case AutomationPhase.phase6:
+          await _phase6OpenHandDropdown();
+        case AutomationPhase.phase7:
+          await _phase7SelectHandValue();
+        case AutomationPhase.phase8:
+          await _phase8OpenCurrentOwnershipDropdown();
+        case AutomationPhase.phase9:
+          await _phase9SelectCurrentOwnershipValue();
+        case AutomationPhase.phase10:
+          await _phase10OpenPreviousOwnershipDropdown();
+        case AutomationPhase.phase11:
+          await _phase11SelectPreviousOwnershipValue();
         case AutomationPhase.phase12:
           await _phase12EnterKilometers();
         case AutomationPhase.phase13:
@@ -437,6 +444,33 @@ class Yad2AccessibilityAutomationService {
         '[Yad2-A11y] PlatformException in toolTapNodeBefore: ${e.message}',
       );
       return false;
+    }
+  }
+
+  /// Generic function tool: Ask Android AccessibilityService to find the node AFTER a specific node and get its text
+  Future<String?> toolGetNodeTextAfter(
+    String targetText, {
+    int targetInstance = 1,
+    double threshold = 0.82,
+    int offset = 1,
+  }) async {
+    debugPrint(
+      '[Yad2-A11y] Tool: toolGetNodeTextAfter("$targetText", instance=$targetInstance, offset=$offset)',
+    );
+    try {
+      final text = await _channel
+          .invokeMethod<String>('findNodeTextAfterTarget', {
+            'target': targetText,
+            'targetInstance': targetInstance,
+            'threshold': threshold,
+            'offset': offset,
+          });
+      return text;
+    } on PlatformException catch (e) {
+      debugPrint(
+        '[Yad2-A11y] PlatformException in toolGetNodeTextAfter: ${e.message}',
+      );
+      return null;
     }
   }
 
@@ -768,6 +802,22 @@ class Yad2AccessibilityAutomationService {
     }
   }
 
+  Future<void> _closeDropdownIfNeeded() async {
+    await Future.delayed(const Duration(milliseconds: 500));
+    final closed = await _retryUntil(
+      () => tapSmart('סגירת חלון'),
+      timeout: const Duration(seconds: 3),
+    );
+    if (closed) {
+      debugPrint('[Yad2-A11y] ✖️ Manually closed dropdown using "סגירת חלון"');
+      await Future.delayed(const Duration(milliseconds: 500));
+    } else {
+      debugPrint(
+        '[Yad2-A11y] ✖️ "סגירת חלון" button not found, assuming dropdown is closed',
+      );
+    }
+  }
+
   Future<bool> _dismissMaybeLaterPopup() async {
     const popupTexts = ['אולי אחר כך'];
     for (var text in popupTexts) {
@@ -913,18 +963,18 @@ class Yad2AccessibilityAutomationService {
       if (_loginGateTickBusy) return;
       _loginGateTickBusy = true;
       try {
-        if (!await _isElementPresent('פרטיים ומסחריים')) {
-          // Post-login popups can cover the card and hide it from the
-          // native tree — dismiss them so the next tick can see it.
-          if (await _dismissGotItPopup()) {
-            debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "הבנתי" popup');
-            return;
-          }
-          if (await _dismissMaybeLaterPopup()) {
-            debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "אולי אחר כך" popup');
-          }
+        //if (!await _isElementPresent('פרטיים ומסחריים')) {
+        // Post-login popups can cover the card and hide it from the
+        // native tree — dismiss them so the next tick can see it.
+        if (await _dismissGotItPopup()) {
+          debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "הבנתי" popup');
           return;
         }
+        if (await _dismissMaybeLaterPopup()) {
+          debugPrint('[Yad2-A11y] 🔐 Gate: dismissed "אולי אחר כך" popup');
+        }
+        return;
+        //}
         debugPrint('[Yad2-A11y] 🎉 Login completed — resuming automation');
         timer.cancel();
         _loginSamplingTimer = null;
@@ -992,7 +1042,7 @@ class Yad2AccessibilityAutomationService {
     bool loginDetected = false;
     await _retryUntil(
       () async {
-        if (await _isElementPresent('פרטיים ומסחריים')) return true;
+        //if (await _isElementPresent('פרטיים ומסחריים')) return true;
         if (await _isElementPresent('חיפוש')) return true;
         if (await _dismissGotItPopup()) return false; // re-poll after dismiss
         if (await _dismissMaybeLaterPopup()) return false;
@@ -1002,11 +1052,28 @@ class Yad2AccessibilityAutomationService {
         }
         return false;
       },
-      timeout: const Duration(milliseconds: 800),
+      timeout: const Duration(milliseconds: 1000),
       pollInterval: const Duration(milliseconds: 500),
     );
 
     if (loginDetected) {
+      if (startedFromWhatsApp &&
+          whatsAppSenderKey != null &&
+          whatsAppSenderKey!.isNotEmpty) {
+        try {
+          final success = await WhatsAppMessageBridgeService.instance
+              .sendReplyToWhatsApp(
+                senderKey: whatsAppSenderKey!,
+                message:
+                    'אנא התחבר לחשבון יד2 במכשיר הפירסומוטו שלך כדי להמשיך.',
+              );
+          debugPrint(
+            '[Yad2-A11y] Dispatched login prompt to WhatsApp. Success: $success',
+          );
+        } catch (e) {
+          debugPrint('[Yad2-A11y] Failed to send login prompt to WhatsApp: $e');
+        }
+      }
       _startLoginGate();
       return;
     }
@@ -1311,6 +1378,20 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase6OpenHandDropdown() async {
+    // Check if 2 nodes after the EditText (which follows 'יד*') text value is empty.
+    // The EditText is 2 nodes after the 'יד*' node.
+    final String? textValue = await toolGetNodeTextAfter('יד*', offset: 2);
+
+    if (textValue != null && textValue.trim().isNotEmpty) {
+      debugPrint(
+        '[Yad2-A11y] "יד*" value is not empty ($textValue). Jumping to Phase 12.',
+      );
+      _handlePhaseComplete(
+        AutomationPhase.phase11,
+      ); // phase11 triggers jump to phase12
+      return;
+    }
+
     final opened = await _retryUntil(
       () => _performWithPopupHandling(() => toolTapNodeAfter('יד*')),
       timeout: const Duration(seconds: 8),
@@ -1334,6 +1415,7 @@ class Yad2AccessibilityAutomationService {
       timeout: const Duration(seconds: 6),
     );
     if (selected) {
+      await _closeDropdownIfNeeded();
       _handlePhaseComplete(AutomationPhase.phase7);
       return;
     }
@@ -1356,12 +1438,18 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase9SelectCurrentOwnershipValue() async {
+    final ownershipParts = formData.currentOwnership.trim().split(' ');
+    final currentOwnershipSearch =
+        ownershipParts.length > 1
+            ? '${formData.currentOwnership.trim()}|${ownershipParts.last}'
+            : formData.currentOwnership.trim();
+
     final selected = await _retryUntil(
-      () =>
-          _performWithPopupHandling(() => tapSmart(formData.currentOwnership)),
+      () => _performWithPopupHandling(() => tapSmart(currentOwnershipSearch)),
       timeout: const Duration(seconds: 6),
     );
     if (selected) {
+      await _closeDropdownIfNeeded();
       _handlePhaseComplete(AutomationPhase.phase9);
       return;
     }
@@ -1387,12 +1475,18 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _phase11SelectPreviousOwnershipValue() async {
+    final ownershipParts = formData.previousOwnership.trim().split(' ');
+    final previousOwnershipSearch =
+        ownershipParts.length > 1
+            ? '${formData.previousOwnership.trim()}|${ownershipParts.last}'
+            : formData.previousOwnership.trim();
+
     final selected = await _retryUntil(
-      () =>
-          _performWithPopupHandling(() => tapSmart(formData.previousOwnership)),
+      () => _performWithPopupHandling(() => tapSmart(previousOwnershipSearch)),
       timeout: const Duration(seconds: 6),
     );
     if (selected) {
+      await _closeDropdownIfNeeded();
       _handlePhaseComplete(AutomationPhase.phase11);
       return;
     }
@@ -1725,7 +1819,7 @@ class Yad2AccessibilityAutomationService {
         delayMs = 700;
         break;
       case AutomationPhase.phase5f:
-        next = AutomationPhase.phase12;
+        next = AutomationPhase.phase6;
         delayMs = 700;
         break;
       case AutomationPhase.phase6:

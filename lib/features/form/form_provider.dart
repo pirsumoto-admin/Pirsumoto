@@ -10,6 +10,7 @@ abstract class FormState with _$FormState {
     @Default(1) int currentStep,
     @Default(false) bool isTypingMode,
     @Default('') String license,
+    @Default('') String color,
     @Default('') String maker,
     @Default('') String model,
     @Default('') String year,
@@ -49,6 +50,9 @@ class FormController extends _$FormController {
     switch (field) {
       case 'license':
         state = state.copyWith(license: value);
+        break;
+      case 'color':
+        state = state.copyWith(color: value);
         break;
       case 'maker':
         state = state.copyWith(maker: value);
@@ -113,6 +117,7 @@ class FormController extends _$FormController {
   void updateFromAI(Map<String, dynamic> data) {
     state = state.copyWith(
       license: data['license']?.toString() ?? state.license,
+      color: data['color']?.toString() ?? state.color,
       month: data['month']?.toString() ?? state.month,
       test: data['test']?.toString() ?? state.test,
       hand: data['hand']?.toString() ?? state.hand,
@@ -121,7 +126,8 @@ class FormController extends _$FormController {
       km: data['km']?.toString() ?? state.km,
       price: data['price']?.toString() ?? state.price,
       handicapped: data['handicapped']?.toString() ?? state.handicapped,
-      vehicleCondition: data['vehicleCondition']?.toString() ?? state.vehicleCondition,
+      vehicleCondition:
+          data['vehicleCondition']?.toString() ?? state.vehicleCondition,
       description: data['description']?.toString() ?? state.description,
       gear: data['gear']?.toString() ?? state.gear,
       isTypingMode: true,
@@ -161,6 +167,7 @@ class FormController extends _$FormController {
     }
     state = state.copyWith(
       license: listing['license']?.toString() ?? '',
+      color: listing['color']?.toString() ?? '',
       maker: listing['maker']?.toString() ?? '',
       model: listing['model']?.toString() ?? '',
       year: listing['year']?.toString() ?? '',
@@ -176,18 +183,22 @@ class FormController extends _$FormController {
       description: listing['description']?.toString() ?? '',
       gear: listing['gear']?.toString() ?? '',
       images: images,
-      warranties: listing['warranties'] != null
-          ? List<String>.from(listing['warranties'])
-          : [],
-      warrantyDurations: listing['warrantyDurations'] != null
-          ? Map<String, String>.from(listing['warrantyDurations'])
-          : {},
-      treatments: listing['treatments'] != null
-          ? List<String>.from(listing['treatments'])
-          : [],
-      services: listing['services'] != null
-          ? List<String>.from(listing['services'])
-          : [],
+      warranties:
+          listing['warranties'] != null
+              ? List<String>.from(listing['warranties'])
+              : [],
+      warrantyDurations:
+          listing['warrantyDurations'] != null
+              ? Map<String, String>.from(listing['warrantyDurations'])
+              : {},
+      treatments:
+          listing['treatments'] != null
+              ? List<String>.from(listing['treatments'])
+              : [],
+      services:
+          listing['services'] != null
+              ? List<String>.from(listing['services'])
+              : [],
       isTypingMode: true,
       currentStep: 2,
     );
