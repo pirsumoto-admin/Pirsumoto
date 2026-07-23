@@ -83,6 +83,14 @@ class WhatsAppMessageBridgeService {
         false;
   }
 
+  Future<bool> requestRebindNotificationListener() async {
+    _assertAndroid();
+    return await _channel.invokeMethod<bool>(
+          'requestRebindNotificationListener',
+        ) ??
+        false;
+  }
+
   Future<bool> openAllFilesAccessSettings() async {
     _assertAndroid();
     return await _channel.invokeMethod<bool>('openAllFilesAccessSettings') ??
@@ -131,6 +139,7 @@ class WhatsAppBridgeStatus {
     required this.backendUrl,
     required this.autoReplyEnabled,
     required this.notificationListenerEnabled,
+    required this.notificationListenerConnected,
     required this.allFilesAccessGranted,
     required this.batteryOptimizationIgnored,
     required this.overlayPermissionGranted,
@@ -143,6 +152,7 @@ class WhatsAppBridgeStatus {
   final String backendUrl;
   final bool autoReplyEnabled;
   final bool notificationListenerEnabled;
+  final bool notificationListenerConnected;
   final bool allFilesAccessGranted;
   final bool batteryOptimizationIgnored;
   final bool overlayPermissionGranted;
@@ -156,6 +166,7 @@ class WhatsAppBridgeStatus {
       backendUrl: map['backendUrl']?.toString() ?? '',
       autoReplyEnabled: map['autoReplyEnabled'] != false,
       notificationListenerEnabled: map['notificationListenerEnabled'] == true,
+      notificationListenerConnected: map['notificationListenerConnected'] == true,
       allFilesAccessGranted: map['allFilesAccessGranted'] == true,
       batteryOptimizationIgnored: map['batteryOptimizationIgnored'] == true,
       overlayPermissionGranted: map['overlayPermissionGranted'] == true,
@@ -171,6 +182,7 @@ class WhatsAppBridgeStatus {
       'backendUrl': backendUrl,
       'autoReplyEnabled': autoReplyEnabled,
       'notificationListenerEnabled': notificationListenerEnabled,
+      'notificationListenerConnected': notificationListenerConnected,
       'allFilesAccessGranted': allFilesAccessGranted,
       'batteryOptimizationIgnored': batteryOptimizationIgnored,
       'overlayPermissionGranted': overlayPermissionGranted,

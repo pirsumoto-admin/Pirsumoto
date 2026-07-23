@@ -645,16 +645,29 @@ class Yad2AccessibilityAutomationService {
           ),
         );
       case AutomationPhase.phase11:
+        toolLogTree();
         final ownership = _valueWithLastWordVariant(formData.previousOwnership);
+        final currentTrimmed = formData.currentOwnership.trim();
+        final previousTrimmed = formData.previousOwnership.trim();
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Select previous ownership value.',
-          action:
-              () => _selectOpenOption(
-                ownership,
-                selectedValue: formData.previousOwnership.trim(),
-                closeAfterSelect: true,
-              ),
+          action: () async {
+            int targetInstance =
+                (currentTrimmed == previousTrimmed && currentTrimmed.isNotEmpty)
+                    ? 2
+                    : 1;
+            if (targetInstance == 1 &&
+                await _isElementPresent(ownership, targetInstance: 2)) {
+              targetInstance = 2;
+            }
+            return _selectOpenOption(
+              ownership,
+              selectedValue: formData.previousOwnership.trim(),
+              targetInstance: targetInstance,
+              closeAfterSelect: true,
+            );
+          },
           validation: _StepValidation(
             selectedValue: formData.previousOwnership.trim(),
             selectedAfterLabel: 'בעלות מקורית|בעלות קודמת',
@@ -799,16 +812,28 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionSelectColorAndShade() async {
+    await _scrollDown(0.2);
     final color = _nonEmpty(formData.color, fallback: 'כחול');
     final shade = _nonEmpty(formData.shade, fallback: color);
     final colorSelected = await _selectOpenOption(color, selectedValue: color);
     if (!colorSelected.success) return colorSelected;
 
-    await Future.delayed(const Duration(milliseconds: 600));
+    await Future.delayed(const Duration(milliseconds: 800));
     final shadeOpened = await _openDropdownByLabel('גוון*|גוון');
     if (!shadeOpened.success) return shadeOpened;
 
-    return _selectOpenOption(shade, selectedValue: shade, targetInstance: 2);
+    int shadeInstance =
+        (color.trim() == shade.trim() && color.trim().isNotEmpty) ? 2 : 1;
+    if (shadeInstance == 1 &&
+        await _isElementPresent(shade, targetInstance: 2)) {
+      shadeInstance = 2;
+    }
+    await Future.delayed(const Duration(milliseconds: 800));
+    return _selectOpenOption(
+      shade,
+      selectedValue: shade,
+      targetInstance: shadeInstance,
+    );
   }
 
   Future<_StepActionResult> _selectOpenOption(
@@ -818,9 +843,14 @@ class Yad2AccessibilityAutomationService {
     bool closeAfterSelect = false,
   }) async {
     final tapped = await _retryUntil(
-      () => _performWithPopupHandling(
-        () => tapSmart(option, targetInstance: targetInstance),
-      ),
+      () => _performWithPopupHandling(() async {
+        int instanceToUse = targetInstance;
+        if (instanceToUse > 1 &&
+            !await _isElementPresent(option, targetInstance: instanceToUse)) {
+          instanceToUse = 1;
+        }
+        return tapSmart(option, targetInstance: instanceToUse);
+      }),
       timeout: const Duration(seconds: 6),
     );
     if (!tapped) {
