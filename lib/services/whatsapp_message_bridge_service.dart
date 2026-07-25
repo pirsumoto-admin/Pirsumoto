@@ -123,6 +123,18 @@ class WhatsAppMessageBridgeService {
         false;
   }
 
+  Future<bool> openXiaomiAutostartSettings() async {
+    _assertAndroid();
+    return await _channel.invokeMethod<bool>('openXiaomiAutostartSettings') ??
+        false;
+  }
+
+  Future<bool> openXiaomiPermissionSettings() async {
+    _assertAndroid();
+    return await _channel.invokeMethod<bool>('openXiaomiPermissionSettings') ??
+        false;
+  }
+
   void _assertAndroid() {
     if (!Platform.isAndroid) {
       throw UnsupportedError(
@@ -145,6 +157,8 @@ class WhatsAppBridgeStatus {
     required this.overlayPermissionGranted,
     required this.fullScreenIntentAllowed,
     required this.watchBusinessWhatsApp,
+    required this.isXiaomi,
+    required this.xiaomiBackgroundPopupGranted,
   });
 
   final bool configured;
@@ -158,6 +172,8 @@ class WhatsAppBridgeStatus {
   final bool overlayPermissionGranted;
   final bool fullScreenIntentAllowed;
   final bool watchBusinessWhatsApp;
+  final bool isXiaomi;
+  final bool xiaomiBackgroundPopupGranted;
 
   factory WhatsAppBridgeStatus.fromMap(Map<dynamic, dynamic> map) {
     return WhatsAppBridgeStatus(
@@ -172,6 +188,8 @@ class WhatsAppBridgeStatus {
       overlayPermissionGranted: map['overlayPermissionGranted'] == true,
       fullScreenIntentAllowed: map['fullScreenIntentAllowed'] != false,
       watchBusinessWhatsApp: map['watchBusinessWhatsApp'] != false,
+      isXiaomi: map['isXiaomi'] == true,
+      xiaomiBackgroundPopupGranted: map['xiaomiBackgroundPopupGranted'] != false,
     );
   }
 
@@ -188,6 +206,8 @@ class WhatsAppBridgeStatus {
       'overlayPermissionGranted': overlayPermissionGranted,
       'fullScreenIntentAllowed': fullScreenIntentAllowed,
       'watchBusinessWhatsApp': watchBusinessWhatsApp,
+      'isXiaomi': isXiaomi,
+      'xiaomiBackgroundPopupGranted': xiaomiBackgroundPopupGranted,
     };
   }
 }

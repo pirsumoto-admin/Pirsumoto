@@ -510,7 +510,13 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Open the color dropdown.',
-          action: () => _openDropdownByLabel('צבע*|צבע|צבע הרכב*|צבע הרכב'),
+          action:
+              () => _openDropdownByLabel(
+                'צבע*|צבע|צבע הרכב*|צבע הרכב',
+                skipToPhase:
+                    AutomationPhase
+                        .phase5, // Treat phase5 as complete, next is phase5a
+              ),
           validation: _StepValidation(
             mustContain: _nonEmpty(formData.color, fallback: 'כחול'),
           ),
@@ -530,7 +536,12 @@ class Yad2AccessibilityAutomationService {
           phase: phase,
           goal: 'Open road-month dropdown.',
           action:
-              () => _openDropdownByLabel('חודש עלייה לכביש|חודש עליה לכביש'),
+              () => _openDropdownByLabel(
+                'חודש עלייה לכביש|חודש עליה לכביש',
+                skipToPhase:
+                    AutomationPhase
+                        .phase5b, // Treat phase5b as complete, next is phase5c
+              ),
           validation: _StepValidation(
             mustContain: VehiclePublishData.monthToHebrew(formData.month),
           ),
@@ -608,7 +619,13 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Open current ownership dropdown.',
-          action: () => _openDropdownByLabel('בעלות נוכחית'),
+          action:
+              () => _openDropdownByLabel(
+                'בעלות נוכחית',
+                skipToPhase:
+                    AutomationPhase
+                        .phase9, // Treat phase9 as complete, next is phase10
+              ),
           validation: _StepValidation(
             mustContain: _nonEmpty(
               formData.currentOwnership,
@@ -636,7 +653,13 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Open previous ownership dropdown.',
-          action: () => _openDropdownByLabel('בעלות מקורית|בעלות קודמת'),
+          action:
+              () => _openDropdownByLabel(
+                'בעלות מקורית|בעלות קודמת',
+                skipToPhase:
+                    AutomationPhase
+                        .phase11, // Treat phase11 as complete, next is phase12
+              ),
           validation: _StepValidation(
             mustContain: _nonEmpty(
               formData.previousOwnership,
@@ -696,7 +719,7 @@ class Yad2AccessibilityAutomationService {
           goal: 'Submit additional-info section.',
           action: _actionSubmitAdditionalInfo,
           validation: const _StepValidation(
-            mustContain: 'ישוב*|יישוב|ישוב|עיר',
+            mustContain: 'פרטים', //'ישוב*|יישוב|ישוב|עיר',
             timeout: Duration(seconds: 10),
           ),
         );
@@ -798,7 +821,36 @@ class Yad2AccessibilityAutomationService {
         : _StepActionResult.failure('Could not tap "$text".');
   }
 
-  Future<_StepActionResult> _openDropdownByLabel(String label) async {
+  Future<_StepActionResult> _openDropdownByLabel(
+    String label, {
+    AutomationPhase? skipToPhase,
+    int checkOffset = 2,
+  }) async {
+    final existingText = await toolGetNodeTextAfter(label, offset: checkOffset);
+
+    if (label.contains('חודש')) {
+      final t1 = await toolGetNodeTextAfter(label, offset: 1);
+      final t2 = await toolGetNodeTextAfter(label, offset: 2);
+      final t3 = await toolGetNodeTextAfter(label, offset: 3);
+      debugPrint(
+        '[Yad2-A11y] _openDropdownByLabel DEBUG "$label" -> offsets: [1: "${t1 ?? 'null'}"], [2: "${t2 ?? 'null'}"], [3: "${t3 ?? 'null'}"]',
+      );
+    }
+
+    if (skipToPhase != null) {
+      if (existingText != null && existingText.trim().isNotEmpty) {
+        final lower = existingText.toLowerCase();
+        if (!lower.contains('בחיר') &&
+            !lower.contains('בחר') &&
+            !lower.contains('הזן')) {
+          debugPrint(
+            '[Yad2-A11y] Dropdown "$label" already filled with: "$existingText". Treating as complete: ${skipToPhase.name}.',
+          );
+          return _StepActionResult.success(completeAs: skipToPhase);
+        }
+      }
+    }
+
     final opened = await _retryUntil(
       () => _performWithPopupHandling(() async {
         if (await toolTapNodeAfter(label)) return true;
@@ -947,6 +999,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionOpenHandDropdown() async {
+    await _scrollDown(0.2);
     final existing = await toolGetNodeTextAfter('יד*|יד', offset: 2);
     if (existing != null && existing.trim().isNotEmpty) {
       debugPrint('[Yad2-A11y] Hand is already filled: $existing');
@@ -958,7 +1011,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionEnterKilometers() async {
-    await _scrollDown(0.2);
+    await _scrollDown(0.1);
     final km = _nonEmpty(formData.kilometers, fallback: '0');
     final entered = await _retryUntil(
       () => _performWithPopupHandling(() async {
@@ -988,6 +1041,7 @@ class Yad2AccessibilityAutomationService {
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
     await _scrollDown(0.35);
     await _dismissKnownPopups();
+    await Future.delayed(const Duration(milliseconds: 2000));
     final submitted = await _retryUntil(
       () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא|לשלב')),
       timeout: const Duration(seconds: 8),
@@ -1012,11 +1066,23 @@ class Yad2AccessibilityAutomationService {
     await _scrollDown(0.1);
     final city = _city;
     final typed = city.length > 1 ? city.substring(0, city.length - 1) : city;
+    final label = 'ישוב*|יישוב|ישוב|עיר';
+
+    final existingText = await toolGetNodeTextAfter(label, offset: 2);
+    if (existingText != null && existingText.trim().isNotEmpty) {
+      final lower = existingText.toLowerCase();
+      if (!lower.contains('בחיר') &&
+          !lower.contains('בחר') &&
+          !lower.contains('הזן')) {
+        debugPrint(
+          '[Yad2-A11y] City input "$label" already filled with: "$existingText". Skipping city selection (phase15).',
+        );
+        return const _StepActionResult.success();
+      }
+    }
 
     final fieldTapped = await _retryUntil(
-      () => _performWithPopupHandling(
-        () => toolTapNodeAfter('ישוב*|יישוב|ישוב|עיר'),
-      ),
+      () => _performWithPopupHandling(() => toolTapNodeAfter(label)),
       timeout: const Duration(seconds: 8),
     );
     if (!fieldTapped) {

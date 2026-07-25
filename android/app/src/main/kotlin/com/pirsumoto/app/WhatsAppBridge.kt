@@ -1,6 +1,7 @@
 package com.pirsumoto.app
 
 import android.app.Activity
+import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,6 +13,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.database.ContentObserver
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,6 +23,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -102,6 +105,11 @@ class WhatsAppBridgeController(private val activity: Activity) {
                 result.success(true)
             }
 
+            "requestRebindNotificationListener" -> {
+                requestRebindNotificationListener()
+                result.success(true)
+            }
+
             "openAllFilesAccessSettings" -> {
                 openAllFilesAccessSettings()
                 result.success(true)
@@ -127,6 +135,16 @@ class WhatsAppBridgeController(private val activity: Activity) {
                 result.success(true)
             }
 
+            "openXiaomiAutostartSettings" -> {
+                openXiaomiAutostartSettings()
+                result.success(true)
+            }
+
+            "openXiaomiPermissionSettings" -> {
+                openXiaomiPermissionSettings()
+                result.success(true)
+            }
+
             else -> result.notImplemented()
         }
     }
@@ -138,11 +156,14 @@ class WhatsAppBridgeController(private val activity: Activity) {
             "backendUrl" to WhatsAppBridgeConfig.backendUrl(activity),
             "autoReplyEnabled" to WhatsAppBridgeConfig.isAutoReplyEnabled(activity),
             "notificationListenerEnabled" to isNotificationListenerEnabled(activity),
+            "notificationListenerConnected" to WhatsAppNotificationListenerService.isConnected,
             "allFilesAccessGranted" to hasAllFilesAccess(),
             "batteryOptimizationIgnored" to isIgnoringBatteryOptimizations(),
             "overlayPermissionGranted" to hasOverlayPermission(),
             "fullScreenIntentAllowed" to canUseFullScreenIntent(),
-            "watchBusinessWhatsApp" to WhatsAppBridgeConfig.watchBusinessWhatsApp(activity)
+            "watchBusinessWhatsApp" to WhatsAppBridgeConfig.watchBusinessWhatsApp(activity),
+            "isXiaomi" to isXiaomiDevice(),
+            "xiaomiBackgroundPopupGranted" to isXiaomiBackgroundPopupPermissionGranted()
         )
     }
 
@@ -212,7 +233,37 @@ class WhatsAppBridgeController(private val activity: Activity) {
         }
     }
 
+    private fun requestRebindNotificationListener() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            if (WhatsAppNotificationListenerService.isConnected) {
+                Log.d(TAG, "NotificationListenerService is ALREADY connected. Skipping requestRebind.")
+                return
+            }
+            try {
+                val component = ComponentName(activity, WhatsAppNotificationListenerService::class.java)
+                NotificationListenerService.requestRebind(component)
+                Log.d(TAG, "Requested rebind for NotificationListenerService")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to request rebind for NotificationListenerService", e)
+            }
+        }
+    }
+
     private fun openBatteryOptimizationSettings() {
+        if (isXiaomiDevice()) {
+            try {
+                val intent = Intent().apply {
+                    setClassName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")
+                    putExtra("package_name", activity.packageName)
+                    putExtra("package_label", activity.applicationInfo.loadLabel(activity.packageManager))
+                }
+                activity.startActivity(intent)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not open MIUI powerkeeper settings", e)
+            }
+        }
+
         val powerManager = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
         if (powerManager.isIgnoringBatteryOptimizations(activity.packageName)) return
 
@@ -266,6 +317,90 @@ class WhatsAppBridgeController(private val activity: Activity) {
             }
         }
         openAppNotificationSettings()
+    }
+
+    private fun isXiaomiDevice(): Boolean {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.getDefault())
+        val brand = Build.BRAND.lowercase(Locale.getDefault())
+        return manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco") ||
+                brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco")
+    }
+
+    private fun isXiaomiBackgroundPopupPermissionGranted(): Boolean {
+        if (!isXiaomiDevice()) return true
+        return try {
+            val appOps = activity.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= 29) {
+                appOps.unsafeCheckOpNoThrow(
+                    "android:bg_start_activity",
+                    android.os.Process.myUid(),
+                    activity.packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    "android:bg_start_activity",
+                    android.os.Process.myUid(),
+                    activity.packageName
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            try {
+                val appOps = activity.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+                val method = appOps.javaClass.getMethod(
+                    "checkOpNoThrow",
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    String::class.java
+                )
+                val mode = method.invoke(appOps, 10021, android.os.Process.myUid(), activity.packageName) as Int
+                mode == AppOpsManager.MODE_ALLOWED
+            } catch (e2: Exception) {
+                Log.w(TAG, "Could not check Xiaomi background popup permission", e2)
+                true
+            }
+        }
+    }
+
+    private fun openXiaomiAutostartSettings() {
+        try {
+            val intent = Intent().apply {
+                setClassName(
+                    "com.miui.securitycenter",
+                    "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                )
+            }
+            activity.startActivity(intent)
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open MIUI autostart settings", e)
+            openAppNotificationSettings()
+        }
+    }
+
+    private fun openXiaomiPermissionSettings() {
+        try {
+            val intent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+                setClassName(
+                    "com.miui.securitycenter",
+                    "com.miui.permcenter.permissions.PermissionsEditorActivity"
+                )
+                putExtra("extra_pkgname", activity.packageName)
+            }
+            activity.startActivity(intent)
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open MIUI perm editor, falling back to app details", e)
+            try {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:${activity.packageName}")
+                }
+                activity.startActivity(intent)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Could not open app details settings", e2)
+            }
+        }
     }
 
     companion object {
@@ -645,20 +780,77 @@ class WhatsAppBootReceiver : BroadcastReceiver() {
     }
 }
 
+object WhatsAppImageObserverManager {
+    private var observer: WhatsAppImageObserver? = null
+
+    @Synchronized
+    fun ensureStarted(context: Context) {
+        if (observer != null) return
+        Log.d("WA-ImageObserverMgr", "Ensuring WhatsAppImageObserver is STARTED...")
+        observer = WhatsAppImageObserver(context.applicationContext) { file ->
+            Log.d("WA-ImageObserverMgr", "Image file detected on disk: ${file.absolutePath}")
+            WhatsAppBridgeProcessor.onImageFile(context.applicationContext, file)
+        }
+        try {
+            observer?.start()
+            Log.d("WA-ImageObserverMgr", "WhatsAppImageObserver started successfully!")
+        } catch (e: Exception) {
+            Log.e("WA-ImageObserverMgr", "Failed to start WhatsAppImageObserver", e)
+        }
+    }
+}
+
 class WhatsAppNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
+        isConnected = true
+        Log.d(TAG, "NotificationListenerService CONNECTED to Android system")
+        WhatsAppImageObserverManager.ensureStarted(applicationContext)
         WhatsAppBridgeEvents.emit("notificationListenerConnected")
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        isConnected = false
+        Log.w(TAG, "NotificationListenerService DISCONNECTED from Android system!")
+        WhatsAppBridgeEvents.emit("notificationListenerDisconnected")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                requestRebind(ComponentName(this, WhatsAppNotificationListenerService::class.java))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to auto-rebind NotificationListenerService", e)
+            }
+        }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
         if (!isSupportedWhatsAppPackage(sbn.packageName)) return
 
+        WhatsAppImageObserverManager.ensureStarted(applicationContext)
         val notification = sbn.notification ?: return
-        val message = WhatsAppBridgeProcessor.fromNotification(sbn, notification) ?: return
-        val replyAction = WhatsAppBridgeProcessor.findDirectReplyAction(notification)
+        val extras = notification.extras
+        val title = extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val text = extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        Log.d(TAG, "[NOTIFICATION-RECEIVED] Package: ${sbn.packageName} | Title: '$title' | Text: '$text'")
 
+        val replyAction = WhatsAppBridgeProcessor.findDirectReplyAction(notification)
+        if (replyAction != null) {
+            Log.d(TAG, "[REPLY-ACTION-FOUND] Direct reply action captured for notification: '$title'")
+            if (title.isNotEmpty()) {
+                WhatsAppBridgeProcessor.updateReplyAction(title, replyAction)
+            }
+        } else {
+            Log.w(TAG, "[REPLY-ACTION-MISSING] No direct reply action in notification for: '$title'")
+        }
+
+        val message = WhatsAppBridgeProcessor.fromNotification(sbn, notification)
+        if (message == null) {
+            Log.d(TAG, "[NOTIFICATION-IGNORED] Notification ignored (not a user message or non-message notification)")
+            return
+        }
+
+        Log.d(TAG, "[MESSAGE-DISPATCHING] Sender: '${message.senderName}' | Type: ${message.type} | Text: '${message.text}'")
         WhatsAppBridgeProcessor.onNotification(applicationContext, message, replyAction)
     }
 
@@ -666,6 +858,12 @@ class WhatsAppNotificationListenerService : NotificationListenerService() {
         if (packageName == "com.whatsapp") return true
         return packageName == "com.whatsapp.w4b" &&
             WhatsAppBridgeConfig.watchBusinessWhatsApp(applicationContext)
+    }
+
+    companion object {
+        private const val TAG = "WA-Listener"
+        @Volatile
+        var isConnected: Boolean = false
     }
 }
 
@@ -766,8 +964,14 @@ class WhatsAppImageObserver(
 ) {
     private val observers = mutableMapOf<String, FileObserver>()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var mediaContentObserver: ContentObserver? = null
 
     fun start() {
+        startFileObservers()
+        startMediaStoreObserver()
+    }
+
+    private fun startFileObservers() {
         val roots = imageRoots()
         var watchedCount = 0
         roots.forEach { root ->
@@ -787,7 +991,85 @@ class WhatsAppImageObserver(
         )
     }
 
+    private fun startMediaStoreObserver() {
+        try {
+            mediaContentObserver = object : ContentObserver(mainHandler) {
+                override fun onChange(selfChange: Boolean, uri: Uri?) {
+                    super.onChange(selfChange, uri)
+                    checkLatestMediaStoreImage()
+                }
+            }
+            context.contentResolver.registerContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                true,
+                mediaContentObserver!!
+            )
+            Log.d(TAG, "MediaStore ContentObserver registered for Xiaomi image detection")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register MediaStore ContentObserver", e)
+        }
+    }
+
+    private fun checkLatestMediaStoreImage() {
+        try {
+            val projection = arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.DATE_MODIFIED,
+                MediaStore.Images.Media.DATE_ADDED
+            )
+            val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC, ${MediaStore.Images.Media._ID} DESC"
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                null,
+                null,
+                sortOrder
+            )?.use { cursor ->
+                var count = 0
+                val dataIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                val dateAddedIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+                val nowSec = System.currentTimeMillis() / 1000L
+
+                while (cursor.moveToNext() && count < 10) {
+                    count++
+                    if (dataIndex != -1) {
+                        val filePath = cursor.getString(dataIndex)
+                        val dateAddedSec = if (dateAddedIndex != -1) cursor.getLong(dateAddedIndex) else 0L
+
+                        if (!filePath.isNullOrBlank() && (nowSec - dateAddedSec <= 300L || dateAddedSec == 0L)) {
+                            val file = File(filePath)
+                            if (file.exists() && isImageFile(file) && isWhatsAppOrGalleryImage(filePath)) {
+                                Log.d(TAG, "Recent MediaStore image detected: ${file.absolutePath}")
+                                waitUntilStable(file)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error querying MediaStore for recent image", e)
+        }
+    }
+
+    private fun isWhatsAppOrGalleryImage(path: String): Boolean {
+        val lower = path.lowercase(Locale.getDefault())
+        return lower.contains("whatsapp") ||
+                lower.contains("com.whatsapp") ||
+                lower.contains("pictures") ||
+                lower.contains("dcim")
+    }
+
     fun stop() {
+        mediaContentObserver?.let {
+            try {
+                context.contentResolver.unregisterContentObserver(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error unregistering ContentObserver", e)
+            }
+        }
+        mediaContentObserver = null
+
         observers.values.forEach { it.stopWatching() }
         observers.clear()
     }
@@ -796,8 +1078,15 @@ class WhatsAppImageObserver(
         val external = Environment.getExternalStorageDirectory()
         return listOf(
             File(external, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
+            File(external, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Private"),
             File(external, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images"),
-            File(external, "WhatsApp/Media/WhatsApp Images")
+            File(external, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images/Private"),
+            File(external, "WhatsApp/Media/WhatsApp Images"),
+            File(external, "WhatsApp/Media/WhatsApp Images/Private"),
+            File(external, "Pictures/WhatsApp"),
+            File(external, "DCIM/WhatsApp"),
+            File("/storage/emulated/999/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
+            File("/storage/emulated/999/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images")
         )
     }
 
@@ -875,7 +1164,7 @@ object WhatsAppBridgeProcessor {
     private const val IMAGE_MATCH_WINDOW_MS = 60_000L
     private const val MAX_CACHE_SIZE = 60
     private const val MAX_REPLY_AGE_MS = 90 * 60 * 1000L
-    private const val DUPLICATE_MESSAGE_WINDOW_MS = 30 * 1000L
+    private const val DUPLICATE_MESSAGE_WINDOW_MS = 3 * 1000L
     private const val CHECKING_REPLY = "בודק את הנתונים"
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -887,6 +1176,10 @@ object WhatsAppBridgeProcessor {
     private val unmatchedAudioFiles = mutableListOf<AudioFileCandidate>()
     private val pendingImageMessages = mutableListOf<IncomingWhatsAppMessage>()
     private val unmatchedImageFiles = mutableListOf<ImageFileCandidate>()
+    private var lastActiveImageMessage: IncomingWhatsAppMessage? = null
+    private var lastActiveImageMessageTime: Long = 0L
+    private val replyDebounceRunnableMap = mutableMapOf<String, Runnable>()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     fun fromNotification(
         sbn: StatusBarNotification,
@@ -908,7 +1201,7 @@ object WhatsAppBridgeProcessor {
 
         val type = when {
             looksLikeVoiceMessage(text) -> "audio"
-            looksLikeImageMessage(text) -> {
+            looksLikeImageMessage(extras, text) -> {
                 Log.d(TAG, "Notification looks like an image message. text: $text")
                 "image"
             }
@@ -933,10 +1226,22 @@ object WhatsAppBridgeProcessor {
     }
 
     fun findDirectReplyAction(notification: Notification): Notification.Action? {
-        return notification.actions
-            ?.firstOrNull { action ->
-                action.remoteInputs?.any { it.allowFreeFormInput } == true
+        val actions = notification.actions ?: return null
+        return actions.firstOrNull { action ->
+            action.remoteInputs != null && action.remoteInputs.isNotEmpty()
+        }
+    }
+
+    fun updateReplyAction(senderKey: String, action: Notification.Action) {
+        if (senderKey.isBlank()) return
+        synchronized(lock) {
+            replyActions[senderKey] = ReplyHandle(action, System.currentTimeMillis())
+            val cleanKey = senderKey.split("|").firstOrNull()?.trim()
+            if (!cleanKey.isNullOrBlank()) {
+                replyActions[cleanKey] = ReplyHandle(action, System.currentTimeMillis())
             }
+            trimReplyActionsLocked()
+        }
     }
 
     fun onNotification(
@@ -944,15 +1249,13 @@ object WhatsAppBridgeProcessor {
         message: IncomingWhatsAppMessage,
         directReplyAction: Notification.Action?
     ) {
+        if (directReplyAction != null) {
+            updateReplyAction(message.senderKey, directReplyAction)
+            message.senderName?.let { updateReplyAction(it, directReplyAction) }
+        }
+
         if (looksLikePirsumotoReply(message.text.orEmpty())) return
         if (!markNotificationSeen(message)) return
-
-        if (directReplyAction != null) {
-            synchronized(lock) {
-                replyActions[message.senderKey] = ReplyHandle(directReplyAction, System.currentTimeMillis())
-                trimReplyActionsLocked()
-            }
-        }
 
         WhatsAppBridgeEvents.emit(
             "messageReceived",
@@ -1009,8 +1312,13 @@ object WhatsAppBridgeProcessor {
 
             if (matchingMessage != null) {
                 Log.d(TAG, "Found matching notification for image file: ${matchingMessage.id}")
-                pendingImageMessages.remove(matchingMessage)
+                lastActiveImageMessage = matchingMessage
+                lastActiveImageMessageTime = System.currentTimeMillis()
                 matchingMessage
+            } else if (lastActiveImageMessage != null &&
+                abs(candidate.timestamp - lastActiveImageMessageTime) <= IMAGE_MATCH_WINDOW_MS) {
+                Log.d(TAG, "Re-using last active image message for batch image file: ${file.name}")
+                lastActiveImageMessage
             } else {
                 Log.d(TAG, "No matching notification found within ${IMAGE_MATCH_WINDOW_MS}ms. Adding to unmatchedImageFiles.")
                 unmatchedImageFiles.add(candidate)
@@ -1046,77 +1354,113 @@ object WhatsAppBridgeProcessor {
         }
     }
 
+    private fun extractExpectedImageCount(text: String?): Int {
+        if (text == null) return 1
+        val numRegex = Regex("\\d+")
+        val match = numRegex.find(text)
+        return match?.value?.toIntOrNull() ?: 1
+    }
+
     private fun enqueueImageMessage(context: Context, message: IncomingWhatsAppMessage) {
+        WhatsAppImageObserverManager.ensureStarted(context)
         val dateFormat = SimpleDateFormat("mm:ss.SSS", Locale.getDefault())
         val msgTimeStr = dateFormat.format(Date(message.timestamp))
         Log.d(TAG, "enqueueImageMessage for notification: ${message.id}")
         Log.d(TAG, "Message timestamp: ${message.timestamp} ($msgTimeStr)")
         
-        val matchingFile = synchronized(lock) {
+        val expectedCount = extractExpectedImageCount(message.text)
+        
+        val matchingFiles = synchronized(lock) {
             trimImageCachesLocked()
-            Log.d(TAG, "Looking for matching image file among ${unmatchedImageFiles.size} unmatched files")
-            
-            unmatchedImageFiles.forEach { file ->
-                val fileTimeStr = dateFormat.format(Date(file.timestamp))
-                Log.d(TAG, "Existing unmatched image: ${file.path} | Timestamp: ${file.timestamp} ($fileTimeStr)")
-            }
-            val candidate = unmatchedImageFiles.minByOrNull { file ->
-                abs(file.timestamp - message.timestamp)
-            }?.takeIf { file ->
-                val diff = abs(file.timestamp - message.timestamp)
-                Log.d(TAG, "Comparing with file ${file.path}, diff: $diff ms")
-                diff <= IMAGE_MATCH_WINDOW_MS
-            }
+            lastActiveImageMessage = message
+            lastActiveImageMessageTime = System.currentTimeMillis()
+            Log.d(TAG, "Looking for matching image files among ${unmatchedImageFiles.size} unmatched files")
 
-            if (candidate != null) {
-                Log.d(TAG, "Found matching image file in cache: ${candidate.path}")
-                unmatchedImageFiles.remove(candidate)
-                File(candidate.path)
+            val candidates = unmatchedImageFiles.filter { file ->
+                val diff = abs(file.timestamp - message.timestamp)
+                diff <= IMAGE_MATCH_WINDOW_MS
+            }.sortedBy { it.timestamp }
+
+            if (candidates.isNotEmpty()) {
+                Log.d(TAG, "Found ${candidates.size} matching image files in cache for batch notification")
+                val subset = candidates.take(expectedCount)
+                unmatchedImageFiles.removeAll(subset.toSet())
+                subset.map { File(it.path) }
             } else {
-                Log.d(TAG, "No match in cache. Actively scanning directories for recent image...")
-                val activeScanFile = findRecentImageFile(message.timestamp)
-                if (activeScanFile != null) {
-                    Log.d(TAG, "Found recent image file via active scan: ${activeScanFile.absolutePath}")
-                    activeScanFile
+                Log.d(TAG, "No match in cache. Actively scanning directories for recent image files...")
+                val activeScanFiles = findAllRecentImageFiles(message.timestamp, expectedCount)
+                if (activeScanFiles.isNotEmpty()) {
+                    Log.d(TAG, "Found ${activeScanFiles.size} recent image files via active scan")
+                    activeScanFiles
                 } else {
                     Log.d(TAG, "No matching image file found within ${IMAGE_MATCH_WINDOW_MS}ms. Adding to pendingImageMessages.")
                     pendingImageMessages.add(message)
-                    null
+                    emptyList()
                 }
             }
         }
 
-        if (matchingFile != null) {
+        for (matchingFile in matchingFiles) {
             processImageMessage(context.applicationContext, message, matchingFile)
         }
+
+        mainHandler.postDelayed({
+            val delayedFiles = synchronized(lock) {
+                if (pendingImageMessages.contains(message)) {
+                    val scanFiles = findAllRecentImageFiles(message.timestamp, expectedCount)
+                    if (scanFiles.isNotEmpty()) {
+                        Log.d(TAG, "Delayed active scan found ${scanFiles.size} recent image files!")
+                        pendingImageMessages.remove(message)
+                        scanFiles
+                    } else emptyList()
+                } else emptyList()
+            }
+            for (file in delayedFiles) {
+                processImageMessage(context.applicationContext, message, file)
+            }
+        }, 2500L)
     }
 
     private fun findRecentImageFile(targetTimestamp: Long): File? {
+        return findAllRecentImageFiles(targetTimestamp, 1).firstOrNull()
+    }
+
+    private fun findAllRecentImageFiles(targetTimestamp: Long, expectedCount: Int): List<File> {
         val external = Environment.getExternalStorageDirectory()
         val roots = listOf(
             File(external, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
+            File(external, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Private"),
             File(external, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images"),
-            File(external, "WhatsApp/Media/WhatsApp Images")
+            File(external, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images/Private"),
+            File(external, "WhatsApp/Media/WhatsApp Images"),
+            File(external, "WhatsApp/Media/WhatsApp Images/Private"),
+            File(external, "Pictures/WhatsApp"),
+            File(external, "DCIM/WhatsApp"),
+            File(external, "DCIM/Camera"),
+            File("/storage/emulated/999/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
+            File("/storage/emulated/999/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images")
         )
 
-        var bestMatch: File? = null
-        var minDiff = Long.MAX_VALUE
+        val matches = mutableListOf<File>()
 
         for (root in roots) {
             if (!root.exists() || !root.isDirectory) continue
 
-            root.listFiles()?.forEach { file ->
+            root.walkTopDown().maxDepth(2).forEach { file ->
                 if (!file.isFile || !isImageFile(file)) return@forEach
 
-                val diff = abs(file.lastModified() - targetTimestamp)
-                if (diff <= IMAGE_MATCH_WINDOW_MS && diff < minDiff) {
-                    minDiff = diff
-                    bestMatch = file
+                val lastMod = file.lastModified()
+                val diffWithTarget = abs(lastMod - targetTimestamp)
+
+                if (diffWithTarget <= IMAGE_MATCH_WINDOW_MS) {
+                    matches.add(file)
                 }
             }
         }
 
-        return bestMatch
+        return matches.distinctBy { it.absolutePath }
+            .sortedByDescending { it.lastModified() }
+            .take(expectedCount)
     }
 
     private fun isImageFile(file: File): Boolean {
@@ -1239,10 +1583,23 @@ object WhatsAppBridgeProcessor {
                     "vehicleData" to vehicleData
                 )
             )
-            maybeSendReply(context, message.senderKey, result.replyHebrew)
+            scheduleDebouncedReply(context, message.senderKey, result.replyHebrew)
             if (result.autoPublishRequested) {
                 WhatsAppAutoPublishLauncher.launch(context, vehicleData)
             }
+        }
+    }
+
+    private fun scheduleDebouncedReply(context: Context, senderKey: String, reply: String?) {
+        if (reply.isNullOrBlank()) return
+        synchronized(lock) {
+            replyDebounceRunnableMap[senderKey]?.let { mainHandler.removeCallbacks(it) }
+            val runnable = Runnable {
+                synchronized(lock) { replyDebounceRunnableMap.remove(senderKey) }
+                maybeSendReply(context, senderKey, reply)
+            }
+            replyDebounceRunnableMap[senderKey] = runnable
+            mainHandler.postDelayed(runnable, 1200L)
         }
     }
 
@@ -1257,8 +1614,13 @@ object WhatsAppBridgeProcessor {
         val handle = synchronized(lock) {
             trimReplyActionsLocked()
             replyActions[senderKey]
+                ?: replyActions[senderKey.split("|").firstOrNull()?.trim().orEmpty()]
+                ?: replyActions.values.maxByOrNull { it.receivedAt }?.takeIf {
+                    System.currentTimeMillis() - it.receivedAt <= 5 * 60 * 1000L
+                }
         } ?: run {
-            WhatsAppBridgeEvents.emit("error", mapOf("message" to "No WhatsApp direct-reply action is available"))
+            Log.w(TAG, "No direct-reply action found for senderKey: $senderKey")
+            WhatsAppBridgeEvents.emit("error", mapOf("message" to "No WhatsApp direct-reply action is available for $senderKey"))
             return false
         }
 
@@ -1391,14 +1753,20 @@ object WhatsAppBridgeProcessor {
             lower.contains("\u05d4\u05d5\u05d3\u05e2\u05ea \u05e9\u05de\u05e2")
     }
 
-    private fun looksLikeImageMessage(text: String): Boolean {
-        val lower = text.lowercase()
+    private fun looksLikeImageMessage(extras: Bundle, text: String): Boolean {
+        if (extras.get(Notification.EXTRA_PICTURE) != null || extras.get("android.picture") != null) {
+            return true
+        }
+        val lower = text.lowercase(Locale.getDefault())
         return lower.contains("photo") ||
             lower.contains("image") ||
             lower.contains("picture") ||
             lower.contains("\u05ea\u05de\u05d5\u05e0\u05d4") ||
+            lower.contains("\u05ea\u05de\u05d5\u05e0\u05d5\u05ea") ||
             lower.contains("\u05ea\u05e6\u05dc\u05d5\u05dd") ||
-            lower.contains("\uD83D\uDCF7")
+            lower.contains("\u05ea\u05e6\u05dc\u05d5\u05de\u05d9\u05dd") ||
+            lower.contains("\uD83D\uDCF7") ||
+            lower.contains("📷")
     }
 
     private fun isNonMessageNotification(title: String, text: String): Boolean {

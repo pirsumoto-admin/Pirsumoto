@@ -14,6 +14,7 @@ import 'shared/theme/app_theme.dart';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 // import 'package:flutter_skill/flutter_skill.dart';
 // import 'package:flutter_gemma/flutter_gemma.dart';
 
@@ -92,10 +93,45 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       await _consumePendingWhatsAppAutoPublish();
 
       final status = await bridge.getStatus();
-      if (!status.notificationListenerEnabled &&
-          _promptedWhatsAppSetup.add('notificationListener')) {
-        await bridge.openNotificationListenerSettings();
-        return;
+      if (!status.notificationListenerEnabled) {
+        if (_promptedWhatsAppSetup.add('notificationListener')) {
+          final navContext = rootNavigatorKey.currentContext;
+          if (navContext != null && navContext.mounted) {
+            showDialog(
+              context: navContext,
+              barrierDismissible: false,
+              builder:
+                  (ctx) => AlertDialog(
+                    title: const Text(
+                      'נדרשת גישה להודעות (Notification Access)',
+                      textAlign: TextAlign.right,
+                    ),
+                    content: const Text(
+                      'כדי שפרסומוטו תוכל לאתר הודעות ותמונות מ-WhatsApp ולהשיב עליהן אוטומטית, נדרשת הרשאת גישה להודעות.\n\nאנא לחץ על "להגדרות" ואשר את הרשאת הגישה להודעות עבור "פרסומוטו".',
+                      textAlign: TextAlign.right,
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('ביטול'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          bridge.openNotificationListenerSettings();
+                        },
+                        child: const Text('להגדרות'),
+                      ),
+                    ],
+                  ),
+            );
+          } else {
+            await bridge.openNotificationListenerSettings();
+          }
+          return;
+        }
+      } else {
+        await bridge.requestRebindNotificationListener();
       }
 
       if (!status.allFilesAccessGranted &&
@@ -120,6 +156,85 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
           _promptedWhatsAppSetup.add('batteryOptimization')) {
         await bridge.openBatteryOptimizationSettings();
         return;
+      }
+
+      if (status.isXiaomi && !status.xiaomiBackgroundPopupGranted) {
+        if (_promptedWhatsAppSetup.add('xiaomiBackgroundPopups')) {
+          final navContext = rootNavigatorKey.currentContext;
+          if (navContext != null && navContext.mounted) {
+            showDialog(
+              context: navContext,
+              barrierDismissible: false,
+              builder:
+                  (ctx) => AlertDialog(
+                    title: const Text(
+                      'הרשאת חלונות קופצים ברקע (Xiaomi)',
+                      textAlign: TextAlign.right,
+                    ),
+                    content: const Text(
+                      'כדי שפרסומוטו תוכל לפתוח את האפליקציה ולהתחיל את הפרסום באופן אוטומטי מלא (ללא צורך בלחיצה על "פרסם" בהתראה מ-Xiaomi):\n\n1. לחץ על "להגדרות"\n2. כנס ל-"הרשאות אחרות" (Other permissions)\n3. לחץ על "הצגת חלונות קופצים בזמן ריצה ברקע" (Display pop-up windows while running in the background)\n4. בחר "אפשר תמיד" (Always allow).',
+                      textAlign: TextAlign.right,
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('ביטול'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          bridge.openXiaomiPermissionSettings();
+                        },
+                        child: const Text('להגדרות'),
+                      ),
+                    ],
+                  ),
+            );
+          } else {
+            await bridge.openXiaomiPermissionSettings();
+          }
+          return;
+        }
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      final hasSeenConfig = prefs.getBool('has_seen_whatsapp_config') ?? false;
+      if (!hasSeenConfig) {
+        if (_promptedWhatsAppSetup.add('whatsappConfig')) {
+          final navContext = rootNavigatorKey.currentContext;
+          if (navContext != null && navContext.mounted) {
+            showDialog(
+              context: navContext,
+              barrierDismissible: false,
+              builder:
+                  (ctx) => AlertDialog(
+                    title: const Text(
+                      'הגדרות קריטיות ל-WhatsApp',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    content: const Text(
+                      'לפני שליחת התמונה, פתח את WhatsApp בטלפון שלך ובדוק ש:\n\n'
+                      '• הגדרות -> אחסון ונתונים -> הורדת מדיה אוטומטית -> תמונות - מסומן.\n\n'
+                      '• הגדרות -> צ\'אטים -> הצגת מדיה - פעיל (ON).\n\n\n\n'
+                      'יש גם לתת הרשאה ברמת האפליקציה אפשר הגדרות מוגבלות',
+                      textAlign: TextAlign.right,
+                    ),
+                    actions: [
+                      ElevatedButton(
+                        onPressed: () async {
+                          await prefs.setBool('has_seen_whatsapp_config', true);
+                          if (ctx.mounted) {
+                            Navigator.of(ctx).pop();
+                          }
+                        },
+                        child: const Text('הבנתי'),
+                      ),
+                    ],
+                  ),
+            );
+          }
+        }
       }
     } catch (error, stackTrace) {
       debugPrint('WhatsApp bridge bootstrap failed: $error\n$stackTrace');
@@ -204,9 +319,12 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   }
 
   void _startWhatsAppAutoPublish(Map<String, String> data) {
-    final fingerprint = '${data['license_plate']}_${data['timestamp'] ?? DateTime.now().millisecondsSinceEpoch ~/ 10000}';
+    final fingerprint =
+        '${data['license_plate']}_${data['timestamp'] ?? DateTime.now().millisecondsSinceEpoch ~/ 10000}';
     if (_lastAutoPublishVehicleFingerprint == fingerprint) {
-      debugPrint('Ignoring duplicate auto-publish request for fingerprint: $fingerprint');
+      debugPrint(
+        'Ignoring duplicate auto-publish request for fingerprint: $fingerprint',
+      );
       return;
     }
     _lastAutoPublishVehicleFingerprint = fingerprint;
