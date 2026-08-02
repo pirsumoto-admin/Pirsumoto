@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -318,6 +319,8 @@ class Yad2AccessibilityAutomationService {
   final bool startedFromWhatsApp;
   final String? whatsAppSenderKey;
 
+  final void Function(bool visible)? onToggleOverlayVisibility;
+
   Yad2AccessibilityAutomationService({
     required this.formData,
     required this.controller,
@@ -334,7 +337,17 @@ class Yad2AccessibilityAutomationService {
     this.onAutomationFallback,
     this.onFirstStepDetected,
     this.onTapPreview,
-  });
+    this.onToggleOverlayVisibility,
+  }) {
+    activeInstance = this;
+  }
+
+  static Yad2AccessibilityAutomationService? activeInstance;
+
+  static void stopAll() {
+    activeInstance?.stop();
+    activeInstance = null;
+  }
 
   static Future<bool> checkPermission() async {
     try {
@@ -366,6 +379,19 @@ class Yad2AccessibilityAutomationService {
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
+    unawaited(_updateWhatsAppPublishingFlag(false));
+  }
+
+  void stop() {
+    debugPrint('[Yad2-A11y] Stop requested');
+    _stopLoginGate();
+    _isPaused = true;
+    _currentPhase = null;
+    _pausedPhase = null;
+    unawaited(_updateWhatsAppPublishingFlag(false));
+    try {
+      WakelockPlus.disable();
+    } catch (_) {}
   }
 
   void pauseAutomation() {
@@ -400,10 +426,14 @@ class Yad2AccessibilityAutomationService {
     _currentPhase = prev;
   }
 
+  bool _hasNotifiedCompletion = false;
+
   void startAutomation() {
     debugPrint('[Yad2-A11y] Starting optimized Accessibility automation');
+    _hasNotifiedCompletion = false;
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
+    unawaited(_updateWhatsAppPublishingFlag(true));
     _processPhase(AutomationPhase.phase1);
   }
 
@@ -425,6 +455,8 @@ class Yad2AccessibilityAutomationService {
       return;
     }
 
+    unawaited(_updateWhatsAppPublishingFlag(true));
+
     debugPrint(
       '[Yad2-A11y] === ${phase.name} attempt '
       '${_phaseRetryCount + 1}/${_maxRetries + 1} ===',
@@ -432,7 +464,9 @@ class Yad2AccessibilityAutomationService {
 
     if (phase == AutomationPhase.complete) {
       WakelockPlus.disable();
+      unawaited(_notifyAutomationComplete());
       _handlePhaseComplete(AutomationPhase.complete);
+      unawaited(_updateWhatsAppPublishingFlag(false));
       return;
     }
 
@@ -753,6 +787,24 @@ class Yad2AccessibilityAutomationService {
             nextMarker: 'פרסום|תשלום|סיום|המודעה|המשך|לשלב הבא',
             timeout: Duration(seconds: 8),
           ),
+        );
+      case AutomationPhase.phase18:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Detect terms checkbox and click "לשלב הבא" button.',
+          action: _actionTermsAgreement,
+          validation: const _StepValidation(
+            nextMarker: 'סגור|X|סגירה|ביטול|לשלב הבא|סיום|המודעה',
+            timeout: Duration(seconds: 8),
+          ),
+        );
+      case AutomationPhase.phase19:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal:
+              'Dismiss promotional screen using X close button in accessibility tree.',
+          action: _actionDismissPromotionalScreen,
+          validation: const _StepValidation(timeout: Duration(seconds: 5)),
         );
       case AutomationPhase.complete:
         return null;
@@ -1189,6 +1241,68 @@ class Yad2AccessibilityAutomationService {
     }
     // A successful tap is success (matches original). No presence gate here.
     return true;
+  }
+
+  Future<_StepActionResult> _actionTermsAgreement() async {
+    const termsText = 'קראתי ואישרתי את התקנון';
+
+    // 1. Detect and tap checkbox (node before text "קראתי ואישרתי את התקנון" or text itself)
+    final tappedCheckbox = await _performWithPopupHandling(() async {
+      final nodeBefore = await toolTapNodeBefore(termsText);
+      if (nodeBefore) return true;
+      return tapSmart(termsText);
+    });
+
+    if (tappedCheckbox) {
+      debugPrint('[Yad2-A11y] Tapped terms agreement checkbox.');
+      await Future.delayed(const Duration(milliseconds: 700));
+    } else {
+      debugPrint(
+        '[Yad2-A11y] ⚠️ Terms checkbox not explicitly found; proceeding to next button.',
+      );
+    }
+
+    // 2. Click the button below it of "לשלב הבא"
+    final clickedNext = await _performWithPopupHandling(
+      () => tapSmart('לשלב הבא|שלב הבא|לשלב'),
+    );
+
+    return clickedNext
+        ? const _StepActionResult.success()
+        : const _StepActionResult.failure(
+          'Failed to click "לשלב הבא" after terms checkbox',
+        );
+  }
+
+  Future<_StepActionResult> _actionDismissPromotionalScreen() async {
+    const closeTargets = 'X|x|✕|✖|×|סגור|סגירה|close|Close|dismiss';
+
+    // Hide app's overlay before this step so the "הפסק" button overlay doesn't cover the X close button
+    onToggleOverlayVisibility?.call(false);
+    await Future.delayed(const Duration(milliseconds: 400));
+
+    try {
+      final closed = await _performWithPopupHandling(() async {
+        if (await tapSmart(closeTargets)) return true;
+        return _dismissKnownPopups();
+      });
+
+      if (closed) {
+        debugPrint(
+          '[Yad2-A11y] Promotional screen closed via X / close button.',
+        );
+        await Future.delayed(const Duration(milliseconds: 1000));
+      } else {
+        debugPrint(
+          '[Yad2-A11y] ⚠️ Promotional screen X close button not found or screen auto-closed.',
+        );
+      }
+    } finally {
+      // Restore app's overlay after attempting to close the promotional screen
+      onToggleOverlayVisibility?.call(true);
+    }
+
+    return const _StepActionResult.success();
   }
 
   Future<bool> tapSmart(
@@ -2141,14 +2255,56 @@ class Yad2AccessibilityAutomationService {
     return result.toString().contains('ok');
   }
 
+  Future<void> _notifyAutomationComplete() async {
+    if (_hasNotifiedCompletion) return;
+    _hasNotifiedCompletion = true;
+
+    if (!startedFromWhatsApp ||
+        whatsAppSenderKey == null ||
+        whatsAppSenderKey!.isEmpty) {
+      return;
+    }
+    try {
+      final success = await WhatsAppMessageBridgeService.instance
+          .sendReplyToWhatsApp(
+            senderKey: whatsAppSenderKey!,
+            message: 'תהליך האלעת מודעה ליד 2 הסתיים בהצלחה ✅',
+          );
+      debugPrint('[Yad2-A11y] Sent WhatsApp completion message: $success');
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Failed to send WhatsApp completion message: $e');
+    }
+  }
+
+  Future<void> _updateWhatsAppPublishingFlag(bool running) async {
+    if (whatsAppSenderKey == null || whatsAppSenderKey!.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'wa_state_$whatsAppSenderKey';
+      final jsonStr = prefs.getString(key);
+      if (jsonStr != null && jsonStr.isNotEmpty) {
+        final state = Map<String, String>.from(jsonDecode(jsonStr));
+        state['auto_publish_started'] = running ? 'true' : 'false';
+        state['KEY_AUTO_PUBLISH_STARTED'] = running ? 'true' : 'false';
+        state['auto_publish_running'] = running ? 'true' : 'false';
+        await prefs.setString(key, jsonEncode(state));
+        debugPrint('[Yad2-A11y] Updated WhatsApp publishing flags to $running');
+      }
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Failed to update WhatsApp publishing flags: $e');
+    }
+  }
+
   void _handlePhaseComplete(AutomationPhase phase) {
     debugPrint('[Yad2-A11y] Phase complete: ${phase.description}');
     onPhaseComplete?.call(phase);
 
     final next = _nextPhaseAfter(phase);
     if (next == null) {
-      WakelockPlus.disable();
-      onAutomationComplete?.call(true);
+      stop();
+      _notifyAutomationComplete().then((_) {
+        onAutomationComplete?.call(true);
+      });
       return;
     }
 
@@ -2204,6 +2360,10 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase16:
         return AutomationPhase.phase17;
       case AutomationPhase.phase17:
+        return AutomationPhase.phase18;
+      case AutomationPhase.phase18:
+        return AutomationPhase.phase19;
+      case AutomationPhase.phase19:
         return AutomationPhase.complete;
       case AutomationPhase.complete:
         return null;
@@ -2228,6 +2388,8 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase6:
       case AutomationPhase.phase8:
       case AutomationPhase.phase17:
+      case AutomationPhase.phase18:
+      case AutomationPhase.phase19:
         return const Duration(milliseconds: 700);
       default:
         // phase3, phase4, phase9–phase16 → 1000ms (original default).

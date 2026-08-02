@@ -136,6 +136,16 @@ enum AutomationPhase {
     'תמונות|העלאת תמונות|הוספת תמונות|תמונות הרכב|העלו תמונות|המשך',
     1,
   ),
+  phase18(
+    'Terms Agreement',
+    'קראתי ואישרתי את התקנון',
+    1,
+  ),
+  phase19(
+    'Promotional Screen Dismiss',
+    'X|x|✕|✖|×|סגור|סגירה|close|Close',
+    1,
+  ),
   complete('Automation Complete', null, 1);
 
   final String description;

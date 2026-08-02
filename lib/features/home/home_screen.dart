@@ -15,6 +15,7 @@ import '../form/form_provider.dart' as fp;
 import '../../services/db_service.dart';
 import '../../services/audio_service.dart';
 import '../../services/vehicle_data_service.dart';
+import '../../services/whatsapp_text_validation_service.dart';
 import '../auth/auth_provider.dart';
 import '../listings/listings_screen.dart';
 import '../profile/profile_screen.dart';
@@ -339,6 +340,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _noTestController = ValueNotifier<bool>(false);
   final _vehicleConditionController = TextEditingController();
   final List<String> _conditions = ['מצוין', 'טוב מאוד', 'טוב', 'סביר', 'גרוע'];
+  int? _kilometerTestAharon;
 
   final List<String> _months = List.generate(12, (i) => (i + 1).toString());
   final List<String> _years = List.generate(
@@ -564,6 +566,31 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           if (_ownerships.contains(baalut)) {
             _ownershipController.text = baalut;
             notifier.updateField('ownership', baalut);
+          }
+
+          try {
+            final url3 =
+                'https://data.gov.il/api/3/action/datastore_search?resource_id=56063a99-8a3e-4ff4-912e-5966c0279bad&q=$license&offset=0';
+            final response3 = await http.get(Uri.parse(url3));
+            if (response3.statusCode == 200) {
+              final decoded3 = jsonDecode(response3.body);
+              final result3 = decoded3['result'];
+              final records3 = result3['records'] as List;
+              if (records3.isNotEmpty) {
+                final data3 = records3.first;
+                final kmVal = data3['kilometer_test_aharon'];
+                if (kmVal != null) {
+                  _kilometerTestAharon = int.tryParse(kmVal.toString());
+                  if (_kilometerTestAharon != null) {
+                    final kmStr = _kilometerTestAharon.toString();
+                    _kmController.text = kmStr;
+                    notifier.updateField('km', kmStr);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('Error fetching kilometer_test_aharon in license search: $e');
           }
 
           if (mounted) {
@@ -1002,7 +1029,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
 
     try {
       final url =
-          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$license%5D%7D';
+          //'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$license%5D%7D';
+          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters={%22mispar_rechev%22:[$license]}';
       final response = await http.get(Uri.parse(url));
 
       if (response.statusCode == 200) {
@@ -1060,6 +1088,32 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             }
           } catch (e) {
             debugPrint('Error fetching automatic_ind from url2: $e');
+          }
+
+          final url3 =
+              'https://data.gov.il/api/3/action/datastore_search?resource_id=56063a99-8a3e-4ff4-912e-5966c0279bad&q=$license&offset=0';
+
+          try {
+            final response3 = await http.get(Uri.parse(url3));
+            if (response3.statusCode == 200) {
+              final decoded3 = jsonDecode(response3.body);
+              final result3 = decoded3['result'];
+              final records3 = result3['records'] as List;
+              if (records3.isNotEmpty) {
+                final data3 = records3.first;
+                final kmVal = data3['kilometer_test_aharon'];
+                if (kmVal != null) {
+                  _kilometerTestAharon = int.tryParse(kmVal.toString());
+                  if (_kilometerTestAharon != null) {
+                    final kmStr = _kilometerTestAharon.toString();
+                    _kmController.text = kmStr;
+                    notifier.updateField('km', kmStr);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('Error fetching kilometer_test_aharon from url3: $e');
           }
         }
       }
@@ -1156,12 +1210,20 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             ? _testYearController.text
             : (DateTime.now().year + 1).toString();
 
-    if (_licenseController.text.length < 7 ||
-        _kmController.text.isEmpty ||
-        _priceController.text.isEmpty) {
+    final validationService = const WhatsAppTextValidationService();
+    final formVal = await validationService.validateFormFields({
+      'license': _licenseController.text,
+      'km': _kmController.text,
+      'price': _priceController.text,
+      'hand': _handController.text,
+      'vehicleCondition': _vehicleConditionController.text,
+    }, kilometerTestAharon: _kilometerTestAharon);
+
+    if (!formVal.isValid) {
+      final errorText = formVal.errors.join('\n');
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('נא למלא את כל שדות החובה', textAlign: TextAlign.right),
+        SnackBar(
+          content: Text(errorText, textAlign: TextAlign.right),
           backgroundColor: Colors.red,
         ),
       );

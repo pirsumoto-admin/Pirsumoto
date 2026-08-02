@@ -19,12 +19,40 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         prepareForAutoPublishIntent(intent)
         super.onCreate(savedInstanceState)
+        hideSystemUI()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         prepareForAutoPublishIntent(intent)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemUI()
+        }
+    }
+
+    private fun hideSystemUI() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let { controller ->
+                controller.hide(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+            )
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -49,7 +77,32 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             
             if (call.method == "checkPermission") {
-                result.success(PirsumotoAccessibilityService.instance != null)
+                var isConnected = PirsumotoAccessibilityService.instance != null
+                if (!isConnected) {
+                    val isEnabledInSettings = isAccessibilityServiceEnabled(context, PirsumotoAccessibilityService::class.java)
+                    if (isEnabledInSettings) {
+                        try {
+                            val component = android.content.ComponentName(context, PirsumotoAccessibilityService::class.java)
+                            val pm = context.packageManager
+                            pm.setComponentEnabledSetting(
+                                component,
+                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                android.content.pm.PackageManager.DONT_KILL_APP
+                            )
+                            pm.setComponentEnabledSetting(
+                                component,
+                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                android.content.pm.PackageManager.DONT_KILL_APP
+                            )
+                            Log.d("A11Y", "Toggled AccessibilityService component to revive zombie service")
+                        } catch (e: Exception) {
+                            Log.e("A11Y", "Failed to toggle AccessibilityService component", e)
+                        }
+                        try { Thread.sleep(100) } catch (_: Exception) {}
+                        isConnected = PirsumotoAccessibilityService.instance != null
+                    }
+                }
+                result.success(isConnected)
                 return@setMethodCallHandler
             }
             if (call.method == "openSettings") {
@@ -424,6 +477,11 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        WhatsAppBridgeEvents.detach()
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
     private fun prepareForAutoPublishIntent(intent: Intent?) {
         if (!WhatsAppAutoPublishStore.captureIntent(intent)) return
 
@@ -455,5 +513,18 @@ class MainActivity : FlutterActivity() {
             if (found != null) return found
         }
         return null
+    }
+
+    private fun isAccessibilityServiceEnabled(context: Context, serviceClass: Class<*>): Boolean {
+        val expected = android.content.ComponentName(context, serviceClass)
+        val enabledServices = android.provider.Settings.Secure.getString(
+            context.contentResolver,
+            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+
+        return enabledServices.split(":").any { flattened ->
+            val component = android.content.ComponentName.unflattenFromString(flattened)
+            component?.packageName == expected.packageName && component.className == expected.className
+        }
     }
 }

@@ -86,6 +86,8 @@ class Yad2AutomationService {
     }
   }
 
+  final void Function(bool visible)? onToggleOverlayVisibility;
+
   Yad2AutomationService({
     required this.controller,
     required this.ocrService,
@@ -99,6 +101,7 @@ class Yad2AutomationService {
     this.onTapPreview,
     this.validator,
     this.onOcrFallback,
+    this.onToggleOverlayVisibility,
   });
 
   void startAutomation() {
@@ -372,6 +375,10 @@ class Yad2AutomationService {
         await _phase16SelectCity();
       case AutomationPhase.phase17:
         await _phase17UploadPhotos();
+      case AutomationPhase.phase18:
+        _handlePhaseComplete(AutomationPhase.phase18);
+      case AutomationPhase.phase19:
+        _handlePhaseComplete(AutomationPhase.phase19);
       case AutomationPhase.complete:
         _handlePhaseComplete(AutomationPhase.complete);
     }
@@ -1887,6 +1894,12 @@ class Yad2AutomationService {
         next = AutomationPhase.phase17;
         delayMs = 3000;
       case AutomationPhase.phase17:
+        next = AutomationPhase.phase18;
+        delayMs = 2000;
+      case AutomationPhase.phase18:
+        next = AutomationPhase.phase19;
+        delayMs = 2000;
+      case AutomationPhase.phase19:
         next = AutomationPhase.complete;
         delayMs = 1500;
       case AutomationPhase.complete:
@@ -2108,7 +2121,7 @@ class Yad2AutomationService {
     ''');
   }
 
-  Future<void> _scrollDown(percent) async {
+  Future<void> _scrollDown(double percent) async {
     debugPrint('[Yad2] 📜 Scroll down 3/4 screen');
     await controller.runJavaScript('''
       (function() {

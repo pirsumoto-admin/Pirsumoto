@@ -3,12 +3,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'features/form/form_provider.dart' as fp;
 import 'features/publish/yad2_screen.dart';
 import 'routing/app_router.dart';
 import 'services/whatsapp_message_bridge_service.dart';
+import 'services/whatsapp_text_validation_service.dart';
 import 'services/yad2_automation_models.dart';
 import 'shared/theme/app_theme.dart';
 
@@ -21,6 +23,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() async {
   // FlutterSkillBinding.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   await EasyLocalization.ensureInitialized();
   await Firebase.initializeApp();
   // await FlutterGemma.initialize();
@@ -88,6 +91,12 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
         await Permission.notification.request();
       }
 
+      final storageStatus = await Permission.manageExternalStorage.status;
+      if (!storageStatus.isGranted &&
+          _promptedWhatsAppSetup.add('manageExternalStorage')) {
+        await Permission.manageExternalStorage.request();
+      }
+
       await bridge.configure(autoReplyEnabled: true);
       await bridge.start();
       await _consumePendingWhatsAppAutoPublish();
@@ -132,6 +141,47 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
         }
       } else {
         await bridge.requestRebindNotificationListener();
+        await Future.delayed(const Duration(milliseconds: 500));
+        final updatedStatus = await bridge.getStatus();
+        if (updatedStatus.isXiaomi &&
+            !updatedStatus.notificationListenerConnected &&
+            _promptedWhatsAppSetup.add('xiaomiAutostartWarning')) {
+          final navContext = rootNavigatorKey.currentContext;
+          if (navContext != null && navContext.mounted) {
+            showDialog(
+              context: navContext,
+              barrierDismissible: false,
+              builder:
+                  (ctx) => AlertDialog(
+                    title: const Text(
+                      'הגדרות קריטיות ל-Xiaomi (MIUI)',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    content: const Text(
+                      'מערכת ההפעלה Xiaomi מנתקת את שירות השרת של WhatsApp ברקע.\n\n'
+                      'כדי למנוע נתק ולהבטיח קליטת הודעות רציפה:\n'
+                      '1. לחץ על "להפעלת Autostart" ואפשר לפרסומוטו לפעול ברקע.\n'
+                      '2. בהגדרות חיסכון בסוללה בחר "ללא הגבלות" (No restrictions).',
+                      textAlign: TextAlign.right,
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('ביטול'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          bridge.openXiaomiAutostartSettings();
+                        },
+                        child: const Text('להפעלת Autostart'),
+                      ),
+                    ],
+                  ),
+            );
+          }
+        }
       }
 
       if (!status.allFilesAccessGranted &&
@@ -217,7 +267,8 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
                       'לפני שליחת התמונה, פתח את WhatsApp בטלפון שלך ובדוק ש:\n\n'
                       '• הגדרות -> אחסון ונתונים -> הורדת מדיה אוטומטית -> תמונות - מסומן.\n\n'
                       '• הגדרות -> צ\'אטים -> הצגת מדיה - פעיל (ON).\n\n\n\n'
-                      'יש גם לתת הרשאה ברמת האפליקציה אפשר הגדרות מוגבלות',
+                      'יש גם לתת הרשאה ברמת האפליקציה - אפשר הגדרות מוגבלות\n\n'
+                      'וגם לבטל את - השהה את פעילות היישום...',
                       textAlign: TextAlign.right,
                     ),
                     actions: [
@@ -256,23 +307,40 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
         );
   }
 
-  void _handleWhatsAppBridgeEvent(WhatsAppBridgeEvent event) {
-    if (event.name != 'locallyProcessed' &&
-        event.name != 'autoPublishLaunchRequested') {
-      return;
-    }
+  void _handleWhatsAppBridgeEvent(WhatsAppBridgeEvent event) async {
+    final senderKey = event.data['senderKey']?.toString() ?? '';
+    final senderName = event.data['senderName']?.toString();
 
-    final vehicleData = _stringMap(event.data['vehicleData']);
-    if (vehicleData.isEmpty) return;
-
-    _applyWhatsAppVehicleData(vehicleData);
-
-    final shouldStartAutoPublish =
-        event.name == 'autoPublishLaunchRequested' ||
-        event.data['autoPublishRequested'] == true ||
-        event.data['autoPublishRequested']?.toString() == 'true';
-    if (shouldStartAutoPublish) {
-      _startWhatsAppAutoPublish(vehicleData);
+    if (event.name == 'whatsappTextReceived') {
+      final rawText = event.data['text']?.toString() ?? '';
+      final timestamp = event.data['timestamp'] as int?;
+      if (rawText.isNotEmpty && senderKey.isNotEmpty) {
+        final updatedState = await WhatsAppTextValidationService.instance.handleIncomingTextMessage(
+          text: rawText,
+          senderKey: senderKey,
+          senderName: senderName,
+          timestamp: timestamp,
+        );
+        if (updatedState != null && updatedState.isNotEmpty) {
+          _applyWhatsAppVehicleData(updatedState);
+        }
+      }
+    } else if (event.name == 'whatsappImageReceived') {
+      final imageFilePath = event.data['imageFilePath']?.toString() ?? '';
+      final timestamp = event.data['timestamp'] as int?;
+      if (imageFilePath.isNotEmpty && senderKey.isNotEmpty) {
+        await WhatsAppTextValidationService.instance.handleIncomingImage(
+          imageFilePath: imageFilePath,
+          senderKey: senderKey,
+          senderName: senderName,
+          timestamp: timestamp,
+        );
+      }
+    } else if (event.name == 'autoPublishLaunchRequested') {
+      final vehicleData = _stringMap(event.data['vehicleData']);
+      if (vehicleData.isNotEmpty) {
+        _startWhatsAppAutoPublish(vehicleData);
+      }
     }
   }
 

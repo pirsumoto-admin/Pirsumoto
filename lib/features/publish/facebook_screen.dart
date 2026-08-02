@@ -90,7 +90,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
   void dispose() {
     _service?.dispose();
     WakelockPlus.disable();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     super.dispose();
   }
 

@@ -11,6 +11,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ui_context.dart';
 import '../../services/whatsapp_message_bridge_service.dart';
+import '../../services/whatsapp_text_validation_service.dart';
 import '../../services/yad2_automation_service.dart';
 //import '../../services/yad2_accessibility_automation_service.dart';
 import '../../services/yad2_accessibility_automation_service_optimized.dart';
@@ -138,6 +139,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   bool _showPauseButton = false;
   bool _isPaused = false;
   bool _whatsAppStopReported = false;
+  bool _hideOverlayForStep = false;
 
   // Tap preview marker — CSS coordinates, null when hidden
   double? _tapMarkerX;
@@ -214,8 +216,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   void dispose() {
     _automationService?.dispose();
     WakelockPlus.disable(); // Ensure screen can sleep when leaving the automation screen
-    // Restore normal system UI when navigating away.
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    // Maintain immersive full-screen mode when navigating away.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     super.dispose();
   }
 
@@ -422,6 +424,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
               ),
             );
+          } else {
+            _automationService?.stop();
           }
           if (mounted) {
             setState(() {
@@ -430,12 +434,26 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               _statusMessage =
                   success ? 'האוטומציה הושלמה בהצלחה!' : 'האוטומציה נכשלה';
             });
+            if (success) {
+              Future.delayed(const Duration(seconds: 2), () {
+                if (mounted && Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop(true);
+                }
+              });
+            }
           }
         },
         onFirstStepDetected: () {
           if (mounted) {
             setState(() {
               _showPauseButton = true;
+            });
+          }
+        },
+        onToggleOverlayVisibility: (visible) {
+          if (mounted) {
+            setState(() {
+              _hideOverlayForStep = !visible;
             });
           }
         },
@@ -470,6 +488,13 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             );
           }
         },
+        onToggleOverlayVisibility: (visible) {
+          if (mounted) {
+            setState(() {
+              _hideOverlayForStep = !visible;
+            });
+          }
+        },
         onPhaseError: (phase, error) {
           unawaited(
             _notifyWhatsAppAutomationStopped(
@@ -493,7 +518,17 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             });
           }
         },
-        onAutomationComplete: (success) {
+        onAutomationComplete: (success) async {
+          _automationService?.stop();
+          if (widget.whatsAppSenderKey != null && widget.whatsAppSenderKey!.isNotEmpty) {
+            await WhatsAppTextValidationService.instance.clearSenderState(widget.whatsAppSenderKey!);
+          }
+          try {
+            await _controller.loadRequest(Uri.parse('about:blank'));
+          } catch (e) {
+            debugPrint('[Yad2Screen] Error resetting webview controller: $e');
+          }
+
           if (!success) {
             unawaited(
               _notifyWhatsAppAutomationStopped(
@@ -502,6 +537,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               ),
             );
           }
+
           if (mounted) {
             setState(() {
               _automationComplete = true;
@@ -509,6 +545,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               _statusMessage =
                   success ? 'האוטומציה הושלמה בהצלחה!' : 'האוטומציה נכשלה';
             });
+            if (success) {
+              Navigator.of(context).popUntil((route) => route.isFirst);
+            }
           }
         },
         onFirstStepDetected: () {
@@ -597,7 +636,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             key: _webViewKey,
             child: WebViewWidget(controller: _controller),
           ),
-          _buildStatusOverlay(),
+          if (!_hideOverlayForStep) _buildStatusOverlay(),
           // Tap preview marker
           if (_tapMarkerX != null && _tapMarkerY != null)
             Positioned(
@@ -620,7 +659,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ),
               ),
             ),
-          if (_showPauseButton)
+          if (_showPauseButton && !_hideOverlayForStep)
             Positioned(
               top: MediaQuery.of(context).padding.top + 4,
               left: 16,
@@ -672,7 +711,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ),
               ),
             ),
-          if (_showPauseButton && _isPaused)
+          if (_showPauseButton && _isPaused && !_hideOverlayForStep)
             Positioned(
               top: MediaQuery.of(context).padding.top + 4,
               right: 16,

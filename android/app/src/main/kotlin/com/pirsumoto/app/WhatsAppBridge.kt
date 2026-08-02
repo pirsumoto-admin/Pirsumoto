@@ -100,6 +100,26 @@ class WhatsAppBridgeController(private val activity: Activity) {
                 }
             }
 
+            "launchAutoPublish" -> {
+                val map = call.argument<Map<String, String>>("vehicleData") ?: emptyMap()
+                if (map.isNotEmpty()) {
+                    WhatsAppAutoPublishLauncher.launch(activity.applicationContext, map)
+                    result.success(true)
+                } else {
+                    result.success(false)
+                }
+            }
+
+            "scanRecentImages" -> {
+                val count = call.argument<Int>("count") ?: 10
+                val recentFiles = WhatsAppBridgeProcessor.findAllRecentImageFiles(
+                    targetTimestamp = System.currentTimeMillis(),
+                    expectedCount = count,
+                    maxWindowMs = 30 * 60 * 1000L
+                )
+                result.success(recentFiles.map { it.absolutePath })
+            }
+
             "openNotificationListenerSettings" -> {
                 activity.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                 result.success(true)
@@ -234,19 +254,42 @@ class WhatsAppBridgeController(private val activity: Activity) {
     }
 
     private fun requestRebindNotificationListener() {
+        if (WhatsAppNotificationListenerService.isConnected) {
+            Log.d(TAG, "NotificationListenerService is ALREADY connected. Skipping requestRebind.")
+            return
+        }
+        val component = ComponentName(activity, WhatsAppNotificationListenerService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            if (WhatsAppNotificationListenerService.isConnected) {
-                Log.d(TAG, "NotificationListenerService is ALREADY connected. Skipping requestRebind.")
-                return
-            }
             try {
-                val component = ComponentName(activity, WhatsAppNotificationListenerService::class.java)
                 NotificationListenerService.requestRebind(component)
-                Log.d(TAG, "Requested rebind for NotificationListenerService")
+                Log.d(TAG, "Requested rebind for NotificationListenerService via requestRebind API")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to request rebind for NotificationListenerService", e)
+                Log.e(TAG, "Failed to request rebind for NotificationListenerService via requestRebind API", e)
             }
         }
+
+        // Programmatic reset trick (Component Toggle) for dead/zombie bindings (common on MIUI/Xiaomi)
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!WhatsAppNotificationListenerService.isConnected) {
+                Log.w(TAG, "NotificationListenerService still not connected after requestRebind API. Executing PackageManager component toggle for zombie service recovery...")
+                try {
+                    val pm = activity.packageManager
+                    pm.setComponentEnabledSetting(
+                        component,
+                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        android.content.pm.PackageManager.DONT_KILL_APP
+                    )
+                    pm.setComponentEnabledSetting(
+                        component,
+                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        android.content.pm.PackageManager.DONT_KILL_APP
+                    )
+                    Log.d(TAG, "Successfully toggled ComponentEnabledSetting for NotificationListenerService")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed PackageManager component reset for NotificationListenerService", e)
+                }
+            }
+        }, 400L)
     }
 
     private fun openBatteryOptimizationSettings() {
@@ -409,26 +452,76 @@ class WhatsAppBridgeController(private val activity: Activity) {
 }
 
 object WhatsAppBridgeEvents {
+    private const val TAG = "WA-BridgeEvents"
+    private const val MAX_PENDING_EVENTS = 50
     private val mainHandler = Handler(Looper.getMainLooper())
     private var eventSink: EventChannel.EventSink? = null
+    private val pendingEvents = mutableListOf<Map<String, Any?>>()
 
     fun attach(sink: EventChannel.EventSink?) {
-        mainHandler.post { eventSink = sink }
+        mainHandler.post {
+            eventSink = sink
+            if (sink != null) {
+                flushPendingEventsLocked()
+            }
+        }
+    }
+
+    fun hasActiveSink(): Boolean {
+        return eventSink != null
     }
 
     fun detach() {
-        mainHandler.post { eventSink = null }
+        mainHandler.post {
+            eventSink = null
+        }
     }
 
     fun emit(name: String, data: Map<String, Any?> = emptyMap()) {
         mainHandler.post {
-            eventSink?.success(
-                mapOf(
-                    "event" to name,
-                    "timestamp" to System.currentTimeMillis(),
-                    "data" to data
-                )
+            val payload = mapOf(
+                "event" to name,
+                "timestamp" to System.currentTimeMillis(),
+                "data" to data
             )
+            val sink = eventSink
+            if (sink != null) {
+                try {
+                    sink.success(payload)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Event delivery failed (FlutterJNI detached?), queuing event: ${e.message}")
+                    eventSink = null
+                    queueEventLocked(payload)
+                }
+            } else {
+                Log.d(TAG, "No active EventSink, queuing event '$name'")
+                queueEventLocked(payload)
+            }
+        }
+    }
+
+    private fun queueEventLocked(payload: Map<String, Any?>) {
+        if (pendingEvents.size >= MAX_PENDING_EVENTS) {
+            pendingEvents.removeAt(0)
+        }
+        pendingEvents.add(payload)
+    }
+
+    private fun flushPendingEventsLocked() {
+        val sink = eventSink ?: return
+        if (pendingEvents.isEmpty()) return
+        Log.d(TAG, "Flushing ${pendingEvents.size} pending bridge events to Flutter")
+        val eventsToFlush = pendingEvents.toList()
+        pendingEvents.clear()
+        for (payload in eventsToFlush) {
+            try {
+                sink.success(payload)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to flush pending event to Flutter: ${e.message}")
+                eventSink = null
+                queueEventLocked(payload)
+                break
+            }
         }
     }
 }
@@ -1037,7 +1130,7 @@ class WhatsAppImageObserver(
                         val filePath = cursor.getString(dataIndex)
                         val dateAddedSec = if (dateAddedIndex != -1) cursor.getLong(dateAddedIndex) else 0L
 
-                        if (!filePath.isNullOrBlank() && (nowSec - dateAddedSec <= 300L || dateAddedSec == 0L)) {
+                        if (!filePath.isNullOrBlank() && dateAddedSec > 0L && nowSec - dateAddedSec <= 300L) {
                             val file = File(filePath)
                             if (file.exists() && isImageFile(file) && isWhatsAppOrGalleryImage(filePath)) {
                                 Log.d(TAG, "Recent MediaStore image detected: ${file.absolutePath}")
@@ -1111,7 +1204,7 @@ class WhatsAppImageObserver(
 
                 if ((cleanEvent and FileObserver.CREATE) != 0 && child.isDirectory) {
                     Log.d(TAG, "New directory created, watching: ${child.absolutePath}")
-                    mainHandler.postDelayed({ watchRecursively(child) }, 500L)
+                    mainHandler.postDelayed({ watchRecursively(child) }, 150L)
                     return
                 }
 
@@ -1120,7 +1213,7 @@ class WhatsAppImageObserver(
                     return
                 }
                 Log.d(TAG, "Image file detected by observer: ${child.absolutePath}")
-                mainHandler.postDelayed({ waitUntilStable(child) }, 1200L)
+                mainHandler.postDelayed({ waitUntilStable(child) }, 150L)
             }
         }
 
@@ -1139,7 +1232,7 @@ class WhatsAppImageObserver(
             } else {
                 Log.d(TAG, "Image file not stable yet: ${file.absolutePath}, length: ${file.length()}, firstLength: $firstLength")
             }
-        }, 800L)
+        }, 200L)
     }
 
     private fun isImageFile(file: File): Boolean {
@@ -1198,6 +1291,7 @@ object WhatsAppBridgeProcessor {
 
         if (title.isEmpty() && text.isEmpty()) return null
         if (isNonMessageNotification(title, text)) return null
+        if (looksLikePirsumotoReply(text)) return null
 
         val type = when {
             looksLikeVoiceMessage(text) -> "audio"
@@ -1262,6 +1356,7 @@ object WhatsAppBridgeProcessor {
             mapOf(
                 "type" to message.type,
                 "senderName" to message.senderName,
+                "senderKey" to message.senderKey,
                 "conversationTitle" to message.conversationTitle,
                 "text" to message.text
             )
@@ -1368,7 +1463,9 @@ object WhatsAppBridgeProcessor {
         Log.d(TAG, "enqueueImageMessage for notification: ${message.id}")
         Log.d(TAG, "Message timestamp: ${message.timestamp} ($msgTimeStr)")
         
-        val expectedCount = extractExpectedImageCount(message.text)
+        val stateExpectedCount = WhatsAppLocalInventoryValidator.getExpectedImageCount(context, message.senderKey)
+        val notificationExpectedCount = extractExpectedImageCount(message.text)
+        val expectedCount = if (stateExpectedCount > 0) stateExpectedCount else notificationExpectedCount
         
         val matchingFiles = synchronized(lock) {
             trimImageCachesLocked()
@@ -1379,7 +1476,7 @@ object WhatsAppBridgeProcessor {
             val candidates = unmatchedImageFiles.filter { file ->
                 val diff = abs(file.timestamp - message.timestamp)
                 diff <= IMAGE_MATCH_WINDOW_MS
-            }.sortedBy { it.timestamp }
+            }.sortedBy { abs(it.timestamp - message.timestamp) }
 
             if (candidates.isNotEmpty()) {
                 Log.d(TAG, "Found ${candidates.size} matching image files in cache for batch notification")
@@ -1418,14 +1515,18 @@ object WhatsAppBridgeProcessor {
             for (file in delayedFiles) {
                 processImageMessage(context.applicationContext, message, file)
             }
-        }, 2500L)
+        }, 400L)
     }
 
     private fun findRecentImageFile(targetTimestamp: Long): File? {
         return findAllRecentImageFiles(targetTimestamp, 1).firstOrNull()
     }
 
-    private fun findAllRecentImageFiles(targetTimestamp: Long, expectedCount: Int): List<File> {
+    fun findAllRecentImageFiles(
+        targetTimestamp: Long,
+        expectedCount: Int,
+        maxWindowMs: Long = 30 * 60 * 1000L
+    ): List<File> {
         val external = Environment.getExternalStorageDirectory()
         val roots = listOf(
             File(external, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
@@ -1436,7 +1537,6 @@ object WhatsAppBridgeProcessor {
             File(external, "WhatsApp/Media/WhatsApp Images/Private"),
             File(external, "Pictures/WhatsApp"),
             File(external, "DCIM/WhatsApp"),
-            File(external, "DCIM/Camera"),
             File("/storage/emulated/999/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
             File("/storage/emulated/999/Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images")
         )
@@ -1452,14 +1552,14 @@ object WhatsAppBridgeProcessor {
                 val lastMod = file.lastModified()
                 val diffWithTarget = abs(lastMod - targetTimestamp)
 
-                if (diffWithTarget <= IMAGE_MATCH_WINDOW_MS) {
+                if (diffWithTarget <= maxWindowMs) {
                     matches.add(file)
                 }
             }
         }
 
         return matches.distinctBy { it.absolutePath }
-            .sortedByDescending { it.lastModified() }
+            .sortedBy { abs(it.lastModified() - targetTimestamp) }
             .take(expectedCount)
     }
 
@@ -1473,31 +1573,72 @@ object WhatsAppBridgeProcessor {
     }
 
     private fun processTextMessage(context: Context, message: IncomingWhatsAppMessage) {
+        val rawText = message.text.orEmpty().trim()
+        if (isSystemNotificationMessage(rawText) || looksLikePirsumotoReply(rawText)) {
+            Log.d(TAG, "Ignoring system notification or self reply: $rawText")
+            return
+        }
+
         executor.execute {
-            val result = WhatsAppLocalInventoryValidator.process(
-                context = context,
-                senderKey = message.senderKey,
-                text = message.text.orEmpty(),
-                audioFile = null
-            )
-            val vehicleData = withWhatsAppMetadata(message, result.vehicleData)
-            WhatsAppBridgeEvents.emit(
-                "locallyProcessed",
-                mapOf(
-                    "senderName" to message.senderName,
-                    "missingFields" to result.missingFieldKeys,
-                    "updatedFields" to result.updatedFieldKeys,
-                    "readyToPublish" to result.readyToPublish,
-                    "autoPublishRequested" to result.autoPublishRequested,
-                    "vehicleData" to vehicleData
+            if (WhatsAppBridgeEvents.hasActiveSink()) {
+                // Active Flutter EventSink: Let Flutter handle text validation & auto-reply to avoid duplicate replies
+                WhatsAppBridgeEvents.emit(
+                    "whatsappTextReceived",
+                    mapOf(
+                        "senderName" to message.senderName,
+                        "senderKey" to message.senderKey,
+                        "text" to rawText,
+                        "timestamp" to message.timestamp
+                    )
                 )
-            )
-            val reply = result.replyHebrew
-            maybeSendReply(context, message.senderKey, reply)
-            if (result.autoPublishRequested) {
-                WhatsAppAutoPublishLauncher.launch(context, vehicleData)
+            } else {
+                // Background / Detached: Process natively in Kotlin
+                val result = WhatsAppLocalInventoryValidator.process(
+                    context = context,
+                    senderKey = message.senderKey,
+                    text = rawText,
+                    audioFile = null
+                )
+
+                val vehicleData = withWhatsAppMetadata(message, result.vehicleData)
+
+                WhatsAppBridgeEvents.emit(
+                    "locallyProcessed",
+                    mapOf(
+                        "senderName" to message.senderName,
+                        "missingFields" to result.missingFieldKeys,
+                        "updatedFields" to result.updatedFieldKeys,
+                        "readyToPublish" to result.readyToPublish,
+                        "autoPublishRequested" to result.autoPublishRequested,
+                        "vehicleData" to vehicleData
+                    )
+                )
+
+                if (!result.replyHebrew.isNullOrBlank()) {
+                    maybeSendReply(context, message.senderKey, result.replyHebrew)
+                }
+
+                if (result.autoPublishRequested && vehicleData.isNotEmpty()) {
+                    WhatsAppAutoPublishLauncher.launch(context, vehicleData)
+                }
             }
         }
+    }
+
+    private fun isSystemNotificationMessage(text: String): Boolean {
+        val trimmed = text.trim()
+        return trimmed.startsWith("תהליך") ||
+               trimmed.startsWith("האוטומציה") ||
+               trimmed.startsWith("פרטי הרכב") ||
+               trimmed.startsWith("מצאתי את הרכב") ||
+               trimmed.startsWith("נמצאו שגיאות") ||
+               trimmed.startsWith("חסרים עדיין") ||
+               trimmed.startsWith("התקבלו") ||
+               trimmed.startsWith("מתחיל פרסום") ||
+               trimmed.startsWith("קיבלתי") ||
+               trimmed.startsWith("נקלטה") ||
+               trimmed.contains("חיפוש הודעות") ||
+               trimmed.contains("משתקבלות הודעות")
     }
 
     private fun processAudioMessage(context: Context, message: IncomingWhatsAppMessage, file: File) {
@@ -1565,28 +1706,16 @@ object WhatsAppBridgeProcessor {
         )
 
         executor.execute {
-            val result = WhatsAppLocalInventoryValidator.processImage(
-                context = context,
-                senderKey = message.senderKey,
-                imageFile = file
-            )
-            val vehicleData = withWhatsAppMetadata(message, result.vehicleData)
             WhatsAppBridgeEvents.emit(
-                "locallyProcessed",
+                "whatsappImageReceived",
                 mapOf(
                     "senderName" to message.senderName,
-                    "missingFields" to result.missingFieldKeys,
-                    "updatedFields" to result.updatedFieldKeys,
+                    "senderKey" to message.senderKey,
+                    "imageFilePath" to file.absolutePath,
                     "imageFileName" to file.name,
-                    "readyToPublish" to result.readyToPublish,
-                    "autoPublishRequested" to result.autoPublishRequested,
-                    "vehicleData" to vehicleData
+                    "timestamp" to message.timestamp
                 )
             )
-            scheduleDebouncedReply(context, message.senderKey, result.replyHebrew)
-            if (result.autoPublishRequested) {
-                WhatsAppAutoPublishLauncher.launch(context, vehicleData)
-            }
         }
     }
 
@@ -1599,7 +1728,7 @@ object WhatsAppBridgeProcessor {
                 maybeSendReply(context, senderKey, reply)
             }
             replyDebounceRunnableMap[senderKey] = runnable
-            mainHandler.postDelayed(runnable, 1200L)
+            mainHandler.postDelayed(runnable, 300L)
         }
     }
 
@@ -1613,10 +1742,13 @@ object WhatsAppBridgeProcessor {
 
         val handle = synchronized(lock) {
             trimReplyActionsLocked()
+            val cleanKey1 = senderKey.split("|").firstOrNull()?.trim().orEmpty()
+            val cleanKey2 = senderKey.split("|").lastOrNull()?.trim().orEmpty()
             replyActions[senderKey]
-                ?: replyActions[senderKey.split("|").firstOrNull()?.trim().orEmpty()]
+                ?: replyActions[cleanKey1]
+                ?: replyActions[cleanKey2]
                 ?: replyActions.values.maxByOrNull { it.receivedAt }?.takeIf {
-                    System.currentTimeMillis() - it.receivedAt <= 5 * 60 * 1000L
+                    System.currentTimeMillis() - it.receivedAt <= 90 * 60 * 1000L
                 }
         } ?: run {
             Log.w(TAG, "No direct-reply action found for senderKey: $senderKey")
@@ -1754,48 +1886,60 @@ object WhatsAppBridgeProcessor {
     }
 
     private fun looksLikeImageMessage(extras: Bundle, text: String): Boolean {
+        if (looksLikePirsumotoReply(text)) return false
         if (extras.get(Notification.EXTRA_PICTURE) != null || extras.get("android.picture") != null) {
             return true
         }
-        val lower = text.lowercase(Locale.getDefault())
-        return lower.contains("photo") ||
-            lower.contains("image") ||
-            lower.contains("picture") ||
-            lower.contains("\u05ea\u05de\u05d5\u05e0\u05d4") ||
-            lower.contains("\u05ea\u05de\u05d5\u05e0\u05d5\u05ea") ||
-            lower.contains("\u05ea\u05e6\u05dc\u05d5\u05dd") ||
-            lower.contains("\u05ea\u05e6\u05dc\u05d5\u05de\u05d9\u05dd") ||
-            lower.contains("\uD83D\uDCF7") ||
-            lower.contains("📷")
+        val lower = text.lowercase(Locale.getDefault()).trim()
+        return lower == "photo" ||
+               lower == "picture" ||
+               lower == "📷 photo" ||
+               lower.startsWith("📷")
     }
 
     private fun isNonMessageNotification(title: String, text: String): Boolean {
-        val combined = "$title $text".lowercase()
-        return combined.contains("whatsapp web") ||
+        val cleanTitle = title.replace("\u200F", "").replace("\u200E", "").trim()
+        val combined = "$cleanTitle $text".lowercase(Locale.getDefault())
+        return cleanTitle == "WhatsApp" ||
+            cleanTitle == "וואטסאפ" ||
+            cleanTitle == "את/ה" ||
+            cleanTitle == "אתה" ||
+            cleanTitle == "את" ||
+            cleanTitle == "You" ||
+            combined.contains("whatsapp web") ||
             combined.contains("checking for new messages") ||
+            combined.contains("חיפוש הודעות") ||
+            combined.contains("משתקבלות הודעות") ||
+            combined.contains("מגבה") ||
+            combined.contains("גיבוי") ||
             combined.contains("backup") ||
             combined.contains("connected")
     }
 
     private fun looksLikePirsumotoReply(text: String): Boolean {
-        return text.contains(CHECKING_REPLY) ||
-            text.contains("*לעצירת עדכון נתונים השב 0*") ||
-            text.contains("*לביטול התהליך השב ביטול*") ||
-            text.contains("קיבלתי את ההודעה") ||
-            text.contains("מצאתי מספר רכב") ||
-            text.contains("מצאתי את הרכב") ||
-            text.contains("חסרים עדיין הנתונים הבאים") ||
-            text.contains("רשומת הרכב הושלמה") ||
-            text.contains("פרטי הרכב לאישור") ||
-            text.contains("הנתונים מוכנים") ||
-            text.contains("התקבלה תמונה") ||
-            text.contains("קיבלתי תמונה") ||
-            text.contains("ממתין להעלאת התמונות") ||
-            text.contains("התקבלו ") ||
-            text.contains("מתחיל פרסום ביד2") ||
-            text.contains("עדכון הנתונים נעצר") ||
-            text.contains("אנא התחבר לחשבון יד2") ||
-            text.contains("האוטומציה נעצרה בשלב")
+        val norm = text.trim().lowercase(Locale.getDefault())
+        return norm == "מבטל" ||
+               norm == "הפרסום בוטל." ||
+               norm == "הפרסום בוטל" ||
+               norm.startsWith("מבטל") ||
+               norm.startsWith("עדכון הנתונים נעצר") ||
+               norm.startsWith("נקלטה תמונה") ||
+               norm.startsWith("התקבלו") ||
+               norm.startsWith("ממתין להעלאת") ||
+               norm.startsWith("מתחיל פרסום") ||
+               norm.startsWith("הפרסום בוטל") ||
+               norm.startsWith("תהליך") ||
+               norm.startsWith("האוטומציה") ||
+               norm.startsWith("פרטי הרכב") ||
+               norm.startsWith("מצאתי את הרכב") ||
+               norm.startsWith("לא נמצאו") ||
+               norm.startsWith("לא זיהיתי") ||
+               norm.startsWith("נמצאו שגיאות") ||
+               norm.startsWith("חסרים עדיין") ||
+               norm.startsWith("קיבלתי") ||
+               norm.contains("כמה תמונות תרצה להעלות") ||
+               norm.contains("השב מספר תמונות") ||
+               norm.contains("פרטי הרכב לאישור")
     }
 }
 
@@ -1846,7 +1990,7 @@ object WhatsAppOpenAiAudioProcessor {
 
         return try {
             connection.outputStream.use { output ->
-                writeMultipartField(output, boundary, "model", "gpt-4o-mini-transcribe")
+                writeMultipartField(output, boundary, "model", "whisper-1")
                 writeMultipartField(output, boundary, "language", "he")
                 writeMultipartFile(
                     output = output,
@@ -2186,7 +2330,7 @@ object WhatsAppLocalInventoryValidator {
         if (isCancel) {
             clearState(context, senderKey)
             return ValidationResult(
-                replyHebrew = "עדכון הנתונים נעצר ונמחקו הפרטים שנאספו לשיחה זו.",
+                replyHebrew = "מבטל",
                 missingFieldKeys = missingDetailKeys,
                 updatedFieldKeys = emptyList(),
                 readyToPublish = false,
@@ -2313,8 +2457,10 @@ object WhatsAppLocalInventoryValidator {
         }
 
         val imagePaths = parseImagePaths(state[KEY_IMAGE_PATHS])
-        val imagePath = imageFile.absolutePath
-        if (imagePaths.contains(imagePath)) {
+        val existingNames = imagePaths.map { File(it).name.lowercase(Locale.getDefault()) }.toSet()
+        val fileName = imageFile.name.lowercase(Locale.getDefault())
+
+        if (existingNames.contains(fileName) || imagePaths.contains(imageFile.absolutePath)) {
             return ValidationResult(
                 replyHebrew = null,
                 missingFieldKeys = emptyList(),
@@ -2325,7 +2471,7 @@ object WhatsAppLocalInventoryValidator {
             )
         }
 
-        imagePaths.add(imagePath)
+        imagePaths.add(imageFile.absolutePath)
         val receivedCount = imagePaths.size
         state[KEY_IMAGE_PATHS] = encodeImagePaths(imagePaths)
         state[KEY_IMAGE_RECEIVED_COUNT] = receivedCount.toString()
@@ -2333,7 +2479,7 @@ object WhatsAppLocalInventoryValidator {
 
         return if (receivedCount >= expectedCount) {
             ValidationResult(
-                replyHebrew = "התקבלו $receivedCount מתוך $expectedCount תמונות.\nלפרסום שלח 0\nלביטול שלח 1",
+                replyHebrew = "התקבלו $receivedCount מתוך $expectedCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול שלח 1",
                 missingFieldKeys = emptyList(),
                 updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
                 readyToPublish = true,
@@ -2342,8 +2488,7 @@ object WhatsAppLocalInventoryValidator {
             )
         } else {
             ValidationResult(
-                replyHebrew = "התקבלו $receivedCount מתוך $expectedCount תמונות",
-
+                replyHebrew = "נקלטה תמונה $receivedCount מתוך $expectedCount, מעבד...",
                 missingFieldKeys = emptyList(),
                 updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
                 readyToPublish = true,
@@ -2359,8 +2504,6 @@ object WhatsAppLocalInventoryValidator {
         state: MutableMap<String, String?>,
         plannedImageCount: Int
     ): ValidationResult {
-        state[KEY_IMAGE_PATHS] = null
-        state[KEY_IMAGE_RECEIVED_COUNT] = "0"
         state[KEY_IMAGE_EXPECTED_COUNT] = plannedImageCount.toString()
         state[KEY_AUTO_PUBLISH_STARTED] = null
 
@@ -2375,22 +2518,52 @@ object WhatsAppLocalInventoryValidator {
             )
         }
 
-        val receivedCount = parseImagePaths(state[KEY_IMAGE_PATHS]).size
+        val existingPaths = parseImagePaths(state[KEY_IMAGE_PATHS])
+        val recentFiles = WhatsAppBridgeProcessor.findAllRecentImageFiles(
+            targetTimestamp = System.currentTimeMillis(),
+            expectedCount = plannedImageCount,
+            maxWindowMs = 30 * 60 * 1000L
+        )
+
+        val combinedPaths = mutableListOf<String>()
+        val existingNames = mutableSetOf<String>()
+
+        existingPaths.forEach { path ->
+            val name = File(path).name.lowercase(Locale.getDefault())
+            if (!existingNames.contains(name)) {
+                existingNames.add(name)
+                combinedPaths.add(path)
+            }
+        }
+
+        recentFiles.forEach { file: File ->
+            val name = file.name.lowercase(Locale.getDefault())
+            if (!existingNames.contains(name)) {
+                existingNames.add(name)
+                combinedPaths.add(file.absolutePath)
+            }
+        }
+
+        val finalPaths = combinedPaths.take(plannedImageCount)
+        val receivedCount = finalPaths.size
+        state[KEY_IMAGE_PATHS] = encodeImagePaths(finalPaths)
         state[KEY_IMAGE_RECEIVED_COUNT] = receivedCount.toString()
         saveState(context, senderKey, state)
 
         return if (receivedCount >= plannedImageCount) {
-            requestAutoPublish(
-                context = context,
-                senderKey = senderKey,
-                state = state,
-                reply = "התקבלו כל התמונות. מתחיל פרסום ביד2 עכשיו."
+            ValidationResult(
+                replyHebrew = "התקבלו $receivedCount מתוך $plannedImageCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול שלח 1",
+                missingFieldKeys = emptyList(),
+                updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT, KEY_IMAGE_PATHS),
+                readyToPublish = true,
+                autoPublishRequested = false,
+                vehicleData = vehicleData(state)
             )
         } else {
             ValidationResult(
-                replyHebrew = "ממתין להעלאת התמונות",
+                replyHebrew = "ממתין להעלאת $plannedImageCount תמונות",
                 missingFieldKeys = emptyList(),
-                updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT),
+                updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT, KEY_IMAGE_PATHS),
                 readyToPublish = true,
                 autoPublishRequested = false,
                 vehicleData = vehicleData(state)
@@ -3045,6 +3218,10 @@ object WhatsAppLocalInventoryValidator {
             "5" -> "יד חמישית"
             else -> "יד $value"
         }
+    }
+
+    fun getExpectedImageCount(context: Context, senderKey: String): Int {
+        return loadState(context, senderKey)[KEY_IMAGE_EXPECTED_COUNT]?.toIntOrNull() ?: 0
     }
 
     private fun loadState(context: Context, senderKey: String): MutableMap<String, String?> {

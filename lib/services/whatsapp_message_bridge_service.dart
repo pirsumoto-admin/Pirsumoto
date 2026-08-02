@@ -67,12 +67,35 @@ class WhatsAppMessageBridgeService {
     required String senderKey,
     required String message,
   }) async {
-    _assertAndroid();
+    if (!Platform.isAndroid) {
+      print('[WhatsAppMessageBridge] (mock) sendReplyToWhatsApp: $message');
+      return true;
+    }
     return await _channel.invokeMethod<bool>('sendReplyToWhatsApp', {
           'senderKey': senderKey,
           'message': message,
         }) ??
         false;
+  }
+
+  Future<bool> launchAutoPublish(Map<String, String> vehicleData) async {
+    if (!Platform.isAndroid) {
+      print('[WhatsAppMessageBridge] (mock) launchAutoPublish: $vehicleData');
+      return true;
+    }
+    return await _channel.invokeMethod<bool>('launchAutoPublish', {
+          'vehicleData': vehicleData,
+        }) ??
+        false;
+  }
+
+  Future<List<String>> scanRecentImages(int count) async {
+    _assertAndroid();
+    final raw = await _channel.invokeListMethod<Object?>('scanRecentImages', {
+      'count': count,
+    });
+    if (raw == null) return const [];
+    return raw.map((e) => e.toString()).toList();
   }
 
   Future<bool> openNotificationListenerSettings() async {
