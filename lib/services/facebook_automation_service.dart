@@ -241,8 +241,6 @@ class FacebookAutomationService {
         case FacebookAutomationPhase.complete:
           WakelockPlus.disable();
           _handlePhaseComplete(FacebookAutomationPhase.complete);
-        default:
-          debugPrint('[Yad2-A11y] Ignoring commented out phase: $phase');
           break;
       }
     } catch (e, st) {

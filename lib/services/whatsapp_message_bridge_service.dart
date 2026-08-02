@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class WhatsAppMessageBridgeService {
@@ -68,7 +69,9 @@ class WhatsAppMessageBridgeService {
     required String message,
   }) async {
     if (!Platform.isAndroid) {
-      print('[WhatsAppMessageBridge] (mock) sendReplyToWhatsApp: $message');
+      debugPrint(
+        '[WhatsAppMessageBridge] (mock) sendReplyToWhatsApp: $message',
+      );
       return true;
     }
     return await _channel.invokeMethod<bool>('sendReplyToWhatsApp', {
@@ -80,7 +83,9 @@ class WhatsAppMessageBridgeService {
 
   Future<bool> launchAutoPublish(Map<String, String> vehicleData) async {
     if (!Platform.isAndroid) {
-      print('[WhatsAppMessageBridge] (mock) launchAutoPublish: $vehicleData');
+      debugPrint(
+        '[WhatsAppMessageBridge] (mock) launchAutoPublish: $vehicleData',
+      );
       return true;
     }
     return await _channel.invokeMethod<bool>('launchAutoPublish', {

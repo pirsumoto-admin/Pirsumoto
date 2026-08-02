@@ -827,16 +827,19 @@ class WhatsAppTextValidationService {
    - יש לבחון אילו נתונים כבר קיימים ואילו נתונים חסרים, ולבקש מהמשתמש להשלים את השדות החסרים.
    - בכל איטרציה/הודעה יש לתקף מחדש את שלמות ואיכות כל שדות הנתונים לפני תחילת הפרסום.
 
-4. חילוץ שדות מהטקסט (Field Extraction):
-   - נתח מתוך הטקסט שנשלח על ידי המשתמש מהם שדות הנתונים שהמשתמש ציין או סיפק.
+4. חילוץ שדות מהטקסט והבחנה חדה בין קילומטראז' למחיר (Field Extraction & Context Rules):
+   - הודעות ב-WhatsApp עשויות להעביר נתונים בסדרים שונים (לדוגמה: מחיר לפני קילומטראז' או קילומטראז' לפני מחיר).
+   - אם לפני או אחרי מספר מופיע טקסט כגון: ש"ח, שח, שח', ₪, מחיר, דורש, מבקש, רוצה - המספר שייך מפורשות לשדה **price** (מחיר).
+   - אם לפני או אחרי מספר מופיע טקסט כגון: ק"מ, קמ, קילומטרים, קילומטראז', שעון, נסע, km - המספר שייך מפורשות לשדה **km** (קילומטראז').
+   - הקפד לנתח את המילים הנלוות וההקשר של כל מספר בהודעה כדי להבדיל באופן מדויק לחלוטין מהו המחיר ומהו הקילומטראז', מבלי להתבלבל ביניהם גם כשהסדר בהודעה משתנה.
 
 5. איפוס סשן בעקבות מספר רישוי שגוי או חדש (Reset Session):
    - אם במהלך השיחה המשתמש מבין שמספר הרישוי שנשלח היה שגוי ושולח מספר רישוי חדש, יש לאפס כליל את הסשן וההיסטוריה ולהתחיל סשן חדש ונקי לחלוטין עבור מספר הרישוי החדש.
 
 שדות הרכב לחילוץ ואימות בפורמט JSON:
 - license_plate: מספר רישוי (ספרות בלבד. אם יש בהודעה מספר בעל 7 או 8 ספרות, עם או בלי מקפים, חלץ אותו כשדה זה)
-- km: קילומטראז' (מספר בלבד. שים לב שהנתון יכול להופיע בפורמטים כמו: קילומטרים, ק״מ, קילומטראז׳, נסע, שעון - כאשר המספר יכול להופיע לפני או אחרי המילים האלו)
-- price: מחיר (מספר בלבד. שים לב שהמחיר יכול להופיע עם סמל/טקסט מטבע אחריו כמו ש״ח, ₪, או עם מילים מקדימות כמו דורש, מבקש, רוצה, מחיר)
+- km: קילומטראז' (מספר בלבד. זהה מתוך ההקשר מספר המקושר למילים: ק״מ, קמ, קילומטרים, קילומטראז׳, נסע, שעון, km)
+- price: מחיר (מספר בלבד. זהה מתוך ההקשר מספר המקושר למילים: ש״ח, שח, שח', ₪, מחיר, דורש, מבקש, רוצה)
 - hand: יד (מספר בלבד, 1, 2, 3...)
 - vehicle_condition: מצב הרכב ("חדש", "כמו חדש", "מצוין", "טוב מאוד", "טוב", "סביר", "משומש", "גרוע")
 - description: תיאור/הערות
@@ -1191,56 +1194,59 @@ class WhatsAppTextValidationService {
   }
 
   String? _extractKm(String text) {
-    final labelFirst = RegExp(
-      r'''(?:קילומטראז['׳]?|קילומטרים|ק["״]מ|קמ|נסע|שעון|km)\s*[:=\-]?\s*([\d,.\s]{2,})(?:\s*אלף)?''',
-      caseSensitive: false,
-    ).firstMatch(text);
-    final valueFirst = RegExp(
-      r'''([\d,.\s]{2,})(?:\s*אלף)?\s*(?:קילומטראז['׳]?|קילומטרים|ק["״]מ|קמ|נסע|שעון|km)''',
-      caseSensitive: false,
-    ).firstMatch(text);
+    for (final line in text.split('\n')) {
+      final normLine = line.trim();
+      if (normLine.isEmpty) continue;
 
-    final match = labelFirst ?? valueFirst;
-    if (match == null) return null;
+      final labelFirst = RegExp(
+        r'''(?:קילומטראז['׳]?|קילומטרים|ק["״]מ|קמ|נסע|שעון|km)[^\S\r\n]*[:=\-]?[^\S\r\n]*([\d,.]+)(?:[^\S\r\n]*אלף)?''',
+        caseSensitive: false,
+      ).firstMatch(normLine);
+      final valueFirst = RegExp(
+        r'''([\d,.]+)(?:[^\S\r\n]*אלף)?[^\S\r\n]*(?:קילומטראז['׳]?|קילומטרים|ק["״]מ|קמ|נסע|שעון|km)''',
+        caseSensitive: false,
+      ).firstMatch(normLine);
 
-    final digits = _digitsOnly(match.group(1) ?? '');
-    if (digits.isEmpty) return null;
-
-    if (match.group(0)!.contains('אלף') && digits.length <= 3) {
-      final num = int.tryParse(digits);
-      return num != null ? (num * 1000).toString() : digits;
+      final match = labelFirst ?? valueFirst;
+      if (match != null) {
+        final digits = _digitsOnly(match.group(1) ?? '');
+        if (digits.isNotEmpty) {
+          if (match.group(0)!.contains('אלף') && digits.length <= 3) {
+            final num = int.tryParse(digits);
+            return num != null ? (num * 1000).toString() : digits;
+          }
+          return digits;
+        }
+      }
     }
-    return digits;
+    return null;
   }
 
   String? _extractPrice(String text) {
-    final labeled = RegExp(
-      r'(?:מחיר|price|דורש|מבקש|רוצה)\s*[:=\-]?\s*([\d,.\s]{2,})(?:\s*אלף)?',
-      caseSensitive: false,
-    ).firstMatch(text);
-    if (labeled != null) {
-      final digits = _digitsOnly(labeled.group(1) ?? '');
-      if (digits.isNotEmpty) {
-        if (labeled.group(0)!.contains('אלף') && digits.length <= 3) {
-          final num = int.tryParse(digits);
-          return num != null ? (num * 1000).toString() : digits;
-        }
-        return digits;
-      }
-    }
+    for (final line in text.split('\n')) {
+      final normLine = line.trim();
+      if (normLine.isEmpty) continue;
 
-    final currency = RegExp(
-      r'([\d,.\s]{2,})(?:\s*אלף)?\s*(?:₪|ש["״]ח|שח|nis)',
-      caseSensitive: false,
-    ).firstMatch(text);
-    if (currency != null) {
-      final digits = _digitsOnly(currency.group(1) ?? '');
-      if (digits.isNotEmpty) {
-        if (currency.group(0)!.contains('אלף') && digits.length <= 3) {
-          final num = int.tryParse(digits);
-          return num != null ? (num * 1000).toString() : digits;
+      final labeled = RegExp(
+        r'(?:מחיר|price|דורש|מבקש|רוצה)[^\S\r\n]*[:=\-]?[^\S\r\n]*([\d,.]+)(?:[^\S\r\n]*אלף)?',
+        caseSensitive: false,
+      ).firstMatch(normLine);
+
+      final currency = RegExp(
+        r'''([\d,.]+)(?:[^\S\r\n]*אלף)?[^\S\r\n]*(?:₪|ש["״]ח|שח['׳]?|שח|nis)''',
+        caseSensitive: false,
+      ).firstMatch(normLine);
+
+      final match = labeled ?? currency;
+      if (match != null) {
+        final digits = _digitsOnly(match.group(1) ?? '');
+        if (digits.isNotEmpty) {
+          if (match.group(0)!.contains('אלף') && digits.length <= 3) {
+            final num = int.tryParse(digits);
+            return num != null ? (num * 1000).toString() : digits;
+          }
+          return digits;
         }
-        return digits;
       }
     }
     return null;
