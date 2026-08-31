@@ -1078,6 +1078,7 @@ class Yad2AccessibilityAutomationService {
       return const _StepActionResult.failure('Kilometers field not found.');
     }
     await _dismissKeyboard();
+    await _scrollDown(0.3);
     return const _StepActionResult.success();
   }
 
@@ -1093,7 +1094,7 @@ class Yad2AccessibilityAutomationService {
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
     await _scrollDown(0.35);
     await _dismissKnownPopups();
-    await Future.delayed(const Duration(milliseconds: 2000));
+    await Future.delayed(const Duration(milliseconds: 4500));
     final submitted = await _retryUntil(
       () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא|לשלב')),
       timeout: const Duration(seconds: 8),

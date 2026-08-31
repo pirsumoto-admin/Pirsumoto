@@ -3,6 +3,7 @@
 *.log
 *.pyc
 *.swp
+*.csv
 .DS_Store
 .atom/
 .build/
@@ -11,17 +12,17 @@
 .svn/
 .swiftpm/
 migrate_working_dir/
+tmp/
+output/
 
-# IntelliJ related
+# IntelliJ / Android Studio related
 *.iml
 *.ipr
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
+# Visual Studio Code
+.vscode/
 
 # Flutter/Dart/Pub related
 **/doc/api/
@@ -33,13 +34,48 @@ migrate_working_dir/
 .pub/
 /build/
 
-# Symbolication related
+# Android specific
+**/android/.gradle/
+**/android/local.properties
+**/android/app/src/main/assets/
+**/android/app/debug
+**/android/app/profile
+**/android/app/release
+**/android/.cxx/
+**/android/gradleBuild/
+**/android/**/build/
+**/android/captures/
+
+# iOS specific
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/profile
+**/ios/debug
+**/ios/release
+**/ios/DerivedData/
+**/ios/*.xcworkspace/xcuserdata/
+**/ios/*.xcodeproj/xcuserdata/
+**/ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS specific
+**/macos/Flutter/ephemeral/
+**/macos/Pods/
+
+# Linux specific
+**/linux/flutter/ephemeral/
+
+# Windows specific
+**/windows/flutter/ephemeral/
+
+# Packages / Binaries / Symbols
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
-
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+*.apk
+*.aab
+*.ipa

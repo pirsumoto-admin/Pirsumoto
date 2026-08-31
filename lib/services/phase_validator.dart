@@ -37,11 +37,7 @@ class PhaseRule {
   /// LLM fallback question, asked only when rule-based checks are inconclusive.
   final String? llmQuestion;
 
-  const PhaseRule({
-    this.mustContain,
-    this.mustNotContain,
-    this.llmQuestion,
-  });
+  const PhaseRule({this.mustContain, this.mustNotContain, this.llmQuestion});
 }
 
 // ── Validator ─────────────────────────────────────────────────────────────────
@@ -53,12 +49,9 @@ class PhaseValidator {
   /// Set to null to use rule-based validation only.
   final String? anthropicApiKey;
 
-  static const _llmModel = 'claude-haiku-4-5-20251001';
+  static const _llmModel = 'gpt-5.6-luna'; //'claude-haiku-4-5-20251001';
 
-  const PhaseValidator({
-    required this.ocrService,
-    this.anthropicApiKey,
-  });
+  const PhaseValidator({required this.ocrService, this.anthropicApiKey});
 
   // ── Public entry point ─────────────────────────────────────────────────────
 
@@ -95,33 +88,36 @@ class PhaseValidator {
 
   // ── Rule checks ────────────────────────────────────────────────────────────
 
-  Future<ValidationResult> _checkPresent(
-    UIContext context,
-    String text,
-  ) async {
+  Future<ValidationResult> _checkPresent(UIContext context, String text) async {
     final axHit = context.findByLabel(text, visibleOnly: false);
     if (axHit != null) {
       return ValidationResult(
-          success: true,
-          reason: 'AxTree: "${axHit.label}" found (visible=${axHit.visible})');
+        success: true,
+        reason: 'AxTree: "${axHit.label}" found (visible=${axHit.visible})',
+      );
     }
     final ocrHit = await ocrService.findTextLocation(context.screenshot, text);
     if (ocrHit != null) {
       return ValidationResult(success: true, reason: 'OCR: "$text" found');
     }
     return ValidationResult(
-        success: false, reason: '"$text" not found in AxTree or OCR');
+      success: false,
+      reason: '"$text" not found in AxTree or OCR',
+    );
   }
 
   ValidationResult _checkAbsent(UIContext context, String text) {
     final axHit = context.findByLabel(text, visibleOnly: true);
     if (axHit != null) {
       return ValidationResult(
-          success: false,
-          reason: '"$text" still visible — element not dismissed');
+        success: false,
+        reason: '"$text" still visible — element not dismissed',
+      );
     }
     return ValidationResult(
-        success: true, reason: '"$text" not visible — correctly dismissed');
+      success: true,
+      reason: '"$text" not visible — correctly dismissed',
+    );
   }
 
   // ── LLM escalation ─────────────────────────────────────────────────────────
@@ -145,16 +141,16 @@ class PhaseValidator {
                   'type': 'base64',
                   'media_type': 'image/png',
                   'data': b64,
-                }
+                },
               },
               {
                 'type': 'text',
                 'text':
                     'Answer YES or NO only, then one short reason (max 20 words).\n$question',
-              }
-            ]
-          }
-        ]
+              },
+            ],
+          },
+        ],
       });
 
       final res = await http.post(
@@ -170,13 +166,15 @@ class PhaseValidator {
       if (res.statusCode != 200) {
         debugPrint('[Validator] LLM error ${res.statusCode}: ${res.body}');
         return ValidationResult(
-            success: false,
-            reason: 'LLM API error ${res.statusCode}',
-            usedLlm: true);
+          success: false,
+          reason: 'LLM API error ${res.statusCode}',
+          usedLlm: true,
+        );
       }
 
       final decoded = jsonDecode(res.body) as Map<String, dynamic>;
-      final text = (decoded['content'] as List?)
+      final text =
+          (decoded['content'] as List?)
               ?.whereType<Map>()
               .where((c) => c['type'] == 'text')
               .map((c) => c['text'] as String)
@@ -189,7 +187,10 @@ class PhaseValidator {
     } catch (e, st) {
       debugPrint('[Validator] LLM call failed: $e\n$st');
       return ValidationResult(
-          success: false, reason: 'LLM exception: $e', usedLlm: true);
+        success: false,
+        reason: 'LLM exception: $e',
+        usedLlm: true,
+      );
     }
   }
 }

@@ -759,14 +759,50 @@ class WhatsAppDaemonService : Service() {
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.w(TAG, "onTaskRemoved triggered (app swiped away/killed). Scheduling daemon service auto-restart...")
+        if (WhatsAppBridgeConfig.isDaemonEnabled(this)) {
+            scheduleDaemonRestart(applicationContext, 1000L)
+        }
+    }
+
     override fun onDestroy() {
         stopVoiceObserver()
         stopImageObserver()
         WhatsAppBridgeEvents.emit("daemonStopped")
+        if (WhatsAppBridgeConfig.isDaemonEnabled(this)) {
+            Log.w(TAG, "WhatsAppDaemonService onDestroy called while daemon enabled! Scheduling auto-restart...")
+            scheduleDaemonRestart(applicationContext, 2000L)
+        }
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun scheduleDaemonRestart(context: Context, delayMs: Long = 1000L) {
+        try {
+            val intent = Intent(context, WhatsAppBootReceiver::class.java).apply {
+                action = ACTION_RESTART_DAEMON
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                context,
+                1099,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            val triggerAt = android.os.SystemClock.elapsedRealtime() + delayMs
+            alarmManager.setAndAllowWhileIdle(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAt,
+                pendingIntent
+            )
+            Log.d(TAG, "Scheduled daemon restart alarm in ${delayMs}ms")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to schedule daemon service restart alarm", e)
+        }
+    }
 
     private fun startVoiceObserver() {
         if (voiceNoteObserver != null) return
@@ -849,6 +885,7 @@ class WhatsAppDaemonService : Service() {
     companion object {
         const val ACTION_START = "com.pirsumoto.app.whatsapp_bridge.START"
         const val ACTION_STOP = "com.pirsumoto.app.whatsapp_bridge.STOP"
+        const val ACTION_RESTART_DAEMON = "com.pirsumoto.app.whatsapp_bridge.RESTART_DAEMON"
         private const val CHANNEL_ID = "pirsumoto_whatsapp_bridge"
         private const val NOTIFICATION_ID = 4172
         private const val TAG = "WA-Daemon"
@@ -860,15 +897,20 @@ class WhatsAppDaemonService : Service() {
 
 class WhatsAppBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        Log.d("WA-BootReceiver", "Received broadcast action: ${intent.action}")
         if (!WhatsAppBridgeConfig.isDaemonEnabled(context)) return
 
         val serviceIntent = Intent(context, WhatsAppDaemonService::class.java)
             .setAction(WhatsAppDaemonService.ACTION_START)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent)
-        } else {
-            context.startService(serviceIntent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            Log.d("WA-BootReceiver", "Successfully started/restarted WhatsAppDaemonService")
+        } catch (e: Exception) {
+            Log.e("WA-BootReceiver", "Failed to start WhatsAppDaemonService from BootReceiver", e)
         }
     }
 }
@@ -1122,15 +1164,18 @@ class WhatsAppImageObserver(
                 var count = 0
                 val dataIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
                 val dateAddedIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+                val dateModIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
                 val nowSec = System.currentTimeMillis() / 1000L
 
-                while (cursor.moveToNext() && count < 10) {
+                while (cursor.moveToNext() && count < 15) {
                     count++
                     if (dataIndex != -1) {
                         val filePath = cursor.getString(dataIndex)
                         val dateAddedSec = if (dateAddedIndex != -1) cursor.getLong(dateAddedIndex) else 0L
+                        val dateModSec = if (dateModIndex != -1) cursor.getLong(dateModIndex) else 0L
+                        val maxTimeSec = maxOf(dateAddedSec, dateModSec)
 
-                        if (!filePath.isNullOrBlank() && dateAddedSec > 0L && nowSec - dateAddedSec <= 300L) {
+                        if (!filePath.isNullOrBlank() && (maxTimeSec == 0L || nowSec - maxTimeSec <= 600L)) {
                             val file = File(filePath)
                             if (file.exists() && isImageFile(file) && isWhatsAppOrGalleryImage(filePath)) {
                                 Log.d(TAG, "Recent MediaStore image detected: ${file.absolutePath}")
@@ -1706,16 +1751,44 @@ object WhatsAppBridgeProcessor {
         )
 
         executor.execute {
-            WhatsAppBridgeEvents.emit(
-                "whatsappImageReceived",
-                mapOf(
-                    "senderName" to message.senderName,
-                    "senderKey" to message.senderKey,
-                    "imageFilePath" to file.absolutePath,
-                    "imageFileName" to file.name,
-                    "timestamp" to message.timestamp
+            if (WhatsAppBridgeEvents.hasActiveSink()) {
+                WhatsAppBridgeEvents.emit(
+                    "whatsappImageReceived",
+                    mapOf(
+                        "senderName" to message.senderName,
+                        "senderKey" to message.senderKey,
+                        "imageFilePath" to file.absolutePath,
+                        "imageFileName" to file.name,
+                        "timestamp" to message.timestamp
+                    )
                 )
-            )
+            } else {
+                val result = WhatsAppLocalInventoryValidator.processImage(
+                    context = context,
+                    senderKey = message.senderKey,
+                    imageFile = file
+                )
+
+                WhatsAppBridgeEvents.emit(
+                    "locallyProcessed",
+                    mapOf(
+                        "senderName" to message.senderName,
+                        "missingFields" to result.missingFieldKeys,
+                        "updatedFields" to result.updatedFieldKeys,
+                        "readyToPublish" to result.readyToPublish,
+                        "autoPublishRequested" to result.autoPublishRequested,
+                        "vehicleData" to result.vehicleData
+                    )
+                )
+
+                if (!result.replyHebrew.isNullOrBlank()) {
+                    maybeSendReply(context, message.senderKey, result.replyHebrew)
+                }
+
+                if (result.autoPublishRequested && result.vehicleData.isNotEmpty()) {
+                    WhatsAppAutoPublishLauncher.launch(context, result.vehicleData)
+                }
+            }
         }
     }
 
@@ -1887,13 +1960,21 @@ object WhatsAppBridgeProcessor {
 
     private fun looksLikeImageMessage(extras: Bundle, text: String): Boolean {
         if (looksLikePirsumotoReply(text)) return false
-        if (extras.get(Notification.EXTRA_PICTURE) != null || extras.get("android.picture") != null) {
+        if (extras.get(Notification.EXTRA_PICTURE) != null ||
+            extras.get("android.picture") != null ||
+            extras.getString("android.template", "").contains("BigPictureStyle")) {
             return true
         }
         val lower = text.lowercase(Locale.getDefault()).trim()
         return lower == "photo" ||
+               lower == "photos" ||
                lower == "picture" ||
-               lower == "📷 photo" ||
+               lower == "pictures" ||
+               lower.contains("תמונה") ||
+               lower.contains("תמונות") ||
+               lower.contains("photo") ||
+               lower.contains("picture") ||
+               lower.contains("📷") ||
                lower.startsWith("📷")
     }
 
@@ -2359,8 +2440,15 @@ object WhatsAppLocalInventoryValidator {
         }
 
         val previousLicense = state["license_plate"].orEmpty()
+        val missingBeforeExtraction = missingFieldsForState(state).map { it.key }
         val allExtractedFields = linkedMapOf<String, String>()
         allExtractedFields.putAll(extractFields(trimmedText))
+        val positionalExtracted = extractPositionalFields(trimmedText, missingBeforeExtraction, allExtractedFields)
+        positionalExtracted.forEach { (key, value) ->
+            if (!allExtractedFields.containsKey(key)) {
+                allExtractedFields[key] = value
+            }
+        }
         extractedFields.forEach { (key, value) ->
             if (value.isNotBlank()) allExtractedFields[key] = value
         }
@@ -2401,8 +2489,10 @@ object WhatsAppLocalInventoryValidator {
             null
         }
 
+        val isFirstTurn = licenseChanged || previousLicense.isBlank()
+
         return ValidationResult(
-            replyHebrew = composeReply(state, missingFields, audioNotice, readyToPublish),
+            replyHebrew = composeReply(state, missingFields, audioNotice, readyToPublish, isFirstTurn),
             missingFieldKeys = missingFields.map { it.key },
             updatedFieldKeys = updatedFieldKeys.distinct(),
             readyToPublish = readyToPublish,
@@ -2445,16 +2535,6 @@ object WhatsAppLocalInventoryValidator {
         }
 
         val expectedCount = state[KEY_IMAGE_EXPECTED_COUNT]?.toIntOrNull() ?: 0
-        if (expectedCount <= 0) {
-            return ValidationResult(
-                replyHebrew = "קיבלתי תמונה. קודם שלח מספר תמונות מתוכנן להעלאה, או 0 כדי להתחיל פרסום בלי תמונות.$ADMIN_LINE",
-                missingFieldKeys = emptyList(),
-                updatedFieldKeys = emptyList(),
-                readyToPublish = true,
-                autoPublishRequested = false,
-                vehicleData = vehicleData(state)
-            )
-        }
 
         val imagePaths = parseImagePaths(state[KEY_IMAGE_PATHS])
         val existingNames = imagePaths.map { File(it).name.lowercase(Locale.getDefault()) }.toSet()
@@ -2477,18 +2557,29 @@ object WhatsAppLocalInventoryValidator {
         state[KEY_IMAGE_RECEIVED_COUNT] = receivedCount.toString()
         saveState(context, senderKey, state)
 
-        return if (receivedCount >= expectedCount) {
-            ValidationResult(
-                replyHebrew = "התקבלו $receivedCount מתוך $expectedCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול שלח 1",
-                missingFieldKeys = emptyList(),
-                updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
-                readyToPublish = true,
-                autoPublishRequested = false,
-                vehicleData = vehicleData(state)
-            )
+        return if (expectedCount > 0) {
+            if (receivedCount >= expectedCount) {
+                ValidationResult(
+                    replyHebrew = "התקבלו $receivedCount מתוך $expectedCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול השב ביטול",
+                    missingFieldKeys = emptyList(),
+                    updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
+                    readyToPublish = true,
+                    autoPublishRequested = false,
+                    vehicleData = vehicleData(state)
+                )
+            } else {
+                ValidationResult(
+                    replyHebrew = "נקלטה תמונה $receivedCount מתוך $expectedCount, מעבד...",
+                    missingFieldKeys = emptyList(),
+                    updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
+                    readyToPublish = true,
+                    autoPublishRequested = false,
+                    vehicleData = vehicleData(state)
+                )
+            }
         } else {
             ValidationResult(
-                replyHebrew = "נקלטה תמונה $receivedCount מתוך $expectedCount, מעבד...",
+                replyHebrew = "התקבלה תמונה ($receivedCount).\nשלח תמונות נוספות, או שלח 0 כדי להתחיל פרסום (לביטול השב ביטול).",
                 missingFieldKeys = emptyList(),
                 updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
                 readyToPublish = true,
@@ -2836,11 +2927,13 @@ object WhatsAppLocalInventoryValidator {
     private fun missingFieldsForState(state: Map<String, String?>): List<InventoryField> {
         val licenseField = fields.first { it.key == "license_plate" }
         if (state["license_plate"].isNullOrBlank()) return listOf(licenseField)
-        if (state["data_found"] != "true") return listOf(licenseField)
+        val kmVal = state["km"]?.toIntOrNull()
+        val kmTestVal = state["kilometer_test_aharon"]?.toIntOrNull()
+        val isKmInvalid = kmVal != null && kmTestVal != null && kmVal <= kmTestVal
 
         return missingDetailKeys
             .mapNotNull { key -> fields.firstOrNull { it.key == key } }
-            .filter { field -> state[field.key].isNullOrBlank() }
+            .filter { field -> state[field.key].isNullOrBlank() || (field.key == "km" && isKmInvalid) }
     }
 
     private fun vehicleData(state: Map<String, String?>): Map<String, String> {
@@ -3031,15 +3124,7 @@ object WhatsAppLocalInventoryValidator {
         val labeledCondition = canonicalVehicleCondition(labeled)
         if (!labeledCondition.isNullOrBlank()) return labeledCondition
 
-        return canonicalVehicleCondition(text).takeIf { condition ->
-            val normalized = text.lowercase()
-            condition != null && (
-                normalized.contains("מצב") ||
-                    normalized.contains("מעולה") ||
-                    normalized.contains("מצוין") ||
-                    normalized.contains("טוב מאוד")
-                )
-        }
+        return canonicalVehicleCondition(text)
     }
 
     private fun canonicalVehicleCondition(value: String?): String? {
@@ -3053,9 +3138,131 @@ object WhatsAppLocalInventoryValidator {
             normalized.contains("מצוין") ||
                 normalized.contains("מצויין") ||
                 normalized.contains("מעולה") -> "מצוין"
+            normalized.contains("כמו חדש") -> "כמו חדש"
+            normalized.contains("חדש") -> "חדש"
             normalized.contains("סביר") -> "סביר"
             normalized.contains("טוב") ||
-                normalized.contains("טובה") -> "טוב"
+                normalized.contains("טובה") ||
+                normalized == "good" ||
+                normalized == "ok" ||
+                normalized == "great" -> "טוב"
+            else -> null
+        }
+    }
+
+    private fun extractPositionalFields(
+        text: String,
+        missingKeys: List<String>,
+        explicitExtracted: Map<String, String>
+    ): Map<String, String> {
+        if (text.isBlank() || missingKeys.isEmpty()) return emptyMap()
+
+        val remainingMissing = missingKeys.filter { key ->
+            !explicitExtracted.containsKey(key) && explicitExtracted[key].isNullOrBlank()
+        }
+        if (remainingMissing.isEmpty()) return emptyMap()
+
+        var rawTokens = text.split(Regex("""[\r\n]+"""))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        if (rawTokens.size == 1 && rawTokens.first().contains(Regex("""[,;/]"""))) {
+            rawTokens = rawTokens.first().split(Regex("""[,;/]+"""))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+        } else if (rawTokens.size == 1 && rawTokens.first().contains(Regex("""\s+"""))) {
+            rawTokens = rawTokens.first().split(Regex("""\s+"""))
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+        }
+
+        val unconsumed = rawTokens.filter { token ->
+            val extracted = extractFields(token)
+            extracted.isEmpty()
+        }
+        if (unconsumed.isEmpty()) return emptyMap()
+
+        val result = linkedMapOf<String, String>()
+
+        if (unconsumed.size == 1) {
+            val token = unconsumed.first()
+            val digits = token.digitsOnly()
+            val num = digits.toLongOrNull()
+            if (num != null && num > 0L) {
+                if (num <= 15L && remainingMissing.contains("hand")) {
+                    result["hand"] = "$num"
+                    return result
+                }
+                if (num >= 70000L && remainingMissing.contains("km")) {
+                    result["km"] = digits
+                    return result
+                }
+                if (remainingMissing.contains("km") && !remainingMissing.contains("price")) {
+                    result["km"] = digits
+                    return result
+                }
+                if (remainingMissing.contains("price")) {
+                    result["price"] = digits
+                    return result
+                }
+            }
+        }
+
+        if (unconsumed.size == remainingMissing.size) {
+            for (i in remainingMissing.indices) {
+                val key = remainingMissing[i]
+                val token = unconsumed[i]
+                val matched = tryMatchTokenToKey(token, key)
+                if (matched != null) {
+                    result[key] = matched
+                }
+            }
+        } else {
+            var tokenIdx = 0
+            for (key in remainingMissing) {
+                if (tokenIdx >= unconsumed.size) break
+                val token = unconsumed[tokenIdx]
+                val matched = tryMatchTokenToKey(token, key)
+                if (matched != null) {
+                    result[key] = matched
+                    tokenIdx++
+                }
+            }
+        }
+
+        return result
+    }
+
+    private fun tryMatchTokenToKey(token: String, key: String): String? {
+        val clean = token.trim()
+        if (clean.isBlank()) return null
+        val digits = clean.digitsOnly()
+
+        return when (key) {
+            "price", "km" -> {
+                if (digits.isNotBlank()) {
+                    val num = digits.toLongOrNull()
+                    if (num != null && num > 0) digits else null
+                } else null
+            }
+            "hand" -> {
+                extractHand(clean)
+            }
+            "vehicle_condition" -> {
+                canonicalVehicleCondition(clean)
+            }
+            "month", "test_month" -> {
+                normalizeMonth(digits)
+            }
+            "year", "test_year" -> {
+                normalizeYear(digits)
+            }
+            "current_ownership", "previous_ownership" -> {
+                canonicalOwnership(clean)
+            }
+            "gear_type" -> {
+                normalizeGear(clean)
+            }
             else -> null
         }
     }
@@ -3112,7 +3319,8 @@ object WhatsAppLocalInventoryValidator {
         state: Map<String, String?>,
         missingFields: List<InventoryField>,
         audioNotice: String?,
-        readyToPublish: Boolean
+        readyToPublish: Boolean,
+        isFirstTurn: Boolean = false
     ): String {
         val builder = StringBuilder()
         if (!audioNotice.isNullOrBlank()) {
@@ -3128,26 +3336,28 @@ object WhatsAppLocalInventoryValidator {
             }
 
             dataStatus == "false" -> {
-                builder.append("מצאתי מספר רכב $license, אבל לא נמצאו עבורו נתונים במאגר הרכב. נא לבדוק את המספר ולשלוח שוב.")
+                builder.append("לא נמצאו פרטי רכב במאגר עבור מספר רישוי $license. נא לבדוק את המספר או להשלים את הפרטים בשיחה.")
             }
 
             dataStatus == "error" -> {
-                builder.append("מצאתי מספר רכב $license, אבל כרגע לא הצלחתי למשוך נתונים מ-data.gov.il. נא לשלוח שוב בעוד רגע או לבדוק את המספר.")
+                builder.append("כרגע לא הצלחתי למשוך נתונים מ-data.gov.il עבור מספר רישוי $license. נא להשלים את הפרטים בשיחה.")
             }
 
             readyToPublish -> {
                 builder.append("פרטי הרכב לאישור:\n")
                 appendVehicleDetails(builder, state)
                 builder.append("\nהנתונים מוכנים. כמה תמונות תרצה להעלות?")
-                builder.append("\nהשב מספר תמונות מתוכנן להעלאה, או 0 כדי להתחיל פרסום בלי תמונות.")
+                builder.append("\nהשב מספר תמונות מתוכנן להעלאה (1-8), או 0 כדי להתחיל פרסום בלי תמונות.")
             }
 
             else -> {
                 val title = vehicleTitle(state)
-                if (title.isNotBlank()) {
+                if (isFirstTurn && title.isNotBlank()) {
                     builder.append("מצאתי את הרכב: ").append(title).append("\n\n")
+                    builder.append("אנא השלם את הפרטים החסרים:\n")
+                } else {
+                    builder.append("חסרים עדיין הנתונים הבאים:\n")
                 }
-                builder.append("חסרים עדיין הנתונים הבאים:\n")
                 missingFields.forEach { field ->
                     builder.append("- ").append(field.hebrewLabel).append("\n")
                 }

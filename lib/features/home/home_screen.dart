@@ -11,11 +11,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../form/form_provider.dart' as fp;
 import '../../services/db_service.dart';
 import '../../services/audio_service.dart';
 import '../../services/vehicle_data_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
+import '../../services/whatsapp_message_bridge_service.dart';
 import '../auth/auth_provider.dart';
 import '../listings/listings_screen.dart';
 import '../profile/profile_screen.dart';
@@ -511,14 +513,25 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     setState(() => _isFetchingVehicle = true);
 
     try {
+      final cleanLicense = license.replaceAll(RegExp(r'[^0-9]'), '');
+      await _sendWhatsAppProgress(
+        'מבצע שליפת נתוני רכב כלליים משרת הממשלה עבור מספר רישוי $license...',
+      );
+
       final url =
-          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$license%5D%7D';
+          'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$cleanLicense%5D%7D';
+      debugPrint('[LicenseLookup] Requesting URL: $url');
       final response = await http.get(Uri.parse(url));
+      debugPrint('[LicenseLookup] HTTP Status: ${response.statusCode}');
+      debugPrint('[LicenseLookup] Response Body: ${response.body}');
 
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body);
         final result = decoded['result'];
-        final records = result['records'] as List;
+        final records =
+            result != null && result['records'] is List
+                ? result['records'] as List
+                : [];
 
         if (records.isNotEmpty) {
           final data = records.first;
@@ -535,11 +548,26 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           notifier.updateField('year', year);
           notifier.updateField('fuelType', fuelType);
 
-          final fullColor = data['tzeva_rechev']?.toString() ?? '';
+          final fullColor = (data['tzeva_rechev']?.toString() ?? '').trim();
           if (fullColor.isNotEmpty) {
-            final colorPart = fullColor.split(' ').first;
-            _colorController.text = colorPart;
-            notifier.updateField('color', colorPart);
+            String matchedColor = '';
+            if (_colors.contains(fullColor)) {
+              matchedColor = fullColor;
+            } else {
+              final colorPart = fullColor.split(' ').first.trim();
+              if (_colors.contains(colorPart)) {
+                matchedColor = colorPart;
+              } else {
+                await _sendWhatsAppProgress(
+                  'הצבע שנשלף משרת הממשלה ("$fullColor") אינו ברשימת הצבעים המורשים. מבצע התאמת צבע באמצעות AI...',
+                );
+                matchedColor = await _matchColorWithLlm(fullColor, _colors);
+              }
+            }
+            if (matchedColor.isNotEmpty) {
+              _colorController.text = matchedColor;
+              notifier.updateField('color', matchedColor);
+            }
           }
 
           final moed = data['moed_aliya_lakvish']?.toString() ?? '';
@@ -569,13 +597,25 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           }
 
           try {
+            await _sendWhatsAppProgress(
+              'מבצע שליפת נתוני קילומטראז\' וטסט משרת הממשלה עבור מספר רישוי $license...',
+            );
+
             final url3 =
-                'https://data.gov.il/api/3/action/datastore_search?resource_id=56063a99-8a3e-4ff4-912e-5966c0279bad&q=$license&offset=0';
+                'https://data.gov.il/api/3/action/datastore_search?resource_id=56063a99-8a3e-4ff4-912e-5966c0279bad&q=$cleanLicense&offset=0';
+            debugPrint('[LicenseLookup-KM] Requesting URL: $url3');
             final response3 = await http.get(Uri.parse(url3));
+            debugPrint(
+              '[LicenseLookup-KM] HTTP Status: ${response3.statusCode}',
+            );
+            debugPrint('[LicenseLookup-KM] Response Body: ${response3.body}');
             if (response3.statusCode == 200) {
               final decoded3 = jsonDecode(response3.body);
               final result3 = decoded3['result'];
-              final records3 = result3['records'] as List;
+              final records3 =
+                  result3 != null && result3['records'] is List
+                      ? result3['records'] as List
+                      : [];
               if (records3.isNotEmpty) {
                 final data3 = records3.first;
                 final kmVal = data3['kilometer_test_aharon'];
@@ -588,9 +628,15 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                   }
                 }
               }
+            } else {
+              debugPrint(
+                '[LicenseLookup-KM] Error response (${response3.statusCode}): ${response3.body}',
+              );
             }
-          } catch (e) {
-            debugPrint('Error fetching kilometer_test_aharon in license search: $e');
+          } catch (e, stackTrace) {
+            debugPrint(
+              '[LicenseLookup-KM] Error fetching kilometer_test_aharon: $e\n$stackTrace',
+            );
           }
 
           if (mounted) {
@@ -609,35 +655,188 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             );
           }
         } else if (mounted) {
+          debugPrint(
+            '[LicenseLookup] No records returned for license "$cleanLicense" (raw: "$license"). Response body: ${response.body}',
+          );
           setState(() {
             _hasSearchedSuccessfully = false;
           });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'לא נמצאו נתונים עבור רכב זה',
-                textAlign: TextAlign.right,
-              ),
-              backgroundColor: Colors.orange,
-            ),
-          );
+          _showLicenseNotFoundDialog();
         }
       } else {
-        throw Exception('Failed to fetch data');
-      }
-    } catch (e) {
-      debugPrint('Error fetching vehicle data: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('שגיאה במשיכת נתוני רכב', textAlign: TextAlign.right),
-            backgroundColor: Colors.red,
-          ),
+        debugPrint(
+          '[LicenseLookup] HTTP GET failed with status ${response.statusCode}: ${response.body}',
         );
+        throw Exception(
+          'Failed to fetch data: HTTP ${response.statusCode} - ${response.body}',
+        );
+      }
+    } catch (e, stackTrace) {
+      debugPrint(
+        '[LicenseLookup] Error fetching vehicle data for license "$license": $e',
+      );
+      debugPrint('[LicenseLookup] StackTrace: $stackTrace');
+      if (mounted) {
+        _showLicenseNotFoundDialog();
       }
     }
 
     if (mounted) setState(() => _isFetchingVehicle = false);
+  }
+
+  Future<void> _sendWhatsAppProgress(String message) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? senderKey;
+      final keys = prefs.getKeys();
+      for (final key in keys) {
+        if (key.startsWith('wa_state_')) {
+          final jsonStr = prefs.getString(key);
+          if (jsonStr != null && jsonStr.isNotEmpty) {
+            try {
+              final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+              final k = map['whatsapp_sender_key']?.toString();
+              if (k != null && k.isNotEmpty) {
+                senderKey = k;
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+      if (senderKey != null && senderKey.isNotEmpty) {
+        await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+          senderKey: senderKey,
+          message: message,
+        );
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] Error sending WhatsApp progress: $e');
+    }
+  }
+
+  Future<String> _matchColorWithLlm(
+    String rawColor,
+    List<String> allowedColors,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final apiKey =
+          prefs.getString('anthropic_api_key') ??
+          const String.fromEnvironment('ANTHROPIC_API_KEY', defaultValue: '');
+
+      if (apiKey.isEmpty) {
+        return _fallbackColorMatch(rawColor, allowedColors);
+      }
+
+      final prompt = '''
+נתון צבע רכב שנשלף ממאגר משרד התחבורה: "$rawColor".
+רשימת הצבעים המורשים היא: ${allowedColors.join(', ')}.
+
+אנא בחר והחזר את הצבע הקרוב ביותר מתוך רשימת הצבעים המורשים בלבד.
+החזר אך ורק את שם הצבע מתוך הרשימה, ללא שום מילים נוספות, ללא ניקוד וללא סימני פיסוק.
+''';
+
+      final body = jsonEncode({
+        'model': 'gpt-5.6-luna',
+        'max_completion_tokens': 512,
+        'reasoning_effort': 'low',
+        'messages': [
+          {'role': 'user', 'content': prompt},
+        ],
+      });
+
+      final response = await http.post(
+        Uri.parse('https://api.openai.com/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: body,
+      );
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        final contentText =
+            (decoded['content'] as List?)
+                ?.whereType<Map>()
+                .where((c) => c['type'] == 'text')
+                .map((c) => c['text'] as String)
+                .join(' ')
+                .trim() ??
+            '';
+
+        final cleanResult = contentText.trim().replaceAll(
+          RegExp(r'[^\u0590-\u05FF]'),
+          '',
+        );
+        for (final allowed in allowedColors) {
+          if (cleanResult == allowed ||
+              allowed.contains(cleanResult) ||
+              cleanResult.contains(allowed)) {
+            return allowed;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] LLM color matching error: $e');
+    }
+
+    return _fallbackColorMatch(rawColor, allowedColors);
+  }
+
+  String _fallbackColorMatch(String rawColor, List<String> allowedColors) {
+    final norm = rawColor.toLowerCase();
+    if (norm.contains('כסף') ||
+        norm.contains('אפור') ||
+        norm.contains('עכבר')) {
+      return 'אפור';
+    }
+    if (norm.contains('זהב') ||
+        norm.contains('צהוב') ||
+        norm.contains('נחושת')) {
+      return 'צהוב';
+    }
+    if (norm.contains('פנינה') ||
+        norm.contains('שנהב') ||
+        norm.contains('שמנת') ||
+        norm.contains('קרם')) {
+      return 'לבן';
+    }
+    if (norm.contains('תכלת') ||
+        norm.contains('כחול') ||
+        norm.contains('טורקיז')) {
+      return 'כחול';
+    }
+    if (norm.contains('בורדו') || norm.contains('אדום')) return 'אדום';
+    if (norm.contains('חום') || norm.contains('בז')) return 'חום';
+    if (norm.contains('ירוק')) return 'ירוק';
+    if (norm.contains('כתום')) return 'כתום';
+    if (norm.contains('סגול')) return 'סגול';
+    if (norm.contains('ורוד')) return 'ורוד';
+    if (norm.contains('שחור')) return 'שחור';
+    return allowedColors.first;
+  }
+
+  void _showLicenseNotFoundDialog() {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('מספר רישוי לא נמצא', textAlign: TextAlign.right),
+            content: const Text(
+              'מספר הרישוי לא נמצא. אנא נסה מספר אחר או היכנס לאפליקציה למלא את סוג הרכב והדגם ולחץ על המשך.',
+              textAlign: TextAlign.right,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('אישור'),
+              ),
+            ],
+          ),
+    );
   }
 
   void _showQuickPublishDialog() {

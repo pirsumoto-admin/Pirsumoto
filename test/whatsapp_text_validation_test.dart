@@ -2,7 +2,40 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pirsumoto/services/whatsapp_text_validation_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+WhatsAppTextValidationService _buildService({
+  String rawColor = 'כחול',
+  int? lastTestKilometer = 90000,
+  List<String>? replies,
+  void Function()? onVehicleLookup,
+  void Function()? onStop,
+}) {
+  return WhatsAppTextValidationService(
+    vehicleDataFetcher: (license) async {
+      onVehicleLookup?.call();
+      return {
+        'maker': 'מאזדה',
+        'model': '3',
+        'year': '2018',
+        'color': rawColor,
+        'fuelType': 'בנזין',
+        'ownership': 'פרטי',
+        'registrationMonth': '5',
+        'testExpiry': '6,2027',
+      };
+    },
+    kilometerHistoryFetcher: (_) async => lastTestKilometer,
+    replySender: ({required senderKey, required message}) async {
+      replies?.add(message);
+      return true;
+    },
+    autoPublishLauncher: (_) async => true,
+    automationStopper: onStop ?? () {},
+  );
+}
+
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('WhatsAppTextValidationService License Plate Extraction Tests', () {
     const service = WhatsAppTextValidationService();
 
@@ -27,7 +60,9 @@ void main() {
     });
 
     test('should extract license plate when prefixed with hebrew text', () {
-      final result = service.extractFieldsFromText('היי, מספר הרכב שלי הוא 12-345-67');
+      final result = service.extractFieldsFromText(
+        'היי, מספר הרכב שלי הוא 12-345-67',
+      );
       expect(result['license_plate'], equals('1234567'));
     });
 
@@ -35,89 +70,170 @@ void main() {
       final result = service.extractFieldsFromText('12345');
       expect(result['license_plate'], isNull);
     });
+
+    test(
+      'should not start a session from a 7-digit price or kilometer value',
+      () {
+        expect(
+          service.extractFieldsFromText('מחיר 1234567')['license_plate'],
+          isNull,
+        );
+        expect(
+          service.extractFieldsFromText('ק״מ 1234567')['license_plate'],
+          isNull,
+        );
+      },
+    );
   });
 
-  group('WhatsAppTextValidationService Strict Required Fields Validation Tests', () {
-    const service = WhatsAppTextValidationService();
+  group(
+    'WhatsAppTextValidationService Strict Required Fields Validation Tests',
+    () {
+      const service = WhatsAppTextValidationService();
 
-    test('should identify missing fields when only plate, km, and price are present', () async {
-      final state = {
-        'license_plate': '12345678',
-        'km': '10000',
-        'price': '50000',
-      };
-      final result = await service.validateWhatsAppTextMessage(
-        text: 'some message',
-        existingState: state,
+      test(
+        'should identify missing fields when only plate, km, and price are present',
+        () async {
+          final state = {
+            'license_plate': '12345678',
+            'km': '10000',
+            'price': '50000',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: 'some message',
+            existingState: state,
+          );
+          expect(result.readyToPublish, isFalse);
+          expect(result.missingFields, contains('maker'));
+          expect(result.missingFields, contains('model'));
+          expect(result.missingFields, contains('year'));
+          expect(result.missingFields, contains('color'));
+          expect(result.missingFields, contains('hand'));
+          expect(result.missingFields, contains('test_month'));
+          expect(result.missingFields, contains('test_year'));
+          expect(result.missingFields, contains('current_ownership'));
+          expect(result.missingFields, contains('month'));
+          expect(result.missingFields, contains('previous_ownership'));
+        },
       );
-      expect(result.readyToPublish, isFalse);
-      expect(result.missingFields, contains('maker'));
-      expect(result.missingFields, contains('model'));
-      expect(result.missingFields, contains('year'));
-      expect(result.missingFields, contains('color'));
-      expect(result.missingFields, contains('hand'));
-      expect(result.missingFields, contains('test_month'));
-      expect(result.missingFields, contains('test_year'));
-      expect(result.missingFields, contains('current_ownership'));
-    });
 
-    test('should be ready to publish when all required fields are present', () async {
-      final state = {
-        'license_plate': '12345678',
-        'km': '10000',
-        'price': '50000',
-        'maker': 'מאזדה',
-        'model': '3',
-        'year': '2018',
-        'color': 'כחול',
-        'gear_type': 'אוטומטי',
-        'hand': '2',
-        'test_month': '5',
-        'test_year': '2026',
-        'current_ownership': 'פרטית',
-      };
-      final result = await service.validateWhatsAppTextMessage(
-        text: 'some message',
-        existingState: state,
+      test(
+        'should be ready to publish when all required fields are present',
+        () async {
+          final state = {
+            'license_plate': '12345678',
+            'km': '10000',
+            'price': '50000',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'gear_type': 'אוטומטי',
+            'hand': '2',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: 'some message',
+            existingState: state,
+          );
+          expect(result.readyToPublish, isTrue);
+          expect(result.missingFields, isEmpty);
+          expect(result.validationErrors, isEmpty);
+        },
       );
-      expect(result.readyToPublish, isTrue);
-      expect(result.missingFields, isEmpty);
-      expect(result.validationErrors, isEmpty);
-    });
-  });
+
+      test('should reject present but invalid Yad2 values', () async {
+        final state = {
+          'license_plate': '12345678',
+          'km': '10000',
+          'price': '50000',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2018',
+          'color': 'כסוף מטאלי',
+          'month': '15',
+          'hand': '2',
+          'test_month': '5',
+          'test_year': '2026',
+          'current_ownership': 'פרטית',
+          'previous_ownership': 'פרטית',
+        };
+
+        final result = await service.validateWhatsAppTextMessage(
+          text: 'nothing new',
+          existingState: state,
+        );
+
+        expect(result.readyToPublish, isFalse);
+        expect(result.validationErrors, contains(contains('הצבע')));
+        expect(result.validationErrors, contains(contains('חודש עלייה')));
+      });
+    },
+  );
 
   group('WhatsAppTextValidationService Km and Price Extraction Tests', () {
     const service = WhatsAppTextValidationService();
 
     test('should extract km in various formats', () {
-      expect(service.extractFieldsFromText('נסע 120,000 ק״מ')['km'], equals('120000'));
-      expect(service.extractFieldsFromText('שעון 95000')['km'], equals('95000'));
-      expect(service.extractFieldsFromText('קילומטראז׳ 80 אלף')['km'], equals('80000'));
-      expect(service.extractFieldsFromText('150000 קילומטרים')['km'], equals('150000'));
+      expect(
+        service.extractFieldsFromText('נסע 120,000 ק״מ')['km'],
+        equals('120000'),
+      );
+      expect(
+        service.extractFieldsFromText('שעון 95000')['km'],
+        equals('95000'),
+      );
+      expect(
+        service.extractFieldsFromText('קילומטראז׳ 80 אלף')['km'],
+        equals('80000'),
+      );
+      expect(
+        service.extractFieldsFromText('150000 קילומטרים')['km'],
+        equals('150000'),
+      );
     });
 
     test('should extract price in various formats', () {
-      expect(service.extractFieldsFromText('מבקש 45,000 ש״ח')['price'], equals('45000'));
-      expect(service.extractFieldsFromText('דורש 50000 ₪')['price'], equals('50000'));
-      expect(service.extractFieldsFromText('רוצה 35 אלף שח')['price'], equals('35000'));
-      expect(service.extractFieldsFromText('מחיר: 60000')['price'], equals('60000'));
+      expect(
+        service.extractFieldsFromText('מבקש 45,000 ש״ח')['price'],
+        equals('45000'),
+      );
+      expect(
+        service.extractFieldsFromText('דורש 50000 ₪')['price'],
+        equals('50000'),
+      );
+      expect(
+        service.extractFieldsFromText('רוצה 35 אלף שח')['price'],
+        equals('35000'),
+      );
+      expect(
+        service.extractFieldsFromText('מחיר: 60000')['price'],
+        equals('60000'),
+      );
     });
   });
 
   group('WhatsAppTextValidationService Hand Normalization Tests', () {
     const service = WhatsAppTextValidationService();
 
-    test('should successfully validate form when hand is a Hebrew string like "יד שנייה"', () async {
-      final fields = {
-        'license_plate': '12345678',
-        'km': '100000',
-        'price': '40000',
-        'hand': 'יד שנייה',
-      };
-      final result = await service.validateFormFields(fields);
-      expect(result.isValid, isTrue);
-      expect(result.errors, isEmpty);
-    });
+    test(
+      'should successfully validate form when hand is a Hebrew string like "יד שנייה"',
+      () async {
+        final fields = {
+          'license_plate': '12345678',
+          'km': '100000',
+          'price': '40000',
+          'hand': 'יד שנייה',
+        };
+        final result = await service.validateFormFields(fields);
+        expect(result.isValid, isTrue);
+        expect(result.errors, isEmpty);
+      },
+    );
 
     test('should successfully validate form when hand is "שלישית"', () async {
       final fields = {
@@ -143,71 +259,514 @@ void main() {
       expect(result.errors, contains('מספר יד חייב להיות בין 1 ל-15'));
     });
 
-    test('should merge hand when session is active and user sends only hand', () async {
-      final existing = {
-        'license_plate': '12345678',
-        'maker': 'מאזדה',
-        'model': '3',
-        'year': '2018',
-        'color': 'כחול',
-      };
-      final result = await service.validateWhatsAppTextMessage(
-        text: 'יד שניה',
-        existingState: existing,
-      );
-      
-      expect(result.extractedFields['hand'], equals('2'));
-    });
+    test(
+      'should merge hand when session is active and user sends only hand',
+      () async {
+        final existing = {
+          'license_plate': '12345678',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2018',
+          'color': 'כחול',
+        };
+        final result = await service.validateWhatsAppTextMessage(
+          text: 'יד שניה',
+          existingState: existing,
+        );
+
+        expect(result.extractedFields['hand'], equals('2'));
+      },
+    );
   });
 
-  group('WhatsAppTextValidationService Session Management & Historical Filtering Tests', () {
-    const service = WhatsAppTextValidationService();
+  group(
+    'WhatsAppTextValidationService Session Management & Historical Filtering Tests',
+    () {
+      late WhatsAppTextValidationService service;
 
+      setUp(() {
+        SharedPreferences.setMockInitialValues({});
+        service = _buildService();
+      });
+
+      test(
+        'should ignore messages with timestamp before session start timestamp',
+        () async {
+          final state1 = await service.handleIncomingTextMessage(
+            text: '5211639',
+            senderKey: 'test_sender',
+            timestamp: 1000,
+          );
+          expect(state1?['session_start_timestamp'], equals('1000'));
+
+          final state2 = await service.handleIncomingTextMessage(
+            text: 'שעון 88000',
+            senderKey: 'test_sender',
+            timestamp: 900,
+          );
+          expect(state2?['km'], isNull);
+
+          final state3 = await service.handleIncomingTextMessage(
+            text: 'שעון 88000',
+            senderKey: 'test_sender',
+            timestamp: 1100,
+          );
+          expect(state3?['km'], equals('88000'));
+        },
+      );
+
+      test(
+        'should clear history when a new license plate is received to start a new session',
+        () async {
+          final initial = await service.handleIncomingTextMessage(
+            text: '5211639 שעון 88000 מחיר 20000',
+            senderKey: 'test_sender',
+            timestamp: 1000,
+          );
+          expect(initial?['km'], equals('88000'));
+          expect(initial?['price'], equals('20000'));
+
+          final state2 = await service.handleIncomingTextMessage(
+            text: '12345678',
+            senderKey: 'test_sender',
+            timestamp: 2000,
+          );
+          expect(state2?['license_plate'], equals('12345678'));
+          expect(state2?['km'], isNull);
+          expect(state2?['price'], isNull);
+          expect(state2?['session_start_timestamp'], equals('2000'));
+        },
+      );
+    },
+  );
+
+  group(
+    'WhatsAppTextValidationService Positional Answers, Chat History, and Explicit Demands',
+    () {
+      late WhatsAppTextValidationService service;
+
+      setUp(() {
+        SharedPreferences.setMockInitialValues({});
+        service = _buildService();
+      });
+
+      test(
+        'should extract positional answers in missing details order (price, km)',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'hand': '2',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+          };
+          // Missing fields in order: price, km
+          final result = await service.validateWhatsAppTextMessage(
+            text: '22000\n150000',
+            existingState: existingState,
+          );
+
+          expect(result.extractedFields['price'], equals('22000'));
+          expect(result.extractedFields['km'], equals('150000'));
+          expect(result.readyToPublish, isTrue);
+        },
+      );
+
+      test(
+        'should extract 3 missing fields when user responds with 3 comma-separated values in exact order',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+          };
+          // Missing fields in order: hand, price, km
+          final result = await service.validateWhatsAppTextMessage(
+            text: '2, 35000, 110000',
+            existingState: existingState,
+          );
+
+          expect(result.extractedFields['hand'], equals('2'));
+          expect(result.extractedFields['price'], equals('35000'));
+          expect(result.extractedFields['km'], equals('110000'));
+          expect(result.readyToPublish, isTrue);
+        },
+      );
+
+      test(
+        'should extract valid fields and prompt for invalid input when one of 3 fields does not make sense',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+          };
+          // Missing fields in order: hand, price, km
+          // First is hand (invalid text), second is price, third is km
+          final result = await service.validateWhatsAppTextMessage(
+            text: 'לא-ידוע\n35000\n110000',
+            existingState: existingState,
+          );
+
+          expect(result.readyToPublish, isFalse);
+          expect(result.extractedFields['price'], equals('35000'));
+          expect(result.extractedFields['km'], equals('110000'));
+          expect(result.extractedFields['hand'], isNull);
+          expect(result.missingFields, contains('hand'));
+        },
+      );
+
+      test(
+        'should extract single number input 158990 as km when km is the only missing field',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'hand': '2',
+            'price': '35000',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+            'last_requested_fields': '["km"]',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: '158990',
+            existingState: existingState,
+          );
+
+          expect(result.extractedFields['km'], equals('158990'));
+          expect(result.readyToPublish, isTrue);
+        },
+      );
+
+      test(
+        'should extract 155880 as km even when both price and km are missing',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'hand': '2',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+            'last_requested_fields': '["price", "km"]',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: '155880',
+            existingState: existingState,
+          );
+
+          expect(result.extractedFields['km'], equals('155880'));
+          expect(result.extractedFields['price'], isNull);
+        },
+      );
+
+      test(
+        'should correct previous invalid km with single number input 155990',
+        () async {
+          // Turn 1: user sent 123000 which is less than kilometer_test_aharon (155260)
+          final state1 = {
+            'license_plate': '5211639',
+            'maker': 'סיטרואן',
+            'model': 'C4 CACTUS',
+            'year': '2016',
+            'color': 'לבן',
+            'month': '5',
+            'hand': '1',
+            'price': '22000',
+            'km': '123000',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+            'kilometer_test_aharon': '155260',
+            'last_requested_fields': '["km"]',
+          };
+          // Turn 2: user enters single number 155990 to correct the invalid km
+          final result = await service.validateWhatsAppTextMessage(
+            text: '155990',
+            existingState: state1,
+            kilometerTestAharon: 155260,
+          );
+
+          expect(result.extractedFields['km'], equals('155990'));
+          expect(result.validationErrors, isEmpty);
+          expect(result.readyToPublish, isTrue);
+        },
+      );
+
+      test(
+        'should extract positional answers with english "good" for vehicle condition',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+            'month': '5',
+            'hand': '2',
+            'test_month': '5',
+            'test_year': '2026',
+            'current_ownership': 'פרטית',
+            'previous_ownership': 'פרטית',
+            'vehicle_condition': '',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: '22000\n150000\ngood',
+            existingState: existingState,
+          );
+
+          expect(result.extractedFields['price'], equals('22000'));
+          expect(result.extractedFields['km'], equals('150000'));
+          expect(result.extractedFields['vehicle_condition'], equals('טוב'));
+        },
+      );
+
+      test(
+        'should record chat_history in state across session turns and reset on new session',
+        () async {
+          final state1 = await service.handleIncomingTextMessage(
+            text: '12345678',
+            senderKey: 'history_sender',
+            timestamp: 1000,
+          );
+
+          expect(state1?['chat_history'], isNotNull);
+          expect(state1!['chat_history']!, contains('12345678'));
+
+          final state2 = await service.handleIncomingTextMessage(
+            text: '25000\n120000',
+            senderKey: 'history_sender',
+            timestamp: 1050,
+          );
+
+          expect(state2!['price'], equals('25000'));
+          expect(state2['km'], equals('120000'));
+          expect(state2['chat_history']!, contains('25000'));
+
+          // Send new license plate -> session resets, chat_history cleared and restarted
+          final state3 = await service.handleIncomingTextMessage(
+            text: '87654321',
+            senderKey: 'history_sender',
+            timestamp: 2000,
+          );
+
+          expect(state3!['license_plate'], equals('87654321'));
+          expect(state3['price'], isNull);
+          expect(state3['chat_history']!, contains('87654321'));
+          expect(state3['chat_history']!, isNot(contains('12345678')));
+        },
+      );
+
+      test(
+        'should compose explicit demand when user sends irrelevant message while fields missing',
+        () async {
+          final existingState = {
+            'license_plate': '12345678',
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+          };
+          final result = await service.validateWhatsAppTextMessage(
+            text: 'מה המצב אחי',
+            existingState: existingState,
+          );
+
+          expect(result.readyToPublish, isFalse);
+          expect(result.replyHebrew, contains('חסרים עדיין הנתונים הבאים'));
+          expect(result.replyHebrew, contains('שלח את הערכים עם שם השדה'));
+        },
+      );
+
+      test(
+        'should map a government color missing from Yad2 to the closest allowed color',
+        () async {
+          service = _buildService(rawColor: 'כסוף מטאלי');
+          final state = await service.handleIncomingTextMessage(
+            text: '5211639',
+            senderKey: 'color_test_sender',
+            timestamp: 1000,
+          );
+
+          expect(state, isNotNull);
+          expect(state!['color'], isNotNull);
+          expect(state['gov_raw_color'], equals('כסוף מטאלי'));
+          expect(state['color'], equals('אפור'));
+        },
+      );
+    },
+  );
+
+  group('WhatsAppTextValidationService Lifecycle and Status Updates', () {
     setUp(() {
       SharedPreferences.setMockInitialValues({});
     });
 
-    test('should ignore messages with timestamp before session start timestamp', () async {
-      final state1 = await service.handleIncomingTextMessage(
-        text: '5211639',
-        senderKey: 'test_sender',
+    test(
+      'runs government lookup once and sends single searching status then asks for missing details',
+      () async {
+        var vehicleLookups = 0;
+        final replies = <String>[];
+        final service = _buildService(
+          replies: replies,
+          onVehicleLookup: () => vehicleLookups++,
+        );
+
+        final initial = await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: 'single_lookup_sender',
+          timestamp: 1000,
+        );
+
+        expect(vehicleLookups, 1);
+        expect(initial?['km'], isNull);
+        expect(initial?['kilometer_test_aharon'], '90000');
+        expect(replies.length, equals(2));
+        expect(replies[0], contains('מחפש את פרטי הרכב ב-gov.il'));
+        expect(replies[1], contains('מצאתי את הרכב: מאזדה 3 2018'));
+        expect(replies[1], contains('אנא השלם את הפרטים החסרים'));
+
+        final afterHand = await service.handleIncomingTextMessage(
+          text: '2',
+          senderKey: 'single_lookup_sender',
+          timestamp: 1100,
+        );
+
+        expect(vehicleLookups, 1);
+        expect(afterHand?['hand'], '2');
+        expect(afterHand?['image_expected_count'], isNull);
+      },
+    );
+
+    test(
+      'asks to enter full details when vehicle is not found in gov.il',
+      () async {
+        final replies = <String>[];
+        final service = WhatsAppTextValidationService(
+          vehicleDataFetcher: (_) async => null,
+          kilometerHistoryFetcher: (_) async => null,
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+        );
+
+        final result = await service.handleIncomingTextMessage(
+          text: '99999999',
+          senderKey: 'not_found_sender',
+          timestamp: 1000,
+        );
+
+        expect(result?['license_not_found_gov'], equals('true'));
+        expect(replies.length, equals(2));
+        expect(replies[0], contains('מחפש את פרטי הרכב ב-gov.il'));
+        expect(replies[1], contains('לא נמצאו פרטי רכב במאגר gov.il'));
+        expect(replies[1], contains('אנא הזן את כל פרטי הרכב הנדרשים'));
+        expect(replies[1], contains('יצרן'));
+        expect(replies[1], contains('דגם'));
+        expect(replies[1], contains('שנת ייצור'));
+      },
+    );
+
+    test('recognizes לבטל and clears all active session state', () async {
+      var stopCalls = 0;
+      final replies = <String>[];
+      final service = _buildService(
+        replies: replies,
+        onStop: () => stopCalls++,
+      );
+
+      await service.handleIncomingTextMessage(
+        text: '12345678',
+        senderKey: 'cancel_sender',
         timestamp: 1000,
       );
-      expect(state1?['session_start_timestamp'], equals('1000'));
-
-      final state2 = await service.handleIncomingTextMessage(
-        text: 'שעון 88000',
-        senderKey: 'test_sender',
-        timestamp: 900,
-      );
-      expect(state2?['km'], isNull);
-
-      final state3 = await service.handleIncomingTextMessage(
-        text: 'שעון 88000',
-        senderKey: 'test_sender',
+      final result = await service.handleIncomingTextMessage(
+        text: 'לבטל',
+        senderKey: 'cancel_sender',
         timestamp: 1100,
       );
-      expect(state3?['km'], equals('88000'));
+
+      expect(result, isEmpty);
+      expect(await service.loadSenderState('cancel_sender'), isEmpty);
+      expect(stopCalls, 2);
+      expect(replies.last, contains('הסשן נסגר'));
     });
 
-    test('should clear history when a new license plate is received to start a new session', () async {
-      final initial = await service.handleIncomingTextMessage(
-        text: '5211639 שעון 88000 מחיר 20000',
-        senderKey: 'test_sender',
-        timestamp: 1000,
-      );
-      expect(initial?['km'], equals('88000'));
-      expect(initial?['price'], equals('20000'));
+    test(
+      'a license plate supersedes a session even while publishing',
+      () async {
+        var stopCalls = 0;
+        final service = _buildService(onStop: () => stopCalls++);
+        final first = await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: 'publishing_sender',
+          timestamp: 1000,
+        );
+        first!['auto_publish_started'] = 'true';
+        first['session_status'] = 'publishing';
+        await service.saveSenderState('publishing_sender', first);
 
-      final state2 = await service.handleIncomingTextMessage(
-        text: '12345678',
-        senderKey: 'test_sender',
-        timestamp: 2000,
-      );
-      expect(state2?['license_plate'], equals('12345678'));
-      expect(state2?['km'], isNull);
-      expect(state2?['price'], isNull);
-      expect(state2?['session_start_timestamp'], equals('2000'));
-    });
+        final second = await service.handleIncomingTextMessage(
+          text: '87654321',
+          senderKey: 'publishing_sender',
+          timestamp: 2000,
+        );
+
+        expect(second?['license_plate'], '87654321');
+        expect(second?['session_status'], 'collecting_details');
+        expect(second?['auto_publish_started'], isNull);
+        expect(second?['session_start_timestamp'], '2000');
+        expect(stopCalls, 2);
+      },
+    );
+
+    test(
+      'requires a license plate before accepting conversation details',
+      () async {
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+
+        final state = await service.handleIncomingTextMessage(
+          text: 'מחיר 50000',
+          senderKey: 'no_session_sender',
+          timestamp: 1000,
+        );
+
+        expect(state, isEmpty);
+        expect(replies.single, contains('שלח תחילה מספר רישוי'));
+      },
+    );
   });
 }
