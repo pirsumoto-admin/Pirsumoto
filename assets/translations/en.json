@@ -39,5 +39,22 @@
         "images_subtitle": "At least one image is required",
         "publish": "Publish",
         "clear_all": "Clear All!"
+    },
+    "preset_login": {
+        "button_title": "Preset Login to Websites",
+        "button_subtitle": "Validate saved login cookies for automation",
+        "dialog_title": "Preset Login to Websites",
+        "dialog_description": "Select a website to verify your login and ensure session cookies are saved for smooth automation:",
+        "yad2_title": "Yad2",
+        "yad2_subtitle": "Validate Yad2 login & saved cookies",
+        "facebook_title": "Facebook",
+        "facebook_subtitle": "Validate Facebook login & saved cookies",
+        "close": "Close",
+        "done": "Done / Close",
+        "login_notice": "Please log in if prompted so your session cookies are saved for automation.",
+        "yad2_screen_title": "Yad2 - Pre-Login Validation",
+        "facebook_screen_title": "Facebook - Pre-Login Validation",
+        "reload": "Reload",
+        "back_to_dialog": "Close & Return"
     }
 }

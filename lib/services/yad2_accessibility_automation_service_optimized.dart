@@ -320,6 +320,8 @@ class Yad2AccessibilityAutomationService {
   final String? whatsAppSenderKey;
 
   final void Function(bool visible)? onToggleOverlayVisibility;
+  String? extractedDescription;
+  static String? lastExtractedDescription;
 
   Yad2AccessibilityAutomationService({
     required this.formData,
@@ -1091,10 +1093,100 @@ class Yad2AccessibilityAutomationService {
     return const _StepActionResult.success();
   }
 
+  Future<String> _extractVehicleDescriptionText() async {
+    String text = '';
+    // 1. Try extracting via DOM from WebView
+    try {
+      final js = '''
+        (function() {
+          // Check textareas by placeholder
+          var tas = document.querySelectorAll('textarea');
+          for (var i = 0; i < tas.length; i++) {
+            var ph = tas[i].getAttribute('placeholder') || '';
+            if (ph.indexOf('זה המקום לתאר') !== -1 || ph.indexOf('הפרטים הבולטים') !== -1) {
+              var val = tas[i].value || tas[i].innerText || '';
+              if (val.trim()) return val.trim();
+            }
+          }
+
+          // Check by label 'פרטים חשובים על הרכב'
+          var all = document.querySelectorAll('*');
+          for (var j = 0; j < all.length; j++) {
+            var t = (all[j].innerText || all[j].textContent || '').trim();
+            if (t.indexOf('פרטים חשובים על הרכב') !== -1) {
+              var ta = all[j].querySelector('textarea') ||
+                       (all[j].parentElement && all[j].parentElement.querySelector('textarea'));
+              if (ta && (ta.value || ta.innerText || '').trim()) {
+                return (ta.value || ta.innerText).trim();
+              }
+              var next = all[j].nextElementSibling;
+              while (next) {
+                var foundTa = next.tagName === 'TEXTAREA' ? next : next.querySelector('textarea');
+                if (foundTa && (foundTa.value || foundTa.innerText || '').trim()) {
+                  return (foundTa.value || foundTa.innerText).trim();
+                }
+                next = next.nextElementSibling;
+              }
+            }
+          }
+
+          // Fallback: any textarea with content
+          for (var k = 0; k < tas.length; k++) {
+            var val = (tas[k].value || tas[k].innerText || '').trim();
+            if (val.length > 0) return val;
+          }
+          return '';
+        })()
+      ''';
+      final res = await controller.runJavaScriptReturningResult(js);
+      var str = res.toString();
+      if (str.startsWith('"') && str.endsWith('"') && str.length >= 2) {
+        try {
+          str = jsonDecode(str) as String;
+        } catch (_) {
+          str = str.substring(1, str.length - 1);
+        }
+      }
+      text = str.trim();
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Error extracting description via DOM: $e');
+    }
+
+    // 2. Fallback: Accessibility tree check if DOM didn't return text
+    if (text.isEmpty) {
+      try {
+        final a11yText = await _channel
+            .invokeMethod<String>('findNodeTextAfterTarget', {
+              'target': 'פרטים חשובים על הרכב|זה המקום לתאר',
+              'targetInstance': 1,
+              'threshold': 0.75,
+              'offset': 1,
+            });
+        if (a11yText != null && a11yText.trim().isNotEmpty) {
+          text = a11yText.trim();
+        }
+      } catch (e) {
+        debugPrint('[Yad2-A11y] Error extracting description via A11y: $e');
+      }
+    }
+
+    return text;
+  }
+
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
     await _scrollDown(0.35);
     await _dismissKnownPopups();
-    await Future.delayed(const Duration(milliseconds: 4500));
+    await Future.delayed(const Duration(milliseconds: 5500));
+
+    // Copy text from textarea with placeholder: "זה המקום לתאר את הפרטים הבולטים"
+    // or by label: "פרטים חשובים על הרכב"
+    final desc = await _extractVehicleDescriptionText();
+    extractedDescription = desc;
+    lastExtractedDescription = desc;
+    debugPrint('====================================================');
+    debugPrint('📝 [Yad2-Extracted-Description]: "$desc"');
+    debugPrint('====================================================');
+
     final submitted = await _retryUntil(
       () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא|לשלב')),
       timeout: const Duration(seconds: 8),

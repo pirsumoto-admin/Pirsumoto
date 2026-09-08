@@ -117,6 +117,9 @@ class FormController extends _$FormController {
   void updateFromAI(Map<String, dynamic> data) {
     state = state.copyWith(
       license: data['license']?.toString() ?? state.license,
+      maker: data['maker']?.toString() ?? state.maker,
+      model: data['model']?.toString() ?? state.model,
+      year: data['year']?.toString() ?? state.year,
       color: data['color']?.toString() ?? state.color,
       month: data['month']?.toString() ?? state.month,
       test: data['test']?.toString() ?? state.test,
@@ -129,6 +132,7 @@ class FormController extends _$FormController {
       vehicleCondition:
           data['vehicleCondition']?.toString() ?? state.vehicleCondition,
       description: data['description']?.toString() ?? state.description,
+      fuelType: data['fuelType']?.toString() ?? state.fuelType,
       gear: data['gear']?.toString() ?? state.gear,
       isTypingMode: true,
       currentStep: 2,

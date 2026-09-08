@@ -38,5 +38,22 @@
         "images_subtitle": "דרושה לפחות תמונה אחת",
         "publish": "פרסום",
         "clear_all": "ניקוי הכל!"
+    },
+    "preset_login": {
+        "button_title": "התחברות מראש לאתרים",
+        "button_subtitle": "אימות שמירת עוגיות והתחברות לאוטומציה",
+        "dialog_title": "התחברות מראש לאתרים",
+        "dialog_description": "בחר אתר כדי לוודא שאתה מחובר ושהעוגיות נשמרות עבור האוטומציה:",
+        "yad2_title": "יד 2 (Yad2)",
+        "yad2_subtitle": "אימות התחברות ושמירת עוגיות ל-Yad2",
+        "facebook_title": "פייסבוק (Facebook)",
+        "facebook_subtitle": "אימות התחברות ושמירת עוגיות לפייסבוק",
+        "close": "סגור",
+        "done": "סיום / סגירה",
+        "login_notice": "אם אינך מחובר, התחבר כעת כדי שהעוגיות יישמרו לאוטומציה.",
+        "yad2_screen_title": "יד 2 - אימות התחברות מראש",
+        "facebook_screen_title": "פייסבוק - אימות התחברות מראש",
+        "reload": "רענן",
+        "back_to_dialog": "סגור וחזור"
     }
 }

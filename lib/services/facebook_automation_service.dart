@@ -107,6 +107,13 @@ class FacebookAutomationService {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
+  static FacebookAutomationService? activeInstance;
+
+  static void stopAll() {
+    activeInstance?.stop();
+    activeInstance = null;
+  }
+
   bool get isPaused => _isPaused;
   FacebookAutomationPhase? get pausedPhase => _pausedPhase;
 
@@ -118,19 +125,33 @@ class FacebookAutomationService {
     this.onAutomationComplete,
     this.onFirstStepDetected,
     this.onTapPreview,
-  });
+  }) {
+    activeInstance = this;
+  }
 
-  void dispose() {
+  void stop() {
+    debugPrint('[FB-A11y] 🛑 Stop requested');
     _stopLoginGate();
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
+    try {
+      WakelockPlus.disable();
+    } catch (_) {}
+  }
+
+  void dispose() {
+    stop();
+    if (activeInstance == this) {
+      activeInstance = null;
+    }
   }
 
   void pauseAutomation() {
     debugPrint('[FB-A11y] ⏸️ Pause requested');
     _stopLoginGate();
     _isPaused = true;
+    _pausedPhase = _currentPhase;
   }
 
   void resumeAutomation() {
@@ -162,7 +183,9 @@ class FacebookAutomationService {
   void startAutomation() {
     debugPrint('[FB-A11y] 🚀 Starting Facebook automation');
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    WakelockPlus.enable();
+    try {
+      WakelockPlus.enable();
+    } catch (_) {}
     _processPhase(FacebookAutomationPhase.loginGate);
   }
 
@@ -275,7 +298,24 @@ class FacebookAutomationService {
     return previous;
   }
 
-  // ── Tool: native accessibility tap ───────────────────────────────────────
+  // ── Tool: native accessibility tap & preview ─────────────────────────────
+
+  double get _devicePixelRatio =>
+      WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio;
+
+  Future<void> _tapBounds(
+    Map<String, dynamic> bounds, {
+    double deltaX = 0,
+    double deltaY = 0,
+  }) async {
+    final physicalX = (bounds['x'] as num).toDouble() + deltaX;
+    final physicalY = (bounds['y'] as num).toDouble() + deltaY;
+    onTapPreview?.call(
+      physicalX / _devicePixelRatio,
+      physicalY / _devicePixelRatio,
+    );
+    await toolTapScreen(physicalX, physicalY);
+  }
 
   Future<void> toolTapScreen(double x, double y) async {
     debugPrint('[FB-A11y] 🖱️ toolTapScreen($x, $y)');
@@ -290,32 +330,21 @@ class FacebookAutomationService {
     String targetText, {
     int targetInstance = 1,
     double deltaY = 0,
+    double threshold = 0.82,
+    bool preferEditable = false,
   }) async {
     debugPrint(
-      '[FB-A11y] 🔍 toolFindElementAndTap("$targetText", instance=$targetInstance)',
+      '[FB-A11y] 🔍 toolFindElementAndTap("$targetText", instance=$targetInstance, preferEditable=$preferEditable)',
     );
     try {
       final bounds = await _getStableBounds('findAndGetBounds', {
         'target': targetText,
         'targetInstance': targetInstance,
+        'threshold': threshold,
+        'preferEditable': preferEditable,
       });
       if (bounds != null) {
-        final physicalX = (bounds['x'] as num).toDouble();
-        final physicalY = (bounds['y'] as num).toDouble() + deltaY;
-        final pixelRatio =
-            WidgetsBinding
-                .instance
-                .platformDispatcher
-                .views
-                .first
-                .devicePixelRatio;
-        final logicalX = physicalX / pixelRatio;
-        final logicalY = physicalY / pixelRatio;
-        debugPrint(
-          '[FB-A11y] Found "$targetText" at physical ($physicalX, $physicalY)',
-        );
-        onTapPreview?.call(logicalX, logicalY);
-        await toolTapScreen(physicalX, physicalY);
+        await _tapBounds(bounds, deltaX: 0, deltaY: deltaY);
         return true;
       }
       return false;
@@ -342,17 +371,7 @@ class FacebookAutomationService {
         'offset': offset,
       });
       if (bounds != null) {
-        final physicalX = (bounds['x'] as num).toDouble() + deltaX;
-        final physicalY = (bounds['y'] as num).toDouble() + deltaY;
-        final pixelRatio =
-            WidgetsBinding
-                .instance
-                .platformDispatcher
-                .views
-                .first
-                .devicePixelRatio;
-        onTapPreview?.call(physicalX / pixelRatio, physicalY / pixelRatio);
-        await toolTapScreen(physicalX, physicalY);
+        await _tapBounds(bounds, deltaX: deltaX, deltaY: deltaY);
         return true;
       }
       return false;
@@ -366,25 +385,17 @@ class FacebookAutomationService {
     String targetText, {
     int targetInstance = 1,
     double deltaY = 0,
+    double threshold = 0.82,
   }) async {
     debugPrint('[FB-A11y] 🔍 toolTapNodeBefore("$targetText")');
     try {
       final bounds = await _getStableBounds('findNodeBeforeAndGetBounds', {
         'target': targetText,
         'targetInstance': targetInstance,
+        'threshold': threshold,
       });
       if (bounds != null) {
-        final physicalX = (bounds['x'] as num).toDouble();
-        final physicalY = (bounds['y'] as num).toDouble() + deltaY;
-        final pixelRatio =
-            WidgetsBinding
-                .instance
-                .platformDispatcher
-                .views
-                .first
-                .devicePixelRatio;
-        onTapPreview?.call(physicalX / pixelRatio, physicalY / pixelRatio);
-        await toolTapScreen(physicalX, physicalY);
+        await _tapBounds(bounds, deltaX: 0, deltaY: deltaY);
         return true;
       }
       return false;
@@ -399,99 +410,105 @@ class FacebookAutomationService {
   Future<bool> toolEnterTextAtFocused(String text) async {
     debugPrint('[FB-A11y] ⌨️ toolEnterTextAtFocused ("$text")');
     try {
-      final escaped = text.replaceAll("'", "\\'");
-      final jsResult = await controller.runJavaScriptReturningResult('''
-        (function(){
-          var el = document.activeElement;
-          if(!el) return 'no_active_element';
-          el.focus();
-          var success = document.execCommand('insertText', false, '$escaped');
-          if (!success) {
-            var ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')
-                  || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');
-            if(ns && ns.set){ ns.set.call(el,'$escaped'); }
-            else { el.value='$escaped'; }
-            el.dispatchEvent(new InputEvent('input',{bubbles:true,data:'$escaped',inputType:'insertText'}));
-            el.dispatchEvent(new Event('change',{bubbles:true}));
-            return 'fallback_ok';
-          }
-          return 'exec_ok';
-        })()
-      ''');
-      debugPrint('[FB-A11y] toolEnterTextAtFocused JS result: \$jsResult');
-      final resStr = jsResult.toString().trim().replaceAll('"', '');
-      if (resStr == 'exec_ok' || resStr == 'fallback_ok') {
-        return true;
-      }
-    } catch (e) {
-      debugPrint('[FB-A11y] toolEnterTextAtFocused JS error: $e');
-    }
-
-    try {
       final success = await _channel.invokeMethod<bool>('enterTextAtFocused', {
         'value': text,
       });
-      return success ?? false;
+      if (success == true) return true;
     } on PlatformException catch (e) {
       debugPrint('[FB-A11y] enterTextAtFocused native error: ${e.message}');
+    } catch (e) {
+      debugPrint('[FB-A11y] enterTextAtFocused error: $e');
+    }
+
+    try {
+      await toolEnterTextAtFocusedJs(text);
+      return true;
+    } catch (e) {
+      debugPrint('[FB-A11y] toolEnterTextAtFocusedJs error: $e');
       return false;
     }
   }
 
-  /*
-  /// JS fallback: sets value on the active element using React's native setter
-  /// so the synthetic event system picks up the change.
   Future<void> toolEnterTextAtFocusedJs(String text) async {
     debugPrint('[FB-A11y] ⌨️ toolEnterTextAtFocusedJs("$text")');
-    final escaped = text.replaceAll("'", "\\'");
+    final encoded = jsonEncode(text);
     await controller.runJavaScript('''
-      (function(){
+      (function(value) {
         var el = document.activeElement;
-        if(!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')){
+        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) {
           var inputs = document.querySelectorAll(
-            'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
-          for(var i=0; i<inputs.length; i++){
-            var r=inputs[i].getBoundingClientRect();
-            if(r.width>0 && r.height>0){el=inputs[i]; break;}
+            'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'
+          );
+          for (var i = 0; i < inputs.length; i++) {
+            var rect = inputs[i].getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight) {
+              el = inputs[i];
+              break;
+            }
           }
         }
-        if(!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return;
+        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return false;
         el.focus();
-        var ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')
-              || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');
-        if(ns && ns.set){ ns.set.call(el,'$escaped'); }
-        else { el.value='$escaped'; }
-        el.dispatchEvent(new InputEvent('input',{bubbles:true,data:'$escaped',inputType:'insertText'}));
-        el.dispatchEvent(new Event('change',{bubbles:true}));
-      })();
+        var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })($encoded);
     ''');
   }
-  */
+
+  Future<bool> toolEnterTextNear(String label, String value) async {
+    final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
+    if (!tapped) return false;
+    await Future.delayed(const Duration(milliseconds: 500));
+    final native = await toolEnterTextAtFocused(value);
+    if (native) return true;
+    await toolEnterTextAtFocusedJs(value);
+    return true;
+  }
+
+  Future<bool> toolEnterTextBefore(String targetText, String value) async {
+    try {
+      final bounds = await _getStableBounds('findInputBeforeAndGetBounds', {
+        'target': targetText,
+      });
+      if (bounds == null) return false;
+      await _tapBounds(bounds);
+      await Future.delayed(const Duration(milliseconds: 500));
+      final native = await toolEnterTextAtFocused(value);
+      if (native) return true;
+      await toolEnterTextAtFocusedJs(value);
+      return true;
+    } catch (e) {
+      debugPrint('[FB-A11y] enterTextBefore failed: $e');
+      return false;
+    }
+  }
 
   Future<bool> toolEnterText(
     String targetText,
     String value, {
     int targetInstance = 1,
+    double threshold = 0.82,
   }) async {
     debugPrint('[FB-A11y] ⌨️ toolEnterText("$targetText", value="$value")');
     try {
       final bounds = await _getStableBounds('findAndGetBounds', {
         'target': targetText,
         'targetInstance': targetInstance,
+        'threshold': threshold,
       });
       if (bounds != null) {
-        final physicalX = (bounds['x'] as num).toDouble();
-        final physicalY = (bounds['y'] as num).toDouble();
-        await toolTapScreen(physicalX, physicalY);
-        await Future.delayed(const Duration(milliseconds: 650));
+        await _tapBounds(bounds);
+        await Future.delayed(const Duration(milliseconds: 500));
         bool ok = await toolEnterTextAtFocused(value);
-        // JS fallback logic marked out
-        /*
         if (!ok) {
           await toolEnterTextAtFocusedJs(value);
           ok = true;
         }
-        */
         return ok;
       }
       return false;
@@ -501,7 +518,6 @@ class FacebookAutomationService {
     }
   }
 
-  /*
   // ── Tool: JS shadow-DOM click (Facebook uses React shadow tree heavily) ────
 
   /// Finds an element by EXACT inner-text match across the full shadow DOM
@@ -543,14 +559,18 @@ class FacebookAutomationService {
         rect=target.getBoundingClientRect();
         var x=rect.left+rect.width/2, y=rect.top+rect.height/2;
         var eOpts={bubbles:true,cancelable:true,clientX:x,clientY:y,screenX:x,screenY:y};
-        var touch=new Touch({identifier:Date.now(),target:target,
-          clientX:x,clientY:y,screenX:x,screenY:y,
-          pageX:x+window.scrollX,pageY:y+window.scrollY});
-        target.dispatchEvent(new TouchEvent('touchstart',
-          {bubbles:true,cancelable:true,touches:[touch],targetTouches:[touch],changedTouches:[touch]}));
+        try{
+          var touch=new Touch({identifier:Date.now(),target:target,
+            clientX:x,clientY:y,screenX:x,screenY:y,
+            pageX:x+window.scrollX,pageY:y+window.scrollY});
+          target.dispatchEvent(new TouchEvent('touchstart',
+            {bubbles:true,cancelable:true,touches:[touch],targetTouches:[touch],changedTouches:[touch]}));
+        }catch(e){}
         target.dispatchEvent(new MouseEvent('mousedown',eOpts));
-        target.dispatchEvent(new TouchEvent('touchend',
-          {bubbles:true,cancelable:true,changedTouches:[touch]}));
+        try{
+          target.dispatchEvent(new TouchEvent('touchend',
+            {bubbles:true,cancelable:true,changedTouches:[touch]}));
+        }catch(e){}
         target.dispatchEvent(new MouseEvent('mouseup',eOpts));
         target.dispatchEvent(new MouseEvent('click',eOpts));
         try{ target.click(); }catch(e){}
@@ -576,8 +596,13 @@ class FacebookAutomationService {
         return true;
       })()
     ''';
-    final result = await controller.runJavaScriptReturningResult(js);
-    return result == true || result.toString() == 'true';
+    try {
+      final result = await controller.runJavaScriptReturningResult(js);
+      return result == true || result.toString() == 'true';
+    } catch (e) {
+      debugPrint('[FB-A11y] toolFindAndTapJs error: $e');
+      return false;
+    }
   }
 
   // ── Tool: JS click the Nth combobox (as in facebook_screen.dart Phase 3) ──
@@ -589,7 +614,7 @@ class FacebookAutomationService {
     final js = '''
       (function(){
         var combos=document.querySelectorAll('[role="combobox"]');
-        if(combos.length<=${index}) return 'not_found:'+combos.length;
+        if(combos.length<=$index) return 'not_found:'+combos.length;
         var el=combos[$index];
         el.scrollIntoView({block:'center',inline:'center'});
         var rect=el.getBoundingClientRect();
@@ -612,7 +637,7 @@ class FacebookAutomationService {
     final js = '''
       (function(){
         var opts=document.querySelectorAll('[role="option"]');
-        if(opts.length<=${index}) return 'not_found';
+        if(opts.length<=$index) return 'not_found';
         var el=opts[$index];
         el.scrollIntoView({block:'center',inline:'center'});
         var rect=el.getBoundingClientRect();
@@ -675,7 +700,6 @@ class FacebookAutomationService {
       return false;
     }
   }
-  */
 
   // ── Tool: scroll helpers ──────────────────────────────────────────────────
 
@@ -753,29 +777,39 @@ class FacebookAutomationService {
 
   // ── Tool: smart tap (native a11y first, JS shadow-DOM fallback) ──────────
 
+  List<String> _splitAlternatives(String value) =>
+      value
+          .split('|')
+          .map((item) => item.trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+
   Future<bool> tapSmart(
     String targetText, {
     int targetInstance = 1,
     double deltaY = 0,
+    bool allowJsFallback = true,
   }) async {
-    if (await toolFindElementAndTap(
-      targetText,
-      targetInstance: targetInstance,
-      deltaY: deltaY,
-    )) {
-      return true;
-    }
-    // JS fallback marked out as requested
-    /*
-    for (final alt in targetText.split('|')) {
-      final candidate = alt.trim();
-      if (candidate.isEmpty) continue;
-      if (await toolFindAndTapJs(candidate)) {
-        debugPrint('[FB-A11y] 🕸️ JS fallback clicked "$candidate"');
+    final alternatives = _splitAlternatives(targetText);
+    for (final alt in alternatives) {
+      if (await toolFindElementAndTap(
+        alt,
+        targetInstance: targetInstance,
+        deltaY: deltaY,
+      )) {
         return true;
       }
     }
-    */
+
+    if (allowJsFallback) {
+      for (final alt in alternatives) {
+        if (await toolFindAndTapJs(alt)) {
+          debugPrint('[FB-A11y] 🕸️ JS fallback clicked "$alt"');
+          return true;
+        }
+      }
+    }
+
     return false;
   }
 
@@ -818,14 +852,11 @@ class FacebookAutomationService {
 
   Future<void> toolDismissKeyboardAndBlur() async {
     await toolBlurActiveElement();
-    await Future.delayed(const Duration(milliseconds: 350));
-    if (isKeyboardVisible()) {
-      debugPrint('[FB-A11y] Keyboard is still visible, sending back press');
-      await toolPressBack();
-      await Future.delayed(const Duration(milliseconds: 500));
-    } else {
-      debugPrint('[FB-A11y] Keyboard is already closed, skipping back press');
-    }
+    try {
+      await SystemChannels.textInput.invokeMethod('TextInput.hide');
+    } catch (_) {}
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Future.delayed(const Duration(milliseconds: 300));
   }
 
   // ── Login gate helpers ────────────────────────────────────────────────────
@@ -1049,18 +1080,258 @@ class FacebookAutomationService {
     _handlePhaseComplete(FacebookAutomationPhase.selectVehicleType);
   }
 
-  Future<void> toolLogAccessibilityTree() async {
-    debugPrint('[Yad2-A11y] Tool: toolLogAccessibilityTree');
+  Future<void> toolLogAccessibilityTree({String tag = 'FB-A11y-Tree'}) async {
+    debugPrint('[$tag] ════════ ACCESSIBILITY TREE DUMP ════════');
     try {
       final String? treeStr = await _channel.invokeMethod<String>('logTree');
       if (treeStr != null) {
         final lines = treeStr.split('\n');
         for (var line in lines) {
-          debugPrint(line);
+          if (line.trim().isNotEmpty) {
+            debugPrint('[$tag] $line');
+          }
+        }
+      } else {
+        debugPrint('[$tag] (rootNode is null or service unbound)');
+      }
+    } catch (e) {
+      debugPrint('[$tag] Failed to log accessibility tree: $e');
+    }
+    debugPrint('[$tag] ════════ END ACCESSIBILITY TREE ════════');
+  }
+
+  /// Dumps all interactive form elements from the WebView DOM into debugPrint
+  Future<void> toolLogDomFormElements({String tag = 'FB-DOM-Dump'}) async {
+    debugPrint('[$tag] ════════ DOM FORM ELEMENTS DUMP ════════');
+    try {
+      final raw = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var items = document.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"], [role="button"], label, [aria-label]');
+          var out = [];
+          for (var i = 0; i < items.length; i++) {
+            var el = items[i];
+            var rect = el.getBoundingClientRect();
+            var ariaLabel = el.getAttribute('aria-label') || '';
+            var placeholder = el.getAttribute('placeholder') || '';
+            var role = el.getAttribute('role') || '';
+            var tag = el.tagName.toLowerCase();
+            var type = el.getAttribute('type') || '';
+            var value = el.value || '';
+            var text = (el.innerText || el.textContent || '').trim().substring(0, 40);
+            
+            if (ariaLabel || placeholder || role || tag === 'input' || tag === 'select' || tag === 'textarea' || (tag === 'label' && text.length > 0)) {
+              out.push({
+                tag: tag,
+                type: type,
+                role: role,
+                aria: ariaLabel,
+                ph: placeholder,
+                val: value,
+                txt: text,
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                w: Math.round(rect.width),
+                h: Math.round(rect.height)
+              });
+            }
+          }
+          return JSON.stringify(out);
+        })()
+      ''');
+      var str = raw.toString();
+      if (str.startsWith('"') && str.endsWith('"')) {
+        str = jsonDecode(str);
+      }
+      final list = jsonDecode(str);
+      if (list is List) {
+        debugPrint('[$tag] Found ${list.length} interactive elements:');
+        for (var item in list) {
+          debugPrint(
+            '[$tag] <${item['tag']} type="${item['type']}" role="${item['role']}"> '
+            'aria="${item['aria']}" ph="${item['ph']}" val="${item['val']}" '
+            'text="${item['txt']}" bounds=(${item['x']},${item['y']},${item['w']},${item['h']})',
+          );
         }
       }
     } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to log tree: $e');
+      debugPrint('[$tag] Error logging DOM elements: $e');
+    }
+    debugPrint('[$tag] ════════ END DOM FORM ELEMENTS ════════');
+  }
+
+  /// Scrolls an element into view using DOM inspection
+  Future<bool> toolScrollElementIntoViewViaDom(List<String> keywords) async {
+    try {
+      final jsonKw = jsonEncode(keywords);
+      final raw = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var kw = $jsonKw;
+          var all = document.querySelectorAll('input, [role="combobox"], [aria-label], label, span');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            var ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            var txt = (el.innerText || el.textContent || '').toLowerCase();
+            for (var k = 0; k < kw.length; k++) {
+              var q = kw[k].toLowerCase();
+              if (aria.indexOf(q) !== -1 || ph.indexOf(q) !== -1 || txt.indexOf(q) !== -1) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return 'scrolled';
+              }
+            }
+          }
+          return 'not_found';
+        })()
+      ''');
+      return raw.toString().contains('scrolled');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Enters text directly into an input matching selectors or aria-label/placeholder in the DOM
+  Future<bool> toolEnterTextInputViaDom({
+    required List<String> selectors,
+    required String text,
+  }) async {
+    debugPrint('[FB-DOM] Trying to enter "$text" via selectors: $selectors');
+    try {
+      final jsonSelectors = jsonEncode(selectors);
+      final jsonText = jsonEncode(text);
+      final raw = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var selectors = $jsonSelectors;
+          var val = $jsonText;
+          var found = null;
+          for (var i = 0; i < selectors.length; i++) {
+            var el = document.querySelector(selectors[i]);
+            if (el) {
+              found = el;
+              break;
+            }
+          }
+          if (!found) {
+            var allInputs = document.querySelectorAll('input, textarea');
+            for (var j = 0; j < allInputs.length; j++) {
+              var inp = allInputs[j];
+              var aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+              var ph = (inp.getAttribute('placeholder') || '').toLowerCase();
+              for (var s = 0; s < selectors.length; s++) {
+                var query = selectors[s].toLowerCase();
+                var match = query.match(/["'](.*?)["']/);
+                var keyword = match ? match[1] : query;
+                if ((aria && aria.indexOf(keyword) !== -1) || (ph && ph.indexOf(keyword) !== -1)) {
+                  found = inp;
+                  break;
+                }
+              }
+              if (found) break;
+            }
+          }
+          if (!found) return 'not_found';
+
+          found.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          found.focus();
+          try { found.click(); } catch(e) {}
+          
+          var proto = found instanceof HTMLTextAreaElement 
+              ? window.HTMLTextAreaElement.prototype 
+              : window.HTMLInputElement.prototype;
+          var setDesc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (setDesc && setDesc.set) {
+            setDesc.set.call(found, val);
+          } else {
+            found.value = val;
+          }
+          found.dispatchEvent(new Event('input', { bubbles: true }));
+          found.dispatchEvent(new Event('change', { bubbles: true }));
+          return 'ok';
+        })()
+      ''');
+      debugPrint('[FB-DOM] enterTextInputViaDom result: $raw');
+      return raw.toString().contains('ok');
+    } catch (e) {
+      debugPrint('[FB-DOM] enterTextInputViaDom error: $e');
+      return false;
+    }
+  }
+
+  /// Enters price specifically into the DOM, checking direct inputs, label containers,
+  /// and aria-labelledby references to avoid clicking static text labels.
+  Future<bool> toolEnterPriceViaDom(String price) async {
+    try {
+      final jsonPrice = jsonEncode(price);
+      final raw = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var val = $jsonPrice;
+          var found = null;
+
+          // 1. Direct inputs with aria-label or placeholder
+          var direct = document.querySelectorAll(
+            'input[aria-label*="Price" i], input[aria-label*="מחיר" i], ' +
+            'input[placeholder*="Price" i], input[placeholder*="מחיר" i]'
+          );
+          if (direct.length > 0) {
+            found = direct[0];
+          }
+
+          // 2. Labels containing "מחיר" or "Price" and find the input inside them
+          if (!found) {
+            var labels = document.querySelectorAll('label');
+            for (var i = 0; i < labels.length; i++) {
+              var txt = (labels[i].innerText || labels[i].textContent || '').trim().toLowerCase();
+              if (txt.indexOf('מחיר') !== -1 || txt.indexOf('price') !== -1) {
+                var inp = labels[i].querySelector('input');
+                if (inp) {
+                  found = inp;
+                  break;
+                }
+              }
+            }
+          }
+
+          // 3. aria-labelledby referencing a label element containing "מחיר" or "Price"
+          if (!found) {
+            var allInputs = document.querySelectorAll('input:not([type="hidden"]):not([type="file"])');
+            for (var j = 0; j < allInputs.length; j++) {
+              var inp = allInputs[j];
+              var lbId = inp.getAttribute('aria-labelledby');
+              if (lbId) {
+                var lbEl = document.getElementById(lbId);
+                if (lbEl) {
+                  var lbTxt = (lbEl.innerText || lbEl.textContent || '').trim().toLowerCase();
+                  if (lbTxt.indexOf('מחיר') !== -1 || lbTxt.indexOf('price') !== -1) {
+                    found = inp;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          if (!found) return 'not_found';
+
+          found.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          found.focus();
+          try { found.click(); } catch(e) {}
+
+          var proto = window.HTMLInputElement.prototype;
+          var setDesc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (setDesc && setDesc.set) {
+            setDesc.set.call(found, val);
+          } else {
+            found.value = val;
+          }
+          found.dispatchEvent(new Event('input', { bubbles: true }));
+          found.dispatchEvent(new Event('change', { bubbles: true }));
+          return 'ok';
+        })()
+      ''');
+      debugPrint('[FB-DOM] enterPriceViaDom result: $raw');
+      return raw.toString().contains('ok');
+    } catch (e) {
+      debugPrint('[FB-DOM] enterPriceViaDom error: $e');
+      return false;
     }
   }
 
@@ -1159,25 +1430,60 @@ class FacebookAutomationService {
 
     // Wait for upload to complete on server/UI (e.g. 5 seconds)
     await Future.delayed(const Duration(seconds: 5));
+
+    // Log both trees right after upload completes
+    debugPrint('[FB-A11y] 📸 Photo upload complete. Logging state of the screen:');
+    await toolLogDomFormElements(tag: 'FB-PostUpload-DOM');
+    await toolLogAccessibilityTree(tag: 'FB-PostUpload-A11y');
+
     _handlePhaseComplete(FacebookAutomationPhase.uploadPhotos);
   }
 
   // Phase 6 — Enter year
   Future<void> _phaseEnterYear() async {
-    await _scrollDown(0.5);
     final yearVal = formData.year;
-    debugPrint('EnterYear value: $yearVal');
+    debugPrint('[FB-A11y] EnterYear value: "$yearVal"');
     if (yearVal.isEmpty) {
+      debugPrint('[FB-A11y] yearVal is empty in formData, skipping enterYear');
       _handlePhaseComplete(FacebookAutomationPhase.enterYear);
       return;
     }
 
-    await toolLogAccessibilityTree();
+    // Log current area
+    await toolLogDomFormElements(tag: 'FB-Year-DOM');
+    await toolLogAccessibilityTree(tag: 'FB-Year-A11y');
+
+    // Scroll Year element into view via DOM first (prevents blind over-scrolling)
+    await toolScrollElementIntoViewViaDom(['שנה', 'שנת', 'Year']);
+    await Future.delayed(const Duration(milliseconds: 600));
+
+    // Try finding Year dropdown via A11y
     bool opened = await _retryUntil(() async {
+      if (await toolFindElementAndTap('שנה|שנת|שנת ייצור|שנת דגם|Year|Model year')) return true;
       if (await toolFindElementAndTap('שנה')) return true;
       if (await toolFindElementAndTap('Year')) return true;
       return false;
     }, timeout: const Duration(seconds: 4));
+
+    // Fallback: If not opened via A11y, try clicking Year via DOM
+    if (!opened) {
+      debugPrint('[FB-A11y] Year dropdown not opened via A11y, attempting DOM click...');
+      final domClicked = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var el = document.querySelector('[role="combobox"][aria-label*="Year" i], [role="combobox"][aria-label*="שנה" i], input[aria-label*="Year" i], input[aria-label*="שנה" i]');
+          if (el) {
+            el.scrollIntoView({ block: 'center' });
+            el.click();
+            return 'clicked';
+          }
+          return 'not_found';
+        })()
+      ''');
+      debugPrint('[FB-A11y] DOM Year click result: $domClicked');
+      if (domClicked.toString().contains('clicked')) {
+        opened = true;
+      }
+    }
 
     if (!opened) {
       _handleRetry(
@@ -1188,9 +1494,32 @@ class FacebookAutomationService {
     }
     await Future.delayed(const Duration(milliseconds: 800));
 
+    // Select the year value (e.g. "2020")
     bool selected = await _retryUntil(() async {
       return await toolFindElementAndTap(yearVal);
-    }, timeout: const Duration(seconds: 6));
+    }, timeout: const Duration(seconds: 4));
+
+    if (!selected) {
+      debugPrint('[FB-A11y] Year option $yearVal not tapped via A11y, attempting DOM option click...');
+      final domSelected = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var options = document.querySelectorAll('[role="option"], option, div[role="button"], span');
+          for (var i = 0; i < options.length; i++) {
+            var opt = options[i];
+            if ((opt.innerText || opt.textContent || '').trim() === '$yearVal') {
+              opt.scrollIntoView({ block: 'center' });
+              opt.click();
+              return 'clicked';
+            }
+          }
+          return 'not_found';
+        })()
+      ''');
+      debugPrint('[FB-A11y] DOM Year option selection result: $domSelected');
+      if (domSelected.toString().contains('clicked')) {
+        selected = true;
+      }
+    }
 
     if (!selected) {
       _handleRetry(
@@ -1202,114 +1531,192 @@ class FacebookAutomationService {
     _handlePhaseComplete(FacebookAutomationPhase.enterYear);
   }
 
-  // Phase 7 — Enter make
+  // Phase 7 — Enter make (Manufacturer - Free Text Field)
   Future<void> _phaseEnterMake() async {
     final makerVal = formData.maker;
+    debugPrint('[FB-A11y] EnterMake value: "$makerVal"');
     if (makerVal.isEmpty) {
+      debugPrint('[FB-A11y] makerVal is empty in formData, skipping enterMake');
       _handlePhaseComplete(FacebookAutomationPhase.enterMake);
       return;
     }
-    bool tapped = await _retryUntil(() async {
-      if (await toolFindElementAndTap('יצרן')) return true;
-      if (await toolFindElementAndTap('Make')) return true;
-      return false;
-    }, timeout: const Duration(seconds: 8));
 
-    if (!tapped) {
+    // Log current area
+    await toolLogDomFormElements(tag: 'FB-Make-DOM');
+
+    // Scroll into view via DOM
+    await toolScrollElementIntoViewViaDom(['יצרן', 'Make', 'Manufacturer']);
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // 1. Enter text via DOM directly (free text field)
+    bool enteredViaDom = await toolEnterTextInputViaDom(
+      selectors: [
+        'input[aria-label*="Make" i]',
+        'input[aria-label*="יצרן" i]',
+        'input[placeholder*="Make" i]',
+        'input[placeholder*="יצרן" i]',
+      ],
+      text: makerVal,
+    );
+
+    // 2. Also tap via A11y to focus & enter text natively
+    bool tappedA11y = await toolFindElementAndTap('יצרן|Make|Manufacturer');
+    if (tappedA11y) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      await toolEnterTextAtFocused(makerVal);
+    }
+
+    if (!enteredViaDom && !tappedA11y) {
       _handleRetry(FacebookAutomationPhase.enterMake, 'Make field not found');
       return;
     }
+
     await Future.delayed(const Duration(milliseconds: 800));
 
-    debugPrint('[FB-A11y] Entering make: $makerVal');
-    await toolEnterTextAtFocused(makerVal);
-    await Future.delayed(const Duration(milliseconds: 800));
+    // Optional: If an auto-complete suggestion popped up, tap it (up to 1.5s timeout)
+    try {
+      await _retryUntil(() async {
+        if (await toolFindElementAndTap(makerVal, targetInstance: 2)) return true;
+        return false;
+      }, timeout: const Duration(milliseconds: 1500));
+    } catch (_) {}
 
-    // Tap make suggestion (prefer second instance if suggestion is list element)
-    debugPrint('[FB-A11y] Tapping make suggestion: $makerVal');
-    bool selected = await _retryUntil(() async {
-      if (await toolFindElementAndTap(makerVal, targetInstance: 2)) return true;
-      return await toolFindElementAndTap(makerVal, targetInstance: 1);
-    }, timeout: const Duration(seconds: 6));
-
-    if (!selected) {
-      debugPrint(
-        '[FB-A11y] Maker suggestion for $makerVal not found, continuing',
-      );
-    }
-
-    // Dismiss keyboard and blur focus
     await toolDismissKeyboardAndBlur();
-
     _handlePhaseComplete(FacebookAutomationPhase.enterMake);
   }
 
-  // Phase 8 — Enter model
+  // Phase 8 — Enter model (Free Text Field)
   Future<void> _phaseEnterModel() async {
-    await _scrollDown(0.2);
     final modelVal = formData.model;
+    debugPrint('[FB-A11y] EnterModel value: "$modelVal"');
     if (modelVal.isEmpty) {
+      debugPrint('[FB-A11y] modelVal is empty in formData, skipping enterModel');
       _handlePhaseComplete(FacebookAutomationPhase.enterModel);
       return;
     }
-    bool tapped = await _retryUntil(() async {
-      if (await toolFindElementAndTap('דגם')) return true;
-      if (await toolFindElementAndTap('Model')) return true;
-      return false;
-    }, timeout: const Duration(seconds: 8));
 
-    if (!tapped) {
+    // Log current area
+    await toolLogDomFormElements(tag: 'FB-Model-DOM');
+
+    // Scroll into view via DOM
+    await toolScrollElementIntoViewViaDom(['דגם', 'Model']);
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // 1. Enter text via DOM directly (free text field)
+    bool enteredViaDom = await toolEnterTextInputViaDom(
+      selectors: [
+        'input[aria-label*="Model" i]',
+        'input[aria-label*="דגם" i]',
+        'input[placeholder*="Model" i]',
+        'input[placeholder*="דגם" i]',
+      ],
+      text: modelVal,
+    );
+
+    // 2. Also tap via A11y to focus & enter text natively
+    bool tappedA11y = await toolFindElementAndTap('דגם|Model');
+    if (tappedA11y) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      await toolEnterTextAtFocused(modelVal);
+    }
+
+    if (!enteredViaDom && !tappedA11y) {
       _handleRetry(FacebookAutomationPhase.enterModel, 'Model field not found');
       return;
     }
+
     await Future.delayed(const Duration(milliseconds: 800));
 
-    debugPrint('[FB-A11y] Entering model: $modelVal');
-    await toolEnterTextAtFocused(modelVal);
-    await Future.delayed(const Duration(milliseconds: 800));
+    // Optional: If an auto-complete suggestion popped up, tap it (up to 1.5s timeout)
+    try {
+      await _retryUntil(() async {
+        if (await toolFindElementAndTap(modelVal, targetInstance: 2)) return true;
+        return false;
+      }, timeout: const Duration(milliseconds: 1500));
+    } catch (_) {}
 
-    // Tap model suggestion (prefer second instance if suggestion is list element)
-    debugPrint('[FB-A11y] Tapping model suggestion: $modelVal');
-    bool selected = await _retryUntil(() async {
-      if (await toolFindElementAndTap(modelVal, targetInstance: 2)) return true;
-      return await toolFindElementAndTap(modelVal, targetInstance: 1);
-    }, timeout: const Duration(seconds: 6));
-
-    if (!selected) {
-      debugPrint(
-        '[FB-A11y] Model suggestion for $modelVal not found, continuing',
-      );
-    }
-
-    // Dismiss keyboard and blur focus
     await toolDismissKeyboardAndBlur();
-
     _handlePhaseComplete(FacebookAutomationPhase.enterModel);
   }
 
   // Phase 9 — Enter mileage
   Future<void> _phaseEnterMileage() async {
     final km = formData.kilometers;
+    debugPrint('[FB-A11y] EnterMileage value: "$km"');
     if (km.isEmpty) {
+      debugPrint('[FB-A11y] km is empty in formData, skipping enterMileage');
       _handlePhaseComplete(FacebookAutomationPhase.enterMileage);
       return;
     }
-    bool tapped = await _retryUntil(() async {
-      if (await toolTapNodeAfter('מיילים')) return true;
-      if (await toolTapNodeAfter('Miles')) return true;
-      if (await toolTapNodeAfter('Mileage')) return true;
-      return false;
-    }, timeout: const Duration(seconds: 8));
 
-    if (!tapped) {
-      _handleRetry(
-        FacebookAutomationPhase.enterMileage,
-        'Mileage field not found',
+    await toolLogDomFormElements(tag: 'FB-Mileage-DOM');
+    await toolScrollElementIntoViewViaDom([
+      'מיילס',
+      'מיילים',
+      'מייל',
+      'Miles',
+      'Mileage',
+      'קילומטראז',
+      'קילומטרים',
+      'ק"מ',
+      'ק״מ',
+      'קמ',
+      'Kilometers',
+    ]);
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // 1. Enter text via DOM directly
+    bool enteredViaDom = await toolEnterTextInputViaDom(
+      selectors: [
+        'input[aria-label*="Mileage" i]',
+        'input[aria-label*="Miles" i]',
+        'input[aria-label*="מיילס" i]',
+        'input[aria-label*="מיילים" i]',
+        'input[aria-label*="מייל" i]',
+        'input[aria-label*="קילומטראז" i]',
+        'input[aria-label*="קילומטר" i]',
+        'input[aria-label*="ק״מ" i]',
+        'input[aria-label*="ק\\"מ" i]',
+        'input[aria-label*="קמ" i]',
+        'input[placeholder*="Mileage" i]',
+        'input[placeholder*="Miles" i]',
+        'input[placeholder*="מיילס" i]',
+        'input[placeholder*="מיילים" i]',
+        'input[placeholder*="קילומטראז" i]',
+      ],
+      text: km,
+    );
+
+    // 2. Fallback via A11y if DOM entry did not match
+    bool tappedA11y = false;
+    if (!enteredViaDom) {
+      tappedA11y = await toolFindElementAndTap(
+        'מיילס|מיילים|מייל|Mileage|Miles|קילומטראז|ק"מ|ק״מ|קילומטרים|קמ',
       );
+      if (!tappedA11y) {
+        tappedA11y = await toolTapNodeAfter('מיילס') ||
+            await toolTapNodeAfter('מיילים') ||
+            await toolTapNodeAfter('מייל') ||
+            await toolTapNodeAfter('Miles') ||
+            await toolTapNodeAfter('Mileage') ||
+            await toolTapNodeAfter('קילומטראז׳') ||
+            await toolTapNodeAfter('קילומטראז') ||
+            await toolTapNodeAfter('ק״מ') ||
+            await toolTapNodeAfter('ק"מ') ||
+            await toolTapNodeAfter('קילומטרים') ||
+            await toolTapNodeAfter('קמ');
+      }
+      if (tappedA11y) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        await toolEnterTextAtFocused(km);
+      }
+    }
+
+    if (!enteredViaDom && !tappedA11y) {
+      _handleRetry(FacebookAutomationPhase.enterMileage, 'Mileage field not found');
       return;
     }
-    await Future.delayed(const Duration(milliseconds: 800));
-    await toolEnterTextAtFocused(km);
+
     await Future.delayed(const Duration(milliseconds: 500));
     await toolDismissKeyboardAndBlur();
     _handlePhaseComplete(FacebookAutomationPhase.enterMileage);
@@ -1318,22 +1725,88 @@ class FacebookAutomationService {
   // Phase 10 — Enter price
   Future<void> _phaseEnterPrice() async {
     final priceText = formData.price;
+    debugPrint('[FB-A11y] EnterPrice value: "$priceText"');
     if (priceText.isEmpty) {
+      debugPrint('[FB-A11y] price is empty in formData, skipping enterPrice');
       _handlePhaseComplete(FacebookAutomationPhase.enterPrice);
       return;
     }
-    bool tapped = await _retryUntil(() async {
-      if (await toolFindElementAndTap('מחיר', targetInstance: 2)) return true;
-      if (await toolFindElementAndTap('Price', targetInstance: 2)) return true;
-      return false;
-    }, timeout: const Duration(seconds: 8));
 
-    if (!tapped) {
+    await toolLogDomFormElements(tag: 'FB-Price-DOM');
+    await toolScrollElementIntoViewViaDom(['מחיר', 'Price']);
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    // 1. Enter text via DOM directly targeting the price input or its label container
+    bool enteredViaDom = await toolEnterPriceViaDom(priceText);
+    if (!enteredViaDom) {
+      enteredViaDom = await toolEnterTextInputViaDom(
+        selectors: [
+          'input[aria-label*="Price" i]',
+          'input[aria-label*="מחיר" i]',
+          'input[placeholder*="Price" i]',
+          'input[placeholder*="מחיר" i]',
+        ],
+        text: priceText,
+      );
+    }
+
+    // 2. Fallback via A11y: "מחיר" appears twice (1 is label, 2 is input/EditText).
+    // Specifically target the input / editable node or instance 2!
+    bool enteredA11y = false;
+    if (!enteredViaDom) {
+      debugPrint('[FB-A11y] DOM price entry not confirmed, attempting A11y input matching...');
+
+      // Strategy A: Specifically prefer editable node (EditText) matching "מחיר" or "Price"
+      bool tapped = await toolFindElementAndTap(
+        'מחיר|Price',
+        preferEditable: true,
+      );
+
+      // Strategy B: Target second instance of "מחיר" (instance 1 is label, instance 2 is input)
+      if (!tapped) {
+        debugPrint('[FB-A11y] Trying instance 2 of "מחיר" for input field...');
+        tapped = await toolFindElementAndTap(
+          'מחיר',
+          targetInstance: 2,
+        );
+      }
+
+      // Strategy C: Target second instance of "Price"
+      if (!tapped) {
+        debugPrint('[FB-A11y] Trying instance 2 of "Price" for input field...');
+        tapped = await toolFindElementAndTap(
+          'Price',
+          targetInstance: 2,
+        );
+      }
+
+      // Strategy D: Tap the input node immediately after label "מחיר"
+      if (!tapped) {
+        debugPrint('[FB-A11y] Trying node after label מחיר...');
+        tapped = await toolTapNodeAfter('מחיר') ||
+            await toolTapNodeAfter('Price');
+      }
+
+      // Strategy E: Fallback to instance 1
+      if (!tapped) {
+        tapped = await toolFindElementAndTap('מחיר|Price');
+      }
+
+      if (tapped) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        enteredA11y = await toolEnterTextAtFocused(priceText);
+        if (!enteredA11y) {
+          await toolEnterTextAtFocusedJs(priceText);
+          enteredA11y = true;
+        }
+      }
+    }
+
+    if (!enteredViaDom && !enteredA11y) {
       _handleRetry(FacebookAutomationPhase.enterPrice, 'Price field not found');
       return;
     }
-    await Future.delayed(const Duration(milliseconds: 800));
-    await toolEnterTextAtFocused(priceText);
+
     await Future.delayed(const Duration(milliseconds: 500));
     await toolDismissKeyboardAndBlur();
     _handlePhaseComplete(FacebookAutomationPhase.enterPrice);
@@ -1525,24 +1998,56 @@ class FacebookAutomationService {
 
   // Phase 15 — Enter description
   Future<void> _phaseEnterDescription() async {
-    final descriptionText =
-        'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\n'
-        'יד: ${formData.hand} | ק"מ: ${formData.kilometers}\n'
-        'סוג דלק: ${formData.fuelType}';
+    final descriptionText = (formData.description.trim().isNotEmpty)
+        ? formData.description.trim()
+        : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\n'
+            'יד: ${formData.hand} | ק"מ: ${formData.kilometers}\n'
+            'סוג דלק: ${formData.fuelType}';
+    debugPrint('[FB-A11y] EnterDescription (length: ${descriptionText.length}):\n$descriptionText');
 
-    bool tapped = await _retryUntil(() async {
-      if (await toolTapNodeAfter('תיאור')) return true;
-      if (await toolTapNodeAfter('Description')) return true;
-      return false;
-    }, timeout: const Duration(seconds: 8));
+    await toolLogDomFormElements(tag: 'FB-Description-DOM');
+    await toolScrollElementIntoViewViaDom(['תיאור', 'Description']);
+    await Future.delayed(const Duration(milliseconds: 500));
 
-    if (!tapped) {
-      debugPrint('[FB-A11y] Description field not found, skipping');
-      _handlePhaseComplete(FacebookAutomationPhase.enterDescription);
-      return;
+    // 1. Enter text via DOM directly
+    bool enteredViaDom = await toolEnterTextInputViaDom(
+      selectors: [
+        'textarea[aria-label*="Description" i]',
+        'textarea[aria-label*="תיאור" i]',
+        'textarea[placeholder*="Description" i]',
+        'textarea[placeholder*="תיאור" i]',
+        'div[aria-label*="Description" i]',
+        'div[aria-label*="תיאור" i]',
+        'textarea',
+      ],
+      text: descriptionText,
+    );
+
+    // 2. Fallback via A11y if DOM entry did not match
+    bool enteredA11y = false;
+    if (!enteredViaDom) {
+      bool tapped = await toolFindElementAndTap(
+        'תיאור|Description',
+        preferEditable: true,
+      );
+      if (!tapped) {
+        tapped = await toolTapNodeAfter('תיאור') ||
+            await toolTapNodeAfter('Description');
+      }
+      if (tapped) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        enteredA11y = await toolEnterTextAtFocused(descriptionText);
+        if (!enteredA11y) {
+          await toolEnterTextAtFocusedJs(descriptionText);
+          enteredA11y = true;
+        }
+      }
     }
-    await Future.delayed(const Duration(milliseconds: 800));
-    await toolEnterTextAtFocused(descriptionText);
+
+    if (!enteredViaDom && !enteredA11y) {
+      debugPrint('[FB-A11y] Description field not found, continuing');
+    }
+
     await Future.delayed(const Duration(milliseconds: 500));
     await toolDismissKeyboardAndBlur();
     _handlePhaseComplete(FacebookAutomationPhase.enterDescription);
@@ -1581,64 +2086,79 @@ class FacebookAutomationService {
     debugPrint('[FB-A11y] ✅ Phase complete: ${phase.descriptionHe}');
     onPhaseComplete?.call(phase);
 
-    FacebookAutomationPhase? next;
-    int delayMs = 1000;
-
-    switch (phase) {
-      case FacebookAutomationPhase.loginGate:
-        next = FacebookAutomationPhase.setViewport;
-        delayMs = 500;
-      case FacebookAutomationPhase.setViewport:
-        next = FacebookAutomationPhase.selectVehicleType;
-        delayMs = 1000; // wait for page/form to load
-      case FacebookAutomationPhase.selectVehicleType:
-        next = FacebookAutomationPhase.uploadPhotos;
-        delayMs = 1000;
-      case FacebookAutomationPhase.uploadPhotos:
-        next = FacebookAutomationPhase.enterYear;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterYear:
-        next = FacebookAutomationPhase.enterMake;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterMake:
-        next = FacebookAutomationPhase.enterModel;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterModel:
-        next = FacebookAutomationPhase.enterMileage;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterMileage:
-        next = FacebookAutomationPhase.enterPrice;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterPrice:
-        next = FacebookAutomationPhase.selectBodyStyle;
-        delayMs = 1000;
-      case FacebookAutomationPhase.selectBodyStyle:
-        next = FacebookAutomationPhase.selectCondition;
-        delayMs = 1000;
-      case FacebookAutomationPhase.selectCondition:
-        next = FacebookAutomationPhase.selectFuelType;
-        delayMs = 1000;
-      case FacebookAutomationPhase.selectFuelType:
-        next = FacebookAutomationPhase.selectTransmission;
-        delayMs = 1000;
-      case FacebookAutomationPhase.selectTransmission:
-        next = FacebookAutomationPhase.enterDescription;
-        delayMs = 1000;
-      case FacebookAutomationPhase.enterDescription:
-        next = FacebookAutomationPhase.publish;
-        delayMs = 1000;
-      case FacebookAutomationPhase.publish:
-        next = FacebookAutomationPhase.complete;
-        delayMs = 700;
-      case FacebookAutomationPhase.complete:
-        WakelockPlus.disable();
-        onAutomationComplete?.call(true);
-        return;
+    final next = _nextPhaseAfter(phase);
+    if (next == null) {
+      stop();
+      onAutomationComplete?.call(true);
+      return;
     }
 
-    Future.delayed(Duration(milliseconds: delayMs), () {
-      _processPhase(next!);
+    Future.delayed(_delayAfter(phase), () {
+      if (!_isPaused) {
+        _processPhase(next);
+      }
     });
+  }
+
+  FacebookAutomationPhase? _nextPhaseAfter(FacebookAutomationPhase phase) {
+    switch (phase) {
+      case FacebookAutomationPhase.loginGate:
+        return FacebookAutomationPhase.setViewport;
+      case FacebookAutomationPhase.setViewport:
+        return FacebookAutomationPhase.selectVehicleType;
+      case FacebookAutomationPhase.selectVehicleType:
+        return FacebookAutomationPhase.uploadPhotos;
+      case FacebookAutomationPhase.uploadPhotos:
+        return FacebookAutomationPhase.enterYear;
+      case FacebookAutomationPhase.enterYear:
+        return FacebookAutomationPhase.enterMake;
+      case FacebookAutomationPhase.enterMake:
+        return FacebookAutomationPhase.enterModel;
+      case FacebookAutomationPhase.enterModel:
+        return FacebookAutomationPhase.enterMileage;
+      case FacebookAutomationPhase.enterMileage:
+        return FacebookAutomationPhase.enterPrice;
+      case FacebookAutomationPhase.enterPrice:
+        return FacebookAutomationPhase.selectBodyStyle;
+      case FacebookAutomationPhase.selectBodyStyle:
+        return FacebookAutomationPhase.selectCondition;
+      case FacebookAutomationPhase.selectCondition:
+        return FacebookAutomationPhase.selectFuelType;
+      case FacebookAutomationPhase.selectFuelType:
+        return FacebookAutomationPhase.selectTransmission;
+      case FacebookAutomationPhase.selectTransmission:
+        return FacebookAutomationPhase.enterDescription;
+      case FacebookAutomationPhase.enterDescription:
+        return FacebookAutomationPhase.publish;
+      case FacebookAutomationPhase.publish:
+        return FacebookAutomationPhase.complete;
+      case FacebookAutomationPhase.complete:
+        return null;
+    }
+  }
+
+  Duration _delayAfter(FacebookAutomationPhase phase) {
+    switch (phase) {
+      case FacebookAutomationPhase.loginGate:
+        return const Duration(milliseconds: 500);
+      case FacebookAutomationPhase.setViewport:
+      case FacebookAutomationPhase.selectVehicleType:
+      case FacebookAutomationPhase.uploadPhotos:
+      case FacebookAutomationPhase.enterYear:
+      case FacebookAutomationPhase.enterMake:
+      case FacebookAutomationPhase.enterModel:
+      case FacebookAutomationPhase.enterMileage:
+      case FacebookAutomationPhase.enterPrice:
+      case FacebookAutomationPhase.selectBodyStyle:
+      case FacebookAutomationPhase.selectCondition:
+      case FacebookAutomationPhase.selectFuelType:
+      case FacebookAutomationPhase.selectTransmission:
+      case FacebookAutomationPhase.enterDescription:
+      case FacebookAutomationPhase.publish:
+        return const Duration(milliseconds: 1000);
+      case FacebookAutomationPhase.complete:
+        return const Duration(milliseconds: 700);
+    }
   }
 
   void _handleRetry(FacebookAutomationPhase phase, String reason) {

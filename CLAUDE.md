@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Pirsumoto** is a Flutter mobile app for managing and listing used vehicles. It uses Firebase for auth/data, Riverpod for state management, and OpenAI (Whisper + GPT-4) for AI-assisted car listing via voice input.
 
+**Target Platform**: Android only. All native configurations, permissions, background automation, and logic target Android exclusively. Disregard iOS and Swift.
+
 ## Common Commands
 
 ```bash

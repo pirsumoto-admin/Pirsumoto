@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
+import '../../services/whatsapp_message_bridge_service.dart';
+import '../../services/whatsapp_text_validation_service.dart';
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Create Vehicle Listing Screen
@@ -37,8 +40,15 @@ const _kDesktopUserAgent =
 // ---------------------------------------------------------------------------
 class FacebookScreen extends StatefulWidget {
   final VehiclePublishData? publishData;
+  final bool startedFromWhatsApp;
+  final String? whatsAppSenderKey;
 
-  const FacebookScreen({super.key, this.publishData});
+  const FacebookScreen({
+    super.key,
+    this.publishData,
+    this.startedFromWhatsApp = false,
+    this.whatsAppSenderKey,
+  });
 
   @override
   State<FacebookScreen> createState() => _FacebookScreenState();
@@ -154,6 +164,22 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _showControls = true;
           _statusMessage = 'שגיאה: $error';
         });
+
+        if (widget.startedFromWhatsApp &&
+            widget.whatsAppSenderKey != null &&
+            widget.whatsAppSenderKey!.trim().isNotEmpty &&
+            Platform.isAndroid) {
+          unawaited(
+            WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+              senderKey: widget.whatsAppSenderKey!.trim(),
+              message:
+                  'אוטומציית פייסבוק נעצרה בשלב: ${phase.descriptionHe}\n'
+                  'נא לבדוק את המסך ולהמשיך משם.\n'
+                  'שגיאה: $error',
+            ),
+          );
+        }
+
         // After 5s collapse the error text and show controls
         Future.delayed(const Duration(seconds: 5), () {
           if (mounted) setState(() => _statusMessage = '');
@@ -167,6 +193,34 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _statusMessage =
               success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
         });
+
+        if (widget.startedFromWhatsApp &&
+            widget.whatsAppSenderKey != null &&
+            widget.whatsAppSenderKey!.trim().isNotEmpty &&
+            Platform.isAndroid) {
+          if (success) {
+            unawaited(
+              WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+                senderKey: widget.whatsAppSenderKey!.trim(),
+                message:
+                    'פרסום המודעה בפייסבוק מרקטפלייס הושלם בהצלחה! 🚗💨\n'
+                    'המודעה פורסמה בהצלחה גם ביד2 וגם בפייסבוק.',
+              ),
+            );
+            unawaited(
+              WhatsAppTextValidationService.instance.clearSenderState(
+                widget.whatsAppSenderKey!.trim(),
+              ),
+            );
+          } else {
+            unawaited(
+              WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+                senderKey: widget.whatsAppSenderKey!.trim(),
+                message: 'פרסום המודעה בפייסבוק מרקטפלייס נכשל.',
+              ),
+            );
+          }
+        }
       },
     );
 
@@ -239,7 +293,13 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: _isComplete || _hasError,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        debugPrint('[FB-Screen] Back navigation prevented during active automation');
+      },
+      child: Scaffold(
       body: Stack(
         children: [
           // WebView
@@ -406,7 +466,8 @@ class _FacebookScreenState extends State<FacebookScreen> {
             ),
         ],
       ),
-    );
+    ),
+  );
   }
 
   // ── Status bar ────────────────────────────────────────────────────────────

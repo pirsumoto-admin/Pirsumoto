@@ -22,6 +22,7 @@ class VehiclePublishData {
   final Map<String, String> warrantyDurations;
   final List<String> treatments;
   final List<String> services;
+  final String description;
 
   const VehiclePublishData({
     required this.licenseNumber,
@@ -47,7 +48,62 @@ class VehiclePublishData {
     this.warrantyDurations = const {},
     this.treatments = const [],
     this.services = const [],
+    this.description = '',
   });
+
+  VehiclePublishData copyWith({
+    String? licenseNumber,
+    String? color,
+    String? shade,
+    String? hand,
+    String? currentOwnership,
+    String? previousOwnership,
+    String? kilometers,
+    String? month,
+    String? price,
+    String? city,
+    bool? handicapped,
+    bool? noTest,
+    List<String>? images,
+    String? maker,
+    String? model,
+    String? year,
+    String? fuelType,
+    String? gear,
+    String? vehicleCondition,
+    List<String>? warranties,
+    Map<String, String>? warrantyDurations,
+    List<String>? treatments,
+    List<String>? services,
+    String? description,
+  }) {
+    return VehiclePublishData(
+      licenseNumber: licenseNumber ?? this.licenseNumber,
+      color: color ?? this.color,
+      shade: shade ?? this.shade,
+      hand: hand ?? this.hand,
+      currentOwnership: currentOwnership ?? this.currentOwnership,
+      previousOwnership: previousOwnership ?? this.previousOwnership,
+      kilometers: kilometers ?? this.kilometers,
+      month: month ?? this.month,
+      price: price ?? this.price,
+      city: city ?? this.city,
+      handicapped: handicapped ?? this.handicapped,
+      noTest: noTest ?? this.noTest,
+      images: images ?? this.images,
+      maker: maker ?? this.maker,
+      model: model ?? this.model,
+      year: year ?? this.year,
+      fuelType: fuelType ?? this.fuelType,
+      gear: gear ?? this.gear,
+      vehicleCondition: vehicleCondition ?? this.vehicleCondition,
+      warranties: warranties ?? this.warranties,
+      warrantyDurations: warrantyDurations ?? this.warrantyDurations,
+      treatments: treatments ?? this.treatments,
+      services: services ?? this.services,
+      description: description ?? this.description,
+    );
+  }
 
   /// Maps a numeric or plain hand value to Hebrew text for Yad2.
   static String handToHebrew(String hand) {

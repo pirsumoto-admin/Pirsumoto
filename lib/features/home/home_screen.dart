@@ -34,6 +34,18 @@ import '../../services/yad2_automation_service.dart';
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
+  // ===========================================================================
+  // DEBUG PARAMETERS
+  // ===========================================================================
+  /// Debug flag to disable the WhatsApp listener and background bridge.
+  /// Set to true to disable WhatsApp listening, false to enable.
+  static bool debugDisableWhatsAppListener = true;
+
+  /// Debug flag to select the target platform for the "פרסום" (Publish) button:
+  /// true  => Facebook automation directly (FacebookScreen)
+  /// false => Start in Yad2 and immediately chain to Facebook when done (Yad2Screen -> FacebookScreen)
+  static bool debugMapPublishToFacebook = false;
+
   @override
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
@@ -52,6 +64,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    if (HomeScreen.debugDisableWhatsAppListener) {
+      WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // _checkGemmaModel();
     });
@@ -341,6 +356,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _handicappedController = ValueNotifier<bool>(false);
   final _noTestController = ValueNotifier<bool>(false);
   final _vehicleConditionController = TextEditingController();
+  final _makerController = TextEditingController();
+  final _modelController = TextEditingController();
+  final _yearController = TextEditingController();
+  final _fuelTypeController = TextEditingController();
+  final _gearController = TextEditingController();
   final List<String> _conditions = ['מצוין', 'טוב מאוד', 'טוב', 'סביר', 'גרוע'];
   int? _kilometerTestAharon;
 
@@ -386,6 +406,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   bool _isPublishing = false;
   bool _useGemmaAutomation = true; // Use Gemma Automation for testing
 
+  /// Debug parameters (initialized from HomeScreen static defaults, dynamically toggleable)
+  late bool _disableWhatsAppListener = HomeScreen.debugDisableWhatsAppListener;
+  late bool _mapPublishToFacebook = HomeScreen.debugMapPublishToFacebook;
+
   @override
   void initState() {
     super.initState();
@@ -394,6 +418,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _handicappedController.value = false;
     _noTestController.value = false;
     _vehicleConditionController.text = 'טוב';
+
+    if (_disableWhatsAppListener) {
+      WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
+    }
   }
 
   @override
@@ -411,6 +439,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _handicappedController.dispose();
     _noTestController.dispose();
     _vehicleConditionController.dispose();
+    _makerController.dispose();
+    _modelController.dispose();
+    _yearController.dispose();
+    _fuelTypeController.dispose();
+    _gearController.dispose();
     super.dispose();
   }
 
@@ -435,6 +468,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _handicappedController.value = s.handicapped == 'כן';
     _vehicleConditionController.text =
         s.vehicleCondition.isNotEmpty ? s.vehicleCondition : 'טוב';
+    _makerController.text = s.maker;
+    _modelController.text = s.model;
+    _yearController.text = s.year;
+    _fuelTypeController.text = s.fuelType;
+    _gearController.text = s.gear;
   }
 
   void _syncControllersFromAIData(Map<String, dynamic> data) {
@@ -509,6 +547,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _handicappedController.value = false;
     _noTestController.value = false;
     _vehicleConditionController.text = 'טוב';
+    _makerController.clear();
+    _modelController.clear();
+    _yearController.clear();
+    _fuelTypeController.clear();
+    _gearController.clear();
 
     setState(() => _isFetchingVehicle = true);
 
@@ -543,10 +586,61 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
               '';
           final year = data['shnat_yitzur']?.toString() ?? '';
           final fuelType = data['sug_delek_nm']?.toString() ?? '';
+          _makerController.text = maker;
+          _modelController.text = model;
+          _yearController.text = year;
+          _fuelTypeController.text = fuelType;
           notifier.updateField('maker', maker);
           notifier.updateField('model', model);
           notifier.updateField('year', year);
           notifier.updateField('fuelType', fuelType);
+
+          // Fetch gear if available from model details dataset
+          final tozeret = data['tozeret_cd'];
+          final degemcd = data['degem_cd'];
+          final sug = data['sug_degem']?.toString() ?? '';
+          final degemNm = data['degem_nm']?.toString() ?? '';
+
+          final filtersObj = {
+            if (degemNm.isNotEmpty) 'degem_nm': degemNm,
+            if (tozeret != null) 'tozeret_cd': tozeret,
+            if (degemcd != null) 'degem_cd': degemcd,
+            if (sug.isNotEmpty) 'sug_degem': sug,
+            if (year.isNotEmpty) 'shnat_yitzur': int.tryParse(year) ?? year,
+          };
+
+          final urlGear =
+              'https://data.gov.il/api/3/action/datastore_search?resource_id=142afde2-6228-49f9-8a29-9b6c3a0cbe40&filters=${Uri.encodeComponent(jsonEncode(filtersObj))}';
+          try {
+            final responseGear = await http.get(Uri.parse(urlGear));
+            if (responseGear.statusCode == 200) {
+              final decodedGear = jsonDecode(responseGear.body);
+              final resultGear = decodedGear['result'];
+              final recordsGear =
+                  resultGear != null && resultGear['records'] is List
+                      ? resultGear['records'] as List
+                      : [];
+              if (recordsGear.isNotEmpty) {
+                final dataGear = recordsGear.first;
+                final automatic = dataGear['automatic_ind'];
+                final gearVal =
+                    (automatic == 0 || automatic == "0")
+                        ? "שידור ידני"
+                        : "הילוכים אוטומטיים";
+                _gearController.text = gearVal;
+                notifier.updateField('gear', gearVal);
+              } else {
+                _gearController.text = 'הילוכים אוטומטיים';
+                notifier.updateField('gear', 'הילוכים אוטומטיים');
+              }
+            } else {
+              _gearController.text = 'הילוכים אוטומטיים';
+              notifier.updateField('gear', 'הילוכים אוטומטיים');
+            }
+          } catch (_) {
+            _gearController.text = 'הילוכים אוטומטיים';
+            notifier.updateField('gear', 'הילוכים אוטומטיים');
+          }
 
           final fullColor = (data['tzeva_rechev']?.toString() ?? '').trim();
           if (fullColor.isNotEmpty) {
@@ -1551,11 +1645,28 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
       images: formState.images,
-      maker: formState.maker,
-      model: formState.model,
-      year: formState.year,
-      fuelType: formState.fuelType,
-      gear: formState.gear.isNotEmpty ? formState.gear : 'הילוכים אוטומטיים',
+      maker:
+          _makerController.text.isNotEmpty
+              ? _makerController.text
+              : formState.maker,
+      model:
+          _modelController.text.isNotEmpty
+              ? _modelController.text
+              : formState.model,
+      year:
+          _yearController.text.isNotEmpty
+              ? _yearController.text
+              : formState.year,
+      fuelType:
+          _fuelTypeController.text.isNotEmpty
+              ? _fuelTypeController.text
+              : formState.fuelType,
+      gear:
+          _gearController.text.isNotEmpty
+              ? _gearController.text
+              : (formState.gear.isNotEmpty
+                  ? formState.gear
+                  : 'הילוכים אוטומטיים'),
       vehicleCondition:
           _vehicleConditionController.text.isNotEmpty
               ? _vehicleConditionController.text
@@ -1566,15 +1677,24 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       services: services,
     );
 
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder:
-            (_) => Yad2Screen(
-              publishData: publishData,
-              useGemmaAutomation: _useGemmaAutomation,
-            ),
-      ),
-    );
+    // Route to Facebook or Yad2 automation based on debug parameter
+    if (_mapPublishToFacebook) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => FacebookScreen(publishData: publishData),
+        ),
+      );
+    } else {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder:
+              (_) => Yad2Screen(
+                publishData: publishData,
+                useGemmaAutomation: _useGemmaAutomation,
+              ),
+        ),
+      );
+    }
   }
 
   void _fillTestData() {
@@ -1592,8 +1712,21 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _noTestController.value = false;
     _vehicleConditionController.text = 'טוב';
 
-    ref.read(fp.formControllerProvider.notifier).updateFromAI({
+    // Populate user-requested test values
+    _makerController.text = 'ג׳ילי';
+    _modelController.text = 'גיאומטרי סי';
+    _yearController.text = '2022';
+    _fuelTypeController.text = 'חשמלי';
+    _gearController.text = 'הילוכים אוטומטיים';
+
+    final notifier = ref.read(fp.formControllerProvider.notifier);
+    notifier.updateFromAI({
       'license': '79674102',
+      'maker': 'ג׳ילי',
+      'model': 'גיאומטרי סי',
+      'year': '2022',
+      'fuelType': 'חשמלי',
+      'gear': 'הילוכים אוטומטיים',
       'color': 'כחול',
       'month': '11',
       'hand': 'יד שנייה',
@@ -1606,6 +1739,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       'vehicleCondition': 'טוב',
       'description': 'גוף נקי, ללא תאונות',
     });
+    notifier.updateField('maker', 'ג׳ילי');
+    notifier.updateField('model', 'גיאומטרי סי');
+    notifier.updateField('year', '2022');
+    notifier.updateField('fuelType', 'חשמלי');
+    notifier.updateField('gear', 'הילוכים אוטומטיים');
     setState(() => _modeSelected = true);
   }
 
@@ -1959,6 +2097,38 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             _conditions,
             onChanged: (val) => notifier.updateField('vehicleCondition', val),
           ),
+          _buildTextField(
+            'יצרן',
+            _makerController,
+            (v) => notifier.updateField('maker', v),
+            hintText: 'לדוגמה: ג׳ילי',
+          ),
+          _buildTextField(
+            'דגם',
+            _modelController,
+            (v) => notifier.updateField('model', v),
+            hintText: 'לדוגמה: גיאומטרי סי',
+          ),
+          _buildTextField(
+            'שנת ייצור',
+            _yearController,
+            (v) => notifier.updateField('year', v),
+            hintText: 'לדוגמה: 2022',
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          ),
+          _buildTextField(
+            'סוג דלק',
+            _fuelTypeController,
+            (v) => notifier.updateField('fuelType', v),
+            hintText: 'לדוגמה: חשמלי, בנזין',
+          ),
+          _buildTextField(
+            'תיבת הילוכים',
+            _gearController,
+            (v) => notifier.updateField('gear', v),
+            hintText: 'לדוגמה: הילוכים אוטומטיים, שידור ידני',
+          ),
 
           const SizedBox(height: 24),
 
@@ -2086,6 +2256,102 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
 
           const SizedBox(height: 32),
 
+          // Debug Parameters Card
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.purple.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.purple.withValues(alpha: 0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.bug_report,
+                      size: 18,
+                      color: Colors.purple,
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'פרמטרי בדיקה (Debug Parameters)',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.purple,
+                      ),
+                    ),
+                  ],
+                ),
+                const Divider(height: 16),
+                // WhatsApp Listener Switch
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text(
+                    'השבתת מאזין וואטסאפ (Disable WhatsApp)',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                  ),
+                  subtitle: Text(
+                    _disableWhatsAppListener
+                        ? 'מאזין וואטסאפ מושבת'
+                        : 'מאזין וואטסאפ פעיל',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color:
+                          _disableWhatsAppListener ? Colors.red : Colors.green,
+                    ),
+                  ),
+                  value: _disableWhatsAppListener,
+                  onChanged: (val) {
+                    setState(() {
+                      _disableWhatsAppListener = val;
+                      HomeScreen.debugDisableWhatsAppListener = val;
+                    });
+                    WhatsAppMessageBridgeService.instance.setListenerDisabled(
+                      val,
+                    );
+                  },
+                ),
+                // Publish Target Switch
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text(
+                    'יעד כפתור הפרסום (Publish Target)',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                  ),
+                  subtitle: Text(
+                    _mapPublishToFacebook ? 'פייסבוק (Facebook)' : 'יד2 (Yad2)',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color:
+                          _mapPublishToFacebook
+                              ? const Color(0xFF1877F2)
+                              : const Color(0xFFFF7700),
+                    ),
+                  ),
+                  value: _mapPublishToFacebook,
+                  activeThumbColor: const Color(0xFF1877F2),
+                  activeTrackColor: const Color(0xFF90CAF9),
+                  inactiveThumbColor: const Color(0xFFFF7700),
+                  inactiveTrackColor: const Color(0xFFFFCC80),
+                  onChanged: (val) {
+                    setState(() {
+                      _mapPublishToFacebook = val;
+                      HomeScreen.debugMapPublishToFacebook = val;
+                    });
+                  },
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
           // Test data preset button
           SizedBox(
             width: double.infinity,
@@ -2113,7 +2379,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             child: ElevatedButton(
               onPressed: _isPublishing ? null : _publishListing,
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF4CAF50),
+                backgroundColor:
+                    _mapPublishToFacebook
+                        ? const Color(0xFF1877F2)
+                        : const Color(0xFF4CAF50),
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
@@ -2126,13 +2395,26 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                         height: 20,
                         child: CircularProgressIndicator(color: Colors.white),
                       )
-                      : Text(
-                        'add_car.publish'.tr(),
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
+                      : Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            _mapPublishToFacebook ? Icons.share : Icons.publish,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _mapPublishToFacebook
+                                ? '${'add_car.publish'.tr()} (פייסבוק)'
+                                : '${'add_car.publish'.tr()} (יד2)',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
                       ),
             ),
           ),
@@ -2176,6 +2458,11 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                 _priceController.clear();
                 _handicappedController.value = false;
                 _noTestController.value = false;
+                _makerController.clear();
+                _modelController.clear();
+                _yearController.clear();
+                _fuelTypeController.clear();
+                _gearController.clear();
                 setState(() {
                   _modeSelected = false;
                   _hasSearchedSuccessfully = false;

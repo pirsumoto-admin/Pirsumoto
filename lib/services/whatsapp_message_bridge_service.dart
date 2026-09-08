@@ -9,6 +9,29 @@ class WhatsAppMessageBridgeService {
 
   static const instance = WhatsAppMessageBridgeService();
 
+  /// Global debug flag to disable the WhatsApp listener and daemon
+  static bool isListenerDisabled = false;
+
+  /// Enable or disable the WhatsApp listener and stop/start the background daemon accordingly.
+  Future<void> setListenerDisabled(bool disabled) async {
+    isListenerDisabled = disabled;
+    if (disabled) {
+      try {
+        await stop();
+      } catch (e) {
+        debugPrint('[WhatsAppMessageBridge] Error stopping daemon: $e');
+      }
+      debugPrint('[WhatsAppMessageBridge] WhatsApp bridge/listener DISABLED by debug parameter');
+    } else {
+      try {
+        await start();
+      } catch (e) {
+        debugPrint('[WhatsAppMessageBridge] Error starting daemon: $e');
+      }
+      debugPrint('[WhatsAppMessageBridge] WhatsApp bridge/listener ENABLED');
+    }
+  }
+
   static const MethodChannel _channel = MethodChannel(
     'com.pirsumoto/whatsapp_bridge',
   );
@@ -17,10 +40,13 @@ class WhatsAppMessageBridgeService {
   );
 
   Stream<WhatsAppBridgeEvent> get events {
-    if (!Platform.isAndroid) return const Stream.empty();
-    return _eventsChannel.receiveBroadcastStream().map((event) {
-      return WhatsAppBridgeEvent.fromMap(Map<dynamic, dynamic>.from(event));
-    });
+    if (!Platform.isAndroid || isListenerDisabled) return const Stream.empty();
+    return _eventsChannel
+        .receiveBroadcastStream()
+        .where((_) => !isListenerDisabled)
+        .map((event) {
+          return WhatsAppBridgeEvent.fromMap(Map<dynamic, dynamic>.from(event));
+        });
   }
 
   Future<bool> configure({
@@ -29,6 +55,10 @@ class WhatsAppMessageBridgeService {
     bool autoReplyEnabled = true,
     bool watchBusinessWhatsApp = true,
   }) async {
+    if (isListenerDisabled) {
+      debugPrint('[WhatsAppMessageBridge] configure() suppressed: isListenerDisabled=true');
+      return false;
+    }
     _assertAndroid();
     final ok = await _channel.invokeMethod<bool>('configure', {
       'backendUrl': backendUrl ?? '',
@@ -40,6 +70,10 @@ class WhatsAppMessageBridgeService {
   }
 
   Future<bool> start() async {
+    if (isListenerDisabled) {
+      debugPrint('[WhatsAppMessageBridge] start() suppressed: isListenerDisabled=true');
+      return false;
+    }
     _assertAndroid();
     return await _channel.invokeMethod<bool>('start') ?? false;
   }

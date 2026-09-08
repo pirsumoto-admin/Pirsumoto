@@ -359,9 +359,20 @@ class MainActivity : FlutterActivity() {
                     val target = call.argument<String>("target") ?: ""
                     val targetInstance = call.argument<Int>("targetInstance") ?: 1
                     val threshold = call.argument<Double>("threshold") ?: 0.82
+                    val preferEditable = call.argument<Boolean>("preferEditable") ?: false
 
                     val matches = service.findBestHebrewMatches(rootNode!!, target, threshold)
-                    if (matches.size >= targetInstance) {
+                    val candidateMatches = if (preferEditable) {
+                        val editables = matches.filter { it.node.isEditable || it.node.className?.toString()?.contains("EditText") == true }
+                        if (editables.isNotEmpty()) editables else matches
+                    } else {
+                        matches
+                    }
+                    if (candidateMatches.size >= targetInstance) {
+                        val match = candidateMatches[targetInstance - 1]
+                        val bounds = match.bounds
+                        result.success(mapOf("x" to bounds.centerX().toDouble(), "y" to bounds.centerY().toDouble()))
+                    } else if (matches.size >= targetInstance) {
                         val match = matches[targetInstance - 1]
                         val bounds = match.bounds
                         result.success(mapOf("x" to bounds.centerX().toDouble(), "y" to bounds.centerY().toDouble()))

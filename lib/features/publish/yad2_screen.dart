@@ -17,6 +17,7 @@ import '../../services/yad2_automation_service.dart';
 import '../../services/yad2_accessibility_automation_service_optimized.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:image_picker/image_picker.dart';
+import 'facebook_screen.dart';
 
 // Shadow AxTree extractor injected into the WebView on each observe() call.
 // Uses webview_flutter's JS channel: window.updateShadowTree.postMessage(json).
@@ -358,6 +359,59 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
   }
 
+  Future<void> _handleYad2SuccessAndTransitionToFacebook() async {
+    _automationService?.stop();
+    try {
+      await _controller.loadRequest(Uri.parse('about:blank'));
+    } catch (e) {
+      debugPrint('[Yad2Screen] Error resetting webview controller: $e');
+    }
+
+    if (widget.startedFromWhatsApp &&
+        widget.whatsAppSenderKey != null &&
+        widget.whatsAppSenderKey!.trim().isNotEmpty &&
+        Platform.isAndroid) {
+      try {
+        await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+          senderKey: widget.whatsAppSenderKey!.trim(),
+          message:
+              'פרסום המודעה ביד2 הושלם בהצלחה! 🎉\n'
+              'מתחיל כעת בפרסום המודעה בפייסבוק מרקטפלייס...',
+        );
+      } catch (e) {
+        debugPrint(
+            '[Yad2Screen] Failed to send WhatsApp transition message: $e');
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _automationComplete = true;
+        _automationError = false;
+        _statusMessage = 'הפרסום ביד2 הושלם! עובר לפייסבוק...';
+      });
+
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+
+      final desc = (_automationService?.extractedDescription as String?) ??
+          Yad2AccessibilityAutomationService.lastExtractedDescription;
+      final updatedPublishData = (desc != null && desc.trim().isNotEmpty)
+          ? widget.publishData.copyWith(description: desc.trim())
+          : widget.publishData;
+
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => FacebookScreen(
+            publishData: updatedPublishData,
+            startedFromWhatsApp: widget.startedFromWhatsApp,
+            whatsAppSenderKey: widget.whatsAppSenderKey,
+          ),
+        ),
+      );
+    }
+  }
+
   void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
     if (widget.useGemmaAutomation) {
       _automationService = Yad2AccessibilityAutomationService(
@@ -416,7 +470,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             });
           }
         },
-        onAutomationComplete: (success) {
+        onAutomationComplete: (success) async {
           if (!success) {
             unawaited(
               _notifyWhatsAppAutomationStopped(
@@ -424,23 +478,15 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
               ),
             );
-          } else {
-            _automationService?.stop();
-          }
-          if (mounted) {
-            setState(() {
-              _automationComplete = true;
-              _automationError = !success;
-              _statusMessage =
-                  success ? 'האוטומציה הושלמה בהצלחה!' : 'האוטומציה נכשלה';
-            });
-            if (success) {
-              Future.delayed(const Duration(seconds: 2), () {
-                if (mounted && Navigator.of(context).canPop()) {
-                  Navigator.of(context).pop(true);
-                }
+            if (mounted) {
+              setState(() {
+                _automationComplete = true;
+                _automationError = true;
+                _statusMessage = 'האוטומציה נכשלה';
               });
             }
+          } else {
+            await _handleYad2SuccessAndTransitionToFacebook();
           }
         },
         onFirstStepDetected: () {
@@ -519,35 +565,31 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onAutomationComplete: (success) async {
-          _automationService?.stop();
-          if (widget.whatsAppSenderKey != null && widget.whatsAppSenderKey!.isNotEmpty) {
-            await WhatsAppTextValidationService.instance.clearSenderState(widget.whatsAppSenderKey!);
-          }
-          try {
-            await _controller.loadRequest(Uri.parse('about:blank'));
-          } catch (e) {
-            debugPrint('[Yad2Screen] Error resetting webview controller: $e');
-          }
-
           if (!success) {
+            _automationService?.stop();
+            if (widget.whatsAppSenderKey != null && widget.whatsAppSenderKey!.isNotEmpty) {
+              await WhatsAppTextValidationService.instance.clearSenderState(widget.whatsAppSenderKey!);
+            }
+            try {
+              await _controller.loadRequest(Uri.parse('about:blank'));
+            } catch (e) {
+              debugPrint('[Yad2Screen] Error resetting webview controller: $e');
+            }
             unawaited(
               _notifyWhatsAppAutomationStopped(
                 stepName: 'סיום האוטומציה',
                 error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
               ),
             );
-          }
-
-          if (mounted) {
-            setState(() {
-              _automationComplete = true;
-              _automationError = !success;
-              _statusMessage =
-                  success ? 'האוטומציה הושלמה בהצלחה!' : 'האוטומציה נכשלה';
-            });
-            if (success) {
-              Navigator.of(context).popUntil((route) => route.isFirst);
+            if (mounted) {
+              setState(() {
+                _automationComplete = true;
+                _automationError = true;
+                _statusMessage = 'האוטומציה נכשלה';
+              });
             }
+          } else {
+            await _handleYad2SuccessAndTransitionToFacebook();
           }
         },
         onFirstStepDetected: () {

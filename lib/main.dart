@@ -79,7 +79,11 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _bootstrapWhatsAppBridge() async {
-    if (!Platform.isAndroid || _whatsAppBootstrapRunning) return;
+    if (!Platform.isAndroid ||
+        _whatsAppBootstrapRunning ||
+        WhatsAppMessageBridgeService.isListenerDisabled) {
+      return;
+    }
 
     _whatsAppBootstrapRunning = true;
     try {
@@ -308,6 +312,7 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   }
 
   void _handleWhatsAppBridgeEvent(WhatsAppBridgeEvent event) async {
+    if (WhatsAppMessageBridgeService.isListenerDisabled) return;
     final senderKey = event.data['senderKey']?.toString() ?? '';
     final senderName = event.data['senderName']?.toString();
 
@@ -345,7 +350,7 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _consumePendingWhatsAppAutoPublish() async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid || WhatsAppMessageBridgeService.isListenerDisabled) return;
     try {
       final vehicleData =
           await WhatsAppMessageBridgeService.instance
