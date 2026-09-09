@@ -39,7 +39,7 @@ class HomeScreen extends ConsumerStatefulWidget {
   // ===========================================================================
   /// Debug flag to disable the WhatsApp listener and background bridge.
   /// Set to true to disable WhatsApp listening, false to enable.
-  static bool debugDisableWhatsAppListener = true;
+  static bool debugDisableWhatsAppListener = false;
 
   /// Debug flag to select the target platform for the "פרסום" (Publish) button:
   /// true  => Facebook automation directly (FacebookScreen)

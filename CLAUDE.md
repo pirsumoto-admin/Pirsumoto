@@ -33,9 +33,8 @@ flutter test
 flutter test test/widget_test.dart
 
 # Platform builds
-flutter build android
-flutter build ios
-flutter build web
+flutter build apk --release
+./scripts/deploy_release.sh -l    # Build release APK, install on device, and launch
 ```
 
 ## Architecture
