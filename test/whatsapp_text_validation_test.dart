@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pirsumoto/services/whatsapp_text_validation_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -766,6 +767,405 @@ void main() {
 
         expect(state, isEmpty);
         expect(replies.single, contains('שלח תחילה מספר רישוי'));
+      },
+    );
+  });
+
+  group('Agentic Assistant, Continuous Persistence, and Republishing Tests', () {
+    test(
+      'continuously saves user vehicle input and preserves it across cancellation',
+      () async {
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+        const sender = 'persist_sender_1';
+
+        // 1. Start session with license plate
+        await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: sender,
+          timestamp: 1000,
+        );
+
+        // Check that last_vehicle already has license plate and gov data
+        var lastVehicle = await service.loadLastVehicle(sender);
+        expect(lastVehicle['license_plate'], equals('12345678'));
+        expect(lastVehicle['maker'], equals('מאזדה'));
+
+        // 2. User inputs km and price
+        await service.handleIncomingTextMessage(
+          text: 'ק"מ 105000, מחיר 48000, יד 1',
+          senderKey: sender,
+          timestamp: 2000,
+        );
+
+        lastVehicle = await service.loadLastVehicle(sender);
+        expect(lastVehicle['km'], equals('105000'));
+        expect(lastVehicle['price'], equals('48000'));
+        expect(lastVehicle['hand'], equals('1'));
+
+        // 3. User cancels the session
+        await service.handleIncomingTextMessage(
+          text: 'ביטול',
+          senderKey: sender,
+          timestamp: 3000,
+        );
+
+        // Active session state must be wiped
+        final activeState = await service.loadSenderState(sender);
+        expect(activeState, isEmpty);
+
+        // BUT last_vehicle must still be intact with all saved inputs
+        final preservedVehicle = await service.loadLastVehicle(sender);
+        expect(preservedVehicle['license_plate'], equals('12345678'));
+        expect(preservedVehicle['km'], equals('105000'));
+        expect(preservedVehicle['price'], equals('48000'));
+        expect(preservedVehicle['hand'], equals('1'));
+        expect(preservedVehicle['maker'], equals('מאזדה'));
+      },
+    );
+
+    test(
+      'republishes saved car using literal command when session is idle',
+      () async {
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+        const sender = 'republish_sender_1';
+
+        // Pre-seed a saved vehicle with all Yad2 required fields
+        await service.saveLastVehicle(sender, {
+          'license_plate': '12345678',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2018',
+          'color': 'כחול',
+          'km': '110000',
+          'price': '50000',
+          'hand': '1',
+          'month': '5',
+          'test_month': '6',
+          'test_year': '2027',
+          'current_ownership': 'פרטי',
+          'previous_ownership': 'פרטי',
+        });
+
+        // Ensure session is idle
+        await service.clearSenderState(sender);
+        expect(await service.loadSenderState(sender), isEmpty);
+
+        // Send literal republish command
+        final restoredState = await service.handleIncomingTextMessage(
+          text: 'פרסם שוב',
+          senderKey: sender,
+          timestamp: 5000,
+        );
+
+        expect(restoredState, isNotNull);
+        expect(restoredState?['license_plate'], equals('12345678'));
+        expect(restoredState?['km'], equals('110000'));
+        expect(restoredState?['price'], equals('50000'));
+        expect(restoredState?['session_status'], equals('ready_for_images'));
+        expect(replies.last, contains('שחזרתי את פרטי הרכב'));
+      },
+    );
+
+    test(
+      'agentic AI restores saved car and overrides updated price when user asks to republish',
+      () async {
+        final replies = <String>[];
+        const sender = 'agentic_republish_sender';
+
+        final service = WhatsAppTextValidationService(
+          vehicleDataFetcher: (license) async => {
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+          },
+          kilometerHistoryFetcher: (_) async => 90000,
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+          aiTurnProcessor: (requestData) async {
+            final msg = requestData['current_message']?.toString() ?? '';
+            if (msg.contains('republish') || msg.contains('שוב')) {
+              return const AiTurnResult(
+                intent: 'republish_last',
+                shouldRepublish: true,
+                extractedFields: {'price': '42000'},
+                assistantReply:
+                    'שחזרתי את פרטי הרכב שלך ועדכנתי את המחיר ל-42,000 ש"ח! אפשר לשלוח תמונות כדי לפרסם.',
+              );
+            }
+            return null;
+          },
+        );
+
+        // Pre-seed saved vehicle
+        await service.saveLastVehicle(sender, {
+          'license_plate': '12345678',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2018',
+          'color': 'כחול',
+          'km': '110000',
+          'price': '50000',
+          'hand': '1',
+          'current_ownership': 'פרטי',
+        });
+        await service.clearSenderState(sender);
+
+        // User asks to republish using agentic phrase
+        final newState = await service.handleIncomingTextMessage(
+          text: 'use my last updated data to republish a car with price 42000',
+          senderKey: sender,
+          timestamp: 6000,
+        );
+
+        expect(newState, isNotNull);
+        expect(newState?['license_plate'], equals('12345678'));
+        expect(newState?['price'], equals('42000')); // Overridden!
+        expect(newState?['km'], equals('110000'));
+        expect(
+          replies.last,
+          contains('שחזרתי את פרטי הרכב שלך ועדכנתי את המחיר ל-42,000 ש"ח!'),
+        );
+      },
+    );
+
+    test(
+      'provides conversational guidance for greeting when idle and no car saved',
+      () async {
+        final replies = <String>[];
+        const sender = 'greeting_sender';
+
+        final service = WhatsAppTextValidationService(
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+          aiTurnProcessor: (requestData) async {
+            return const AiTurnResult(
+              intent: 'greeting_or_help',
+              assistantReply:
+                  'שלום! אני כאן לעזור לך לפרסם את הרכב ביד2 ובפייסבוק. שלח לי את מספר הרישוי כדי שנתחיל.',
+            );
+          },
+        );
+
+        await service.clearSenderState(sender);
+        await service.clearLastVehicle(sender);
+
+        final state = await service.handleIncomingTextMessage(
+          text: 'שלום איך זה עובד?',
+          senderKey: sender,
+          timestamp: 7000,
+        );
+
+        expect(state, isEmpty);
+        expect(
+          replies.last,
+          contains(
+            'שלום! אני כאן לעזור לך לפרסם את הרכב ביד2 ובפייסבוק. שלח לי את מספר הרישוי כדי שנתחיל.',
+          ),
+        );
+      },
+    );
+
+    test(
+      'provides conversational assistant guidance during active session turns',
+      () async {
+        final replies = <String>[];
+        const sender = 'conversational_sender';
+
+        final service = WhatsAppTextValidationService(
+          vehicleDataFetcher: (license) async => {
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2018',
+            'color': 'כחול',
+          },
+          kilometerHistoryFetcher: (_) async => 90000,
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+          aiTurnProcessor: (requestData) async {
+            final msg = requestData['current_message']?.toString() ?? '';
+            if (msg.contains('120000')) {
+              return const AiTurnResult(
+                intent: 'update_details',
+                extractedFields: {'km': '120000'},
+                assistantReply:
+                    'קלטתי 120,000 ק"מ! מה המחיר המבוקש עבור הרכב?',
+              );
+            }
+            return null;
+          },
+        );
+
+        // Start session
+        await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: sender,
+          timestamp: 8000,
+        );
+
+        // User enters km
+        final updatedState = await service.handleIncomingTextMessage(
+          text: 'נסע בערך 120000',
+          senderKey: sender,
+          timestamp: 8500,
+        );
+
+        expect(updatedState?['km'], equals('120000'));
+        expect(
+          replies.last,
+          contains('קלטתי 120,000 ק"מ! מה המחיר המבוקש עבור הרכב?'),
+        );
+      },
+    );
+
+    test(
+      'informs user politely when republish is requested but no saved car exists in storage',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.clear();
+
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+        const sender = 'republish_no_saved_sender';
+
+        await service.clearSenderState(sender);
+        await service.clearLastVehicle(sender);
+
+        final state = await service.handleIncomingTextMessage(
+          text: 'תוכל לחזור על הפרסום הקודם',
+          senderKey: sender,
+          timestamp: 9000,
+        );
+
+        expect(state, isEmpty);
+        expect(
+          replies.last,
+          contains('לא נמצאו פרטי רכב שמורים מהעבר. שלח מספר רישוי'),
+        );
+      },
+    );
+
+    test(
+      'resumes interrupted publication after cancellation when user asks to continue from where they stopped',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.clear();
+
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+        const sender = 'resume_after_cancel_sender';
+
+        // 1. Initial vehicle setup
+        await service.saveLastVehicle(sender, {
+          'license_plate': '5211639',
+          'maker': 'סיטרואן',
+          'model': 'C4 CACTUS',
+          'year': '2016',
+          'km': '90000',
+          'price': '18000',
+          'color': 'חום',
+          'month': '11',
+          'test_month': '11',
+          'test_year': '2026',
+          'hand': '2',
+          'current_ownership': 'פרטי',
+          'previous_ownership': 'פרטי',
+          'vehicle_condition': 'טוב',
+        });
+
+        // 2. User sends the exact Hebrew phrase from WhatsApp chat
+        final restoredState = await service.handleIncomingTextMessage(
+          text: 'תוכל לחזור להמשיך פרסום מהיכן שהפסקתי פעם קודמת',
+          senderKey: sender,
+          timestamp: 9500,
+        );
+
+        expect(restoredState, isNotNull);
+        expect(restoredState!['license_plate'], equals('5211639'));
+        expect(restoredState['km'], equals('90000'));
+        expect(restoredState['price'], equals('18000'));
+        expect(restoredState['session_status'], equals('ready_for_images'));
+        expect(
+          replies.last,
+          contains('שחזרתי את פרטי הרכב (סיטרואן C4 CACTUS 2016, רישוי 5211639)'),
+        );
+      },
+    );
+
+    test(
+      'strictly enforces image count: blocks when fewer images, caps when more images',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.clear();
+
+        final replies = <String>[];
+        final service = _buildService(replies: replies);
+        const sender = 'image_constraint_sender';
+
+        // 1. Ready vehicle with 2 expected images
+        await service.saveSenderState(sender, {
+          'license_plate': '5211639',
+          'maker': 'סיטרואן',
+          'model': 'C4 CACTUS',
+          'year': '2016',
+          'km': '95000',
+          'price': '18000',
+          'color': 'חום',
+          'month': '11',
+          'test_month': '11',
+          'test_year': '2026',
+          'hand': '2',
+          'current_ownership': 'פרטית',
+          'previous_ownership': 'פרטית',
+          'vehicle_condition': 'טוב',
+          'image_expected_count': '2',
+          'session_status': 'waiting_for_images',
+          'image_paths': jsonEncode(['/path/photo1.jpg']),
+          'image_received_count': '1',
+        });
+
+        // 2. User attempts to trigger publish with 0 when only 1 of 2 images provided
+        final stateUnder = await service.handleIncomingTextMessage(
+          text: '0',
+          senderKey: sender,
+          timestamp: 10000,
+        );
+
+        expect(stateUnder?['session_status'], equals('waiting_for_images'));
+        expect(replies.last, contains('עדיין חסרות 1 תמונות'));
+        expect(replies.last, contains('חובה להעלות בדיוק 2 תמונות'));
+
+        // 3. Four images arrive for a target of 2
+        await service.saveSenderState(sender, {
+          ...?stateUnder,
+          'image_paths': jsonEncode([
+            '/path/photo1.jpg',
+            '/path/photo2.jpg',
+            '/path/photo3.jpg',
+            '/path/photo4.jpg',
+          ]),
+          'image_received_count': '4',
+        });
+
+        // 4. Trigger publish
+        final stateCapped = await service.handleIncomingTextMessage(
+          text: '0',
+          senderKey: sender,
+          timestamp: 11000,
+        );
+
+        expect(stateCapped?['session_status'], equals('publishing'));
+        final paths = List<String>.from(jsonDecode(stateCapped!['image_paths']!));
+        expect(paths.length, equals(2));
+        expect(paths, equals(['/path/photo3.jpg', '/path/photo4.jpg']));
       },
     );
   });

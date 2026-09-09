@@ -2295,8 +2295,15 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> _injectImagesIfAny() async {
-    final images = formData.images;
+    var images = formData.images;
     if (images == null || images.isEmpty) return false;
+    final expectedCount = formData.expectedImageCount;
+    if (expectedCount != null && expectedCount == 0) {
+      return false;
+    }
+    if (expectedCount != null && expectedCount > 0 && images.length > expectedCount) {
+      images = images.sublist(images.length - expectedCount.toInt());
+    }
     final base64Files = <Map<String, String>>[];
     for (var i = 0; i < images.length; i++) {
       final path = images[i];

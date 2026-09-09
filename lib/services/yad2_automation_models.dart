@@ -23,6 +23,7 @@ class VehiclePublishData {
   final List<String> treatments;
   final List<String> services;
   final String description;
+  final int? expectedImageCount;
 
   const VehiclePublishData({
     required this.licenseNumber,
@@ -49,6 +50,7 @@ class VehiclePublishData {
     this.treatments = const [],
     this.services = const [],
     this.description = '',
+    this.expectedImageCount,
   });
 
   VehiclePublishData copyWith({
@@ -76,6 +78,7 @@ class VehiclePublishData {
     List<String>? treatments,
     List<String>? services,
     String? description,
+    int? expectedImageCount,
   }) {
     return VehiclePublishData(
       licenseNumber: licenseNumber ?? this.licenseNumber,
@@ -102,6 +105,7 @@ class VehiclePublishData {
       treatments: treatments ?? this.treatments,
       services: services ?? this.services,
       description: description ?? this.description,
+      expectedImageCount: expectedImageCount ?? this.expectedImageCount,
     );
   }
 

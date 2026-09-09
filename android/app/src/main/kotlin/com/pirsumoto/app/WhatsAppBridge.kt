@@ -2551,9 +2551,26 @@ object WhatsAppLocalInventoryValidator {
             )
         }
 
+        // Strong constraint: never upload more than expected count
+        if (expectedCount > 0 && imagePaths.size >= expectedCount) {
+            return ValidationResult(
+                replyHebrew = null,
+                missingFieldKeys = emptyList(),
+                updatedFieldKeys = emptyList(),
+                readyToPublish = true,
+                autoPublishRequested = false,
+                vehicleData = vehicleData(state)
+            )
+        }
+
         imagePaths.add(imageFile.absolutePath)
-        val receivedCount = imagePaths.size
-        state[KEY_IMAGE_PATHS] = encodeImagePaths(imagePaths)
+        val finalPaths = if (expectedCount > 0 && imagePaths.size > expectedCount) {
+            imagePaths.takeLast(expectedCount)
+        } else {
+            imagePaths
+        }
+        val receivedCount = finalPaths.size
+        state[KEY_IMAGE_PATHS] = encodeImagePaths(finalPaths)
         state[KEY_IMAGE_RECEIVED_COUNT] = receivedCount.toString()
         saveState(context, senderKey, state)
 
@@ -2579,7 +2596,7 @@ object WhatsAppLocalInventoryValidator {
             }
         } else {
             ValidationResult(
-                replyHebrew = "התקבלה תמונה ($receivedCount).\nשלח תמונות נוספות, או שלח 0 כדי להתחיל פרסום (לביטול השב ביטול).",
+                replyHebrew = null,
                 missingFieldKeys = emptyList(),
                 updatedFieldKeys = listOf(KEY_IMAGE_PATHS, KEY_IMAGE_RECEIVED_COUNT),
                 readyToPublish = true,
@@ -2609,57 +2626,19 @@ object WhatsAppLocalInventoryValidator {
             )
         }
 
-        val existingPaths = parseImagePaths(state[KEY_IMAGE_PATHS])
-        val recentFiles = WhatsAppBridgeProcessor.findAllRecentImageFiles(
-            targetTimestamp = System.currentTimeMillis(),
-            expectedCount = plannedImageCount,
-            maxWindowMs = 30 * 60 * 1000L
-        )
-
-        val combinedPaths = mutableListOf<String>()
-        val existingNames = mutableSetOf<String>()
-
-        existingPaths.forEach { path ->
-            val name = File(path).name.lowercase(Locale.getDefault())
-            if (!existingNames.contains(name)) {
-                existingNames.add(name)
-                combinedPaths.add(path)
-            }
-        }
-
-        recentFiles.forEach { file: File ->
-            val name = file.name.lowercase(Locale.getDefault())
-            if (!existingNames.contains(name)) {
-                existingNames.add(name)
-                combinedPaths.add(file.absolutePath)
-            }
-        }
-
-        val finalPaths = combinedPaths.take(plannedImageCount)
-        val receivedCount = finalPaths.size
-        state[KEY_IMAGE_PATHS] = encodeImagePaths(finalPaths)
-        state[KEY_IMAGE_RECEIVED_COUNT] = receivedCount.toString()
+        // Strong constraint: reset image paths and wait for exactly plannedImageCount images from WhatsApp
+        state[KEY_IMAGE_PATHS] = encodeImagePaths(emptyList())
+        state[KEY_IMAGE_RECEIVED_COUNT] = "0"
         saveState(context, senderKey, state)
 
-        return if (receivedCount >= plannedImageCount) {
-            ValidationResult(
-                replyHebrew = "התקבלו $receivedCount מתוך $plannedImageCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול שלח 1",
-                missingFieldKeys = emptyList(),
-                updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT, KEY_IMAGE_PATHS),
-                readyToPublish = true,
-                autoPublishRequested = false,
-                vehicleData = vehicleData(state)
-            )
-        } else {
-            ValidationResult(
-                replyHebrew = "ממתין להעלאת $plannedImageCount תמונות",
-                missingFieldKeys = emptyList(),
-                updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT, KEY_IMAGE_PATHS),
-                readyToPublish = true,
-                autoPublishRequested = false,
-                vehicleData = vehicleData(state)
-            )
-        }
+        return ValidationResult(
+            replyHebrew = "ממתין להעלאת $plannedImageCount תמונות",
+            missingFieldKeys = emptyList(),
+            updatedFieldKeys = listOf(KEY_IMAGE_EXPECTED_COUNT, KEY_IMAGE_RECEIVED_COUNT, KEY_IMAGE_PATHS),
+            readyToPublish = true,
+            autoPublishRequested = false,
+            vehicleData = vehicleData(state)
+        )
     }
 
     private fun requestAutoPublish(
@@ -2679,6 +2658,26 @@ object WhatsAppLocalInventoryValidator {
                 autoPublishRequested = false,
                 vehicleData = vehicleData(state)
             )
+        }
+
+        val expected = state[KEY_IMAGE_EXPECTED_COUNT]?.toIntOrNull() ?: 0
+        var currentImages = parseImagePaths(state[KEY_IMAGE_PATHS])
+        if (expected > 0) {
+            if (currentImages.size < expected) {
+                return ValidationResult(
+                    replyHebrew = "עדיין חסרות ${expected - currentImages.size} תמונות. התקבלו ${currentImages.size} מתוך $expected. יש להעלות בדיוק $expected תמונות.",
+                    missingFieldKeys = emptyList(),
+                    updatedFieldKeys = emptyList(),
+                    readyToPublish = false,
+                    autoPublishRequested = false,
+                    vehicleData = vehicleData(state)
+                )
+            } else if (currentImages.size > expected) {
+                currentImages = currentImages.takeLast(expected).toMutableList()
+                state[KEY_IMAGE_PATHS] = encodeImagePaths(currentImages)
+                state[KEY_IMAGE_RECEIVED_COUNT] = expected.toString()
+                saveState(context, senderKey, state)
+            }
         }
 
         state[KEY_AUTO_PUBLISH_STARTED] = "true"

@@ -435,9 +435,10 @@ class FacebookAutomationService {
     await controller.runJavaScript('''
       (function(value) {
         var el = document.activeElement;
-        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) {
+        var isEditable = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox');
+        if (!isEditable) {
           var inputs = document.querySelectorAll(
-            'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'
+            'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, [contenteditable="true"], [role="textbox"]'
           );
           for (var i = 0; i < inputs.length; i++) {
             var rect = inputs[i].getBoundingClientRect();
@@ -447,12 +448,22 @@ class FacebookAutomationService {
             }
           }
         }
-        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return false;
+        if (!el) return false;
         el.focus();
-        var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-        var setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-        if (setter) setter.call(el, value);
-        else el.value = value;
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+          var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+          var setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
+          if (setter) setter.call(el, value);
+          else el.value = value;
+        } else {
+          try {
+            document.execCommand('selectAll', false, null);
+            document.execCommand('insertText', false, value);
+          } catch(e) {}
+          if (!el.innerText || el.innerText.trim().length === 0) {
+            el.innerText = value;
+          }
+        }
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
@@ -1337,19 +1348,27 @@ class FacebookAutomationService {
 
   // Phase 5 — Upload photos
   Future<void> _phaseUploadPhotos() async {
-    debugPrint('[FB-A11y] phaseUploadPhoto: ${formData.images == null}');
-    if (formData.images == null || formData.images!.isEmpty) {
-      debugPrint('[FB-A11y] No images uploaded. Skipping upload photos phase.');
+    final expectedCount = formData.expectedImageCount;
+    var imageList = formData.images ?? const <String>[];
+    if (expectedCount != null && expectedCount == 0) {
+      imageList = const <String>[];
+    } else if (expectedCount != null && expectedCount > 0 && imageList.length > expectedCount) {
+      imageList = imageList.sublist(imageList.length - expectedCount);
+    }
+
+    debugPrint('[FB-A11y] phaseUploadPhoto: count=${imageList.length} (expected: $expectedCount)');
+    if (imageList.isEmpty) {
+      debugPrint('[FB-A11y] No images to upload. Skipping upload photos phase.');
       _handlePhaseComplete(FacebookAutomationPhase.uploadPhotos);
       return;
     }
 
     debugPrint(
-      '[FB-A11y] Converting ${formData.images!.length} images to base64...',
+      '[FB-A11y] Converting ${imageList.length} images to base64...',
     );
     final List<Map<String, String>> base64Files = [];
-    for (int i = 0; i < formData.images!.length; i++) {
-      final path = formData.images![i];
+    for (int i = 0; i < imageList.length; i++) {
+      final path = imageList[i];
       if (path.isEmpty) continue;
       try {
         final file = File(path);
@@ -2006,51 +2025,138 @@ class FacebookAutomationService {
     debugPrint('[FB-A11y] EnterDescription (length: ${descriptionText.length}):\n$descriptionText');
 
     await toolLogDomFormElements(tag: 'FB-Description-DOM');
-    await toolScrollElementIntoViewViaDom(['תיאור', 'Description']);
-    await Future.delayed(const Duration(milliseconds: 500));
 
-    // 1. Enter text via DOM directly
-    bool enteredViaDom = await toolEnterTextInputViaDom(
-      selectors: [
-        'textarea[aria-label*="Description" i]',
-        'textarea[aria-label*="תיאור" i]',
-        'textarea[placeholder*="Description" i]',
-        'textarea[placeholder*="תיאור" i]',
-        'div[aria-label*="Description" i]',
-        'div[aria-label*="תיאור" i]',
-        'textarea',
-      ],
-      text: descriptionText,
-    );
+    // 1. Try targeted DOM injection directly on the description field without blind scrolling up
+    bool enteredViaDom = await _enterDescriptionViaDom(descriptionText);
 
-    // 2. Fallback via A11y if DOM entry did not match
+    // 2. Fallback via A11y: Description is below Transmission, so scroll down if not entered
     bool enteredA11y = false;
     if (!enteredViaDom) {
-      bool tapped = await toolFindElementAndTap(
-        'תיאור|Description',
-        preferEditable: true,
-      );
-      if (!tapped) {
-        tapped = await toolTapNodeAfter('תיאור') ||
-            await toolTapNodeAfter('Description');
-      }
-      if (tapped) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        enteredA11y = await toolEnterTextAtFocused(descriptionText);
-        if (!enteredA11y) {
-          await toolEnterTextAtFocusedJs(descriptionText);
-          enteredA11y = true;
+      debugPrint('[FB-A11y] DOM description injection failed or not found. Trying A11y fallback...');
+      await _scrollDown(0.25);
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      // Try DOM again after scrolling down
+      enteredViaDom = await _enterDescriptionViaDom(descriptionText);
+
+      if (!enteredViaDom) {
+        bool tapped = await toolTapNodeAfter('תיאור', offset: 1) ||
+            await toolTapNodeAfter('Description', offset: 1) ||
+            await toolFindElementAndTap(
+              'תיאור|Description',
+              preferEditable: true,
+            );
+        if (tapped) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          enteredA11y = await toolEnterTextAtFocused(descriptionText);
+          if (!enteredA11y) {
+            await toolEnterTextAtFocusedJs(descriptionText);
+            enteredA11y = true;
+          }
         }
       }
     }
 
     if (!enteredViaDom && !enteredA11y) {
       debugPrint('[FB-A11y] Description field not found, continuing');
+    } else {
+      debugPrint('[FB-A11y] Description successfully entered! (DOM: $enteredViaDom, A11y: $enteredA11y)');
     }
 
     await Future.delayed(const Duration(milliseconds: 500));
     await toolDismissKeyboardAndBlur();
     _handlePhaseComplete(FacebookAutomationPhase.enterDescription);
+  }
+
+  Future<bool> _enterDescriptionViaDom(String text) async {
+    try {
+      final jsonVal = jsonEncode(text);
+      final raw = await controller.runJavaScriptReturningResult('''
+        (function() {
+          var val = $jsonVal;
+
+          var selectors = [
+            'textarea[name="description"]',
+            'textarea[id*="description" i]',
+            'textarea[aria-label*="description" i]',
+            'textarea[aria-label*="תיאור" i]',
+            'textarea[placeholder*="description" i]',
+            'textarea[placeholder*="תיאור" i]',
+            'div[role="textbox"][aria-label*="description" i]',
+            'div[role="textbox"][aria-label*="תיאור" i]',
+            'div[contenteditable="true"][aria-label*="description" i]',
+            'div[contenteditable="true"][aria-label*="תיאור" i]',
+            'div[contenteditable="true"]',
+            'textarea'
+          ];
+
+          var target = null;
+          for (var i = 0; i < selectors.length; i++) {
+            var el = document.querySelector(selectors[i]);
+            if (el && el.offsetParent !== null) {
+              target = el;
+              break;
+            }
+          }
+
+          if (!target) {
+            var allLabels = Array.from(document.querySelectorAll('label, div, span'));
+            for (var j = 0; j < allLabels.length; j++) {
+              var l = allLabels[j];
+              var t = (l.innerText || l.textContent || '').trim().toLowerCase();
+              if (t === 'תיאור' || t === 'description' || t.indexOf('תיאור') === 0) {
+                var inp = l.querySelector('textarea, div[contenteditable="true"], div[role="textbox"], input') ||
+                          (l.parentElement && l.parentElement.querySelector('textarea, div[contenteditable="true"], div[role="textbox"], input'));
+                if (inp) {
+                  target = inp;
+                  break;
+                }
+              }
+            }
+          }
+
+          if (!target) return 'not_found';
+
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          target.focus();
+          try { target.click(); } catch(e) {}
+
+          var isTextArea = target.tagName.toLowerCase() === 'textarea' || target.tagName.toLowerCase() === 'input';
+          if (isTextArea) {
+            var proto = target instanceof HTMLTextAreaElement 
+                ? window.HTMLTextAreaElement.prototype 
+                : window.HTMLInputElement.prototype;
+            var setDesc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (setDesc && setDesc.set) {
+              setDesc.set.call(target, val);
+            } else {
+              target.value = val;
+            }
+            target.dispatchEvent(new InputEvent('input', { bubbles: true, data: val, inputType: 'insertText' }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            target.focus();
+            try {
+              document.execCommand('selectAll', false, null);
+              document.execCommand('insertText', false, val);
+            } catch(e) {}
+            if (!target.innerText || target.innerText.trim().length === 0) {
+              target.innerText = val;
+            }
+            target.dispatchEvent(new InputEvent('input', { bubbles: true, data: val, inputType: 'insertText' }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
+          var currentText = target.value || target.innerText || target.textContent || '';
+          return currentText.length > 0 ? 'ok' : 'empty';
+        })()
+      ''');
+      debugPrint('[FB-DOM] _enterDescriptionViaDom result: $raw');
+      return raw.toString().contains('ok');
+    } catch (e) {
+      debugPrint('[FB-DOM] _enterDescriptionViaDom error: $e');
+      return false;
+    }
   }
 
   // Phase 16 — Publish

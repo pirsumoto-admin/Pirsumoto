@@ -432,6 +432,26 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       data['color'],
     ], fallback: 'כחול');
     final whatsAppImages = _imagePathsFromVehicleData(data);
+    final expectedCount = int.tryParse(
+      data['image_expected_count'] ?? data['KEY_IMAGE_EXPECTED_COUNT'] ?? '',
+    );
+    final List<String> resolvedImages;
+    if (expectedCount != null && expectedCount == 0) {
+      resolvedImages = const <String>[];
+    } else if (whatsAppImages.isNotEmpty) {
+      resolvedImages = (expectedCount != null &&
+              expectedCount > 0 &&
+              whatsAppImages.length > expectedCount)
+          ? whatsAppImages.sublist(whatsAppImages.length - expectedCount)
+          : whatsAppImages;
+    } else if (expectedCount != null && expectedCount > 0) {
+      resolvedImages = (formState.images.length > expectedCount)
+          ? formState.images.sublist(formState.images.length - expectedCount)
+          : formState.images;
+    } else {
+      resolvedImages = formState.images;
+    }
+
     final publishData = VehiclePublishData(
       licenseNumber: _firstNonEmpty([formState.license, data['license_plate']]),
       color: color,
@@ -456,7 +476,7 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       price: _firstNonEmpty([formState.price, data['price']]),
       handicapped: false,
       noTest: false,
-      images: whatsAppImages.isNotEmpty ? whatsAppImages : formState.images,
+      images: resolvedImages,
       maker: _firstNonEmpty([formState.maker, data['maker']]),
       model: _firstNonEmpty([formState.model, data['model']]),
       year: _firstNonEmpty([formState.year, data['year']]),
@@ -473,6 +493,8 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       warrantyDurations: formState.warrantyDurations,
       treatments: formState.treatments,
       services: formState.services,
+      description: _firstNonEmpty([formState.description, data['description']]),
+      expectedImageCount: expectedCount,
     );
 
     navigator.push(
@@ -504,22 +526,29 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   List<String> _imagePathsFromVehicleData(Map<String, String> data) {
     final raw = data['image_paths']?.trim();
     if (raw == null || raw.isEmpty) return const [];
+    List<String> list = const [];
     try {
       final decoded = jsonDecode(raw);
       if (decoded is List) {
-        return decoded
+        list = decoded
             .map((value) => value?.toString().trim() ?? '')
             .where((value) => value.isNotEmpty)
             .toList();
       }
     } catch (_) {
-      return raw
+      list = raw
           .split('|')
           .map((value) => value.trim())
           .where((value) => value.isNotEmpty)
           .toList();
     }
-    return const [];
+    final expectedCount = int.tryParse(
+      data['image_expected_count'] ?? data['KEY_IMAGE_EXPECTED_COUNT'] ?? '',
+    );
+    if (expectedCount != null && expectedCount > 0 && list.length > expectedCount) {
+      list = list.sublist(list.length - expectedCount);
+    }
+    return list;
   }
 
   String? _testValue(Map<String, String> data) {
