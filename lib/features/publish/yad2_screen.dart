@@ -396,9 +396,21 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
       final desc = (_automationService?.extractedDescription as String?) ??
           Yad2AccessibilityAutomationService.lastExtractedDescription;
-      final updatedPublishData = (desc != null && desc.trim().isNotEmpty)
-          ? widget.publishData.copyWith(description: desc.trim())
-          : widget.publishData;
+      final hasValidExtractedDesc =
+          Yad2AccessibilityAutomationService.isValidExtractedDescription(desc);
+
+      final String finalDescription;
+      if (hasValidExtractedDesc) {
+        finalDescription = desc!.trim();
+      } else if (widget.publishData.description.trim().isNotEmpty) {
+        finalDescription = widget.publishData.description.trim();
+      } else {
+        finalDescription = '';
+      }
+
+      final updatedPublishData = widget.publishData.copyWith(
+        description: finalDescription,
+      );
 
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(

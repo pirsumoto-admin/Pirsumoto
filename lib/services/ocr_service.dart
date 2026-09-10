@@ -64,6 +64,19 @@ class OcrService {
     return _parseMultiWordResponse(response, words, targetInstance);
   }
 
+  /// Extracts full text from [imageBytes] using Google Cloud Vision API.
+  Future<String?> extractFullText(Uint8List imageBytes) async {
+    final base64Image = base64Encode(imageBytes);
+    final response = await _callVisionApi(base64Image);
+    if (response == null) return null;
+    final annotations = (response['responses'] as List?)
+        ?.firstOrNull?['textAnnotations'] as List?;
+    if (annotations != null && annotations.isNotEmpty) {
+      return (annotations[0] as Map)['description'] as String?;
+    }
+    return null;
+  }
+
   // ── API call ────────────────────────────────────────────────────────────────
 
   Future<Map<String, dynamic>?> _callVisionApi(String base64Image) async {

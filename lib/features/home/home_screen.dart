@@ -18,6 +18,7 @@ import '../../services/audio_service.dart';
 import '../../services/vehicle_data_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
 import '../../services/whatsapp_message_bridge_service.dart';
+import '../../services/agent_config_service.dart';
 import '../auth/auth_provider.dart';
 import '../listings/listings_screen.dart';
 import '../profile/profile_screen.dart';
@@ -332,19 +333,7 @@ class _HomeFormTab extends ConsumerStatefulWidget {
 class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _licenseController = TextEditingController();
   final _colorController = TextEditingController();
-  final List<String> _colors = [
-    'אדום',
-    'כחול',
-    'צהוב',
-    'אפור',
-    'לבן',
-    'שחור',
-    'סגול',
-    'ורוד',
-    'חום',
-    'ירוק',
-    'כתום',
-  ];
+  List<String> get _colors => AgentConfigService.instance.allowedColors;
   final _monthController = TextEditingController();
   final _testMonthController = TextEditingController();
   final _testYearController = TextEditingController();
@@ -361,7 +350,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _yearController = TextEditingController();
   final _fuelTypeController = TextEditingController();
   final _gearController = TextEditingController();
-  final List<String> _conditions = ['מצוין', 'טוב מאוד', 'טוב', 'סביר', 'גרוע'];
+  List<String> get _conditions => AgentConfigService.instance.allowedConditions;
   int? _kilometerTestAharon;
 
   final List<String> _months = List.generate(12, (i) => (i + 1).toString());
@@ -381,19 +370,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     'יד תשיעית',
     'יד עשירית',
   ];
-  final List<String> _ownerships = [
-    'פרטית',
-    'חברה',
-    'השכרה',
-    'ליסינג',
-    'מונית',
-    'לימוד נהיגה',
-    'ייבוא אישי',
-    'ייבוא מקביל',
-    'ממשלתי',
-    'או״ם',
-    'השכרה / החכר',
-  ];
+  List<String> get _ownerships => AgentConfigService.instance.allowedOwnerships;
   final List<String> _yesNo = ['לא', 'כן'];
 
   final ImagePicker _picker = ImagePicker();
@@ -716,7 +693,12 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                 if (kmVal != null) {
                   _kilometerTestAharon = int.tryParse(kmVal.toString());
                   if (_kilometerTestAharon != null) {
-                    final kmStr = _kilometerTestAharon.toString();
+                    final estimatedKm = _calculateEstimatedKm(
+                      rawKm: _kilometerTestAharon!,
+                      vehicleData:
+                          data is Map ? Map<String, dynamic>.from(data) : null,
+                    );
+                    final kmStr = estimatedKm.toString();
                     _kmController.text = kmStr;
                     notifier.updateField('km', kmStr);
                   }
@@ -778,6 +760,22 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     if (mounted) setState(() => _isFetchingVehicle = false);
   }
 
+  int _calculateEstimatedKm({
+    required int rawKm,
+    Map<String, dynamic>? vehicleData,
+  }) {
+    return WhatsAppTextValidationService.calculateEstimatedKm(
+      rawKm: rawKm,
+      lastTestDate: vehicleData?['mivchan_acharon_dt'],
+      tokefDt: vehicleData?['tokef_dt'],
+      testMonth: _testMonthController.text,
+      testYear: _testYearController.text,
+      moedAliya: vehicleData?['moed_aliya_lakvish'],
+      shnatYitzur: vehicleData?['shnat_yitzur'] ?? _yearController.text,
+      registrationMonth: _monthController.text,
+    );
+  }
+
   Future<void> _sendWhatsAppProgress(String message) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -814,6 +812,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     List<String> allowedColors,
   ) async {
     try {
+      await AgentConfigService.instance.checkAndUpdateConfigIfNeeded();
       final prefs = await SharedPreferences.getInstance();
       final apiKey =
           prefs.getString('anthropic_api_key') ??
@@ -823,13 +822,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
         return _fallbackColorMatch(rawColor, allowedColors);
       }
 
-      final prompt = '''
-נתון צבע רכב שנשלף ממאגר משרד התחבורה: "$rawColor".
-רשימת הצבעים המורשים היא: ${allowedColors.join(', ')}.
-
-אנא בחר והחזר את הצבע הקרוב ביותר מתוך רשימת הצבעים המורשים בלבד.
-החזר אך ורק את שם הצבע מתוך הרשימה, ללא שום מילים נוספות, ללא ניקוד וללא סימני פיסוק.
-''';
+      final prompt = AgentConfigService.instance.getColorMatchingPrompt(
+        rawColor,
+        allowedColors,
+      );
 
       final body = jsonEncode({
         'model': 'gpt-5.6-luna',
@@ -1398,7 +1394,12 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                 if (kmVal != null) {
                   _kilometerTestAharon = int.tryParse(kmVal.toString());
                   if (_kilometerTestAharon != null) {
-                    final kmStr = _kilometerTestAharon.toString();
+                    final estimatedKm = _calculateEstimatedKm(
+                      rawKm: _kilometerTestAharon!,
+                      vehicleData:
+                          data is Map ? Map<String, dynamic>.from(data) : null,
+                    );
+                    final kmStr = estimatedKm.toString();
                     _kmController.text = kmStr;
                     notifier.updateField('km', kmStr);
                   }
@@ -1464,6 +1465,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   // ── Publish ───────────────────────────────────────────────────────────────
 
   Future<void> _publishListing({bool skipImagePrompt = false}) async {
+    // Check Firestore for updated agent prompt and rules before starting publication session
+    await AgentConfigService.instance.checkAndUpdateConfigIfNeeded();
+
     final formState = ref.read(fp.formControllerProvider);
     final user = ref.read(authStateProvider).value;
 

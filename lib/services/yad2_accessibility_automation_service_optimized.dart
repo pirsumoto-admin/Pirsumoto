@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -1093,99 +1094,370 @@ class Yad2AccessibilityAutomationService {
     return const _StepActionResult.success();
   }
 
+  static bool isValidExtractedDescription(String? text) {
+    if (text == null) return false;
+    final trimmed = text.trim();
+    if (trimmed.length < 10) return false;
+    // Reject strings that are purely digits, slashes, dashes, colons or dots (e.g. "0412", "0/400", "04/12")
+    if (RegExp(r'^[\d\s\/\-\:\.,]+$').hasMatch(trimmed)) return false;
+    // Must contain letters (Hebrew or English)
+    if (!RegExp(r'[\u0590-\u05FFa-zA-Z]').hasMatch(trimmed)) return false;
+    // Reject location / address strings
+    if (trimmed.startsWith('אזור ') ||
+        trimmed.startsWith('איזור ') ||
+        trimmed.contains('והסביבה')) {
+      return false;
+    }
+    // Reject UI button labels and static prompt headers
+    const uiExcludedLabels = {
+      'עדכנתי',
+      'בואו נמשיך',
+      'עדכנתי, בואו נמשיך',
+      'עדכנתי, בוא נמשיך',
+      'עדכנתי בואו נמשיך',
+      'לשלב הבא',
+      'שלב הבא',
+      'סגור',
+      'ביטול',
+      'סוג הרכב',
+      'פרטי הרכב',
+      'פרטים חשובים על הרכב',
+      'מה חשוב לך שידעו על הרכב',
+      'מה חשוב לך שידעו על הרכב?',
+      'מה חשוב לך שידעו',
+      'מה חשוב לך שידעו?',
+      'זה המקום לתאר את הרכב',
+      'זה המקום לתאר את היתרונות של הרכב',
+      'זה המקום לתאר',
+      'ספר/י קצת על הרכב שלך',
+      'ספר לנו על הרכב',
+      'טיפים למילוי תיאור מוצלח',
+      'הוספת תיאור לרכב',
+    };
+    if (uiExcludedLabels.contains(trimmed)) return false;
+    return true;
+  }
+
+  String _saveAndReturnDescription(String val) {
+    final clean = val.trim();
+    if (isValidExtractedDescription(clean)) {
+      extractedDescription = clean;
+      lastExtractedDescription = clean;
+      debugPrint('====================================================');
+      debugPrint('📝 [Yad2-Extracted-Description SAVED]: "$clean"');
+      debugPrint('====================================================');
+    }
+    return clean;
+  }
+
   Future<String> _extractVehicleDescriptionText() async {
     String text = '';
-    // 1. Try extracting via DOM from WebView
-    try {
-      final js = '''
-        (function() {
-          // Check textareas by placeholder
-          var tas = document.querySelectorAll('textarea');
-          for (var i = 0; i < tas.length; i++) {
-            var ph = tas[i].getAttribute('placeholder') || '';
-            if (ph.indexOf('זה המקום לתאר') !== -1 || ph.indexOf('הפרטים הבולטים') !== -1) {
-              var val = tas[i].value || tas[i].innerText || '';
-              if (val.trim()) return val.trim();
+
+    // 1. Access fresh accessibility tree and print it to log
+    final treeStr = await _readTreeString();
+    debugPrint('====================================================');
+    debugPrint(
+      '🌲 [Yad2-A11y] Fresh Accessibility Tree Dump at _extractVehicleDescriptionText:',
+    );
+    if (treeStr != null && treeStr.trim().isNotEmpty) {
+      for (final line in treeStr.split('\n')) {
+        debugPrint(line);
+      }
+    } else {
+      debugPrint('[Yad2-A11y] Accessibility tree was null or empty.');
+    }
+    debugPrint('====================================================');
+
+    if (treeStr != null && treeStr.isNotEmpty) {
+      final nodes = _parseA11yTree(treeStr);
+      debugPrint(
+        '[Yad2-A11y] Parsed ${nodes.length} nodes from accessibility tree.',
+      );
+
+      // Priority 1: Check target labels (e.g. "סוג הרכב", "פרטים חשובים על הרכב")
+      const targetLabels = [
+        'סוג הרכב',
+        'פרטים חשובים על הרכב',
+        'זה המקום לתאר',
+        'מה חשוב לך שידעו',
+        'תיאור הרכב',
+        'תיאור',
+      ];
+      for (int i = 0; i < nodes.length; i++) {
+        final n = nodes[i];
+        final matchesLabel = targetLabels.any(
+          (lbl) => n.text.trim() == lbl || n.desc.trim() == lbl,
+        );
+        if (matchesLabel) {
+          debugPrint(
+            '[Yad2-A11y] Matched label node at index $i: "${n.text.isNotEmpty ? n.text : n.desc}"',
+          );
+          // Look ahead in subsequent nodes for the value
+          for (
+            int offset = 1;
+            offset <= 6 && (i + offset) < nodes.length;
+            offset++
+          ) {
+            final nextNode = nodes[i + offset];
+            if (isValidExtractedDescription(nextNode.text)) {
+              text = nextNode.text.trim();
+              debugPrint(
+                '[Yad2-A11y] Found description at offset +$offset after label: "$text"',
+              );
+              return _saveAndReturnDescription(text);
+            }
+            if (isValidExtractedDescription(nextNode.desc)) {
+              text = nextNode.desc.trim();
+              debugPrint(
+                '[Yad2-A11y] Found description in desc at offset +$offset after label: "$text"',
+              );
+              return _saveAndReturnDescription(text);
             }
           }
-
-          // Check by label 'פרטים חשובים על הרכב'
-          var all = document.querySelectorAll('*');
-          for (var j = 0; j < all.length; j++) {
-            var t = (all[j].innerText || all[j].textContent || '').trim();
-            if (t.indexOf('פרטים חשובים על הרכב') !== -1) {
-              var ta = all[j].querySelector('textarea') ||
-                       (all[j].parentElement && all[j].parentElement.querySelector('textarea'));
-              if (ta && (ta.value || ta.innerText || '').trim()) {
-                return (ta.value || ta.innerText).trim();
-              }
-              var next = all[j].nextElementSibling;
-              while (next) {
-                var foundTa = next.tagName === 'TEXTAREA' ? next : next.querySelector('textarea');
-                if (foundTa && (foundTa.value || foundTa.innerText || '').trim()) {
-                  return (foundTa.value || foundTa.innerText).trim();
-                }
-                next = next.nextElementSibling;
-              }
-            }
+        }
+        // Also check composite container starting with "סוג הרכב "
+        if (n.text.startsWith('סוג הרכב ') && n.text.length > 12) {
+          final candidate = n.text.replaceFirst('סוג הרכב', '').trim();
+          if (isValidExtractedDescription(candidate)) {
+            text = candidate;
+            debugPrint(
+              '[Yad2-A11y] Found vehicle description in composite container: "$text"',
+            );
+            return _saveAndReturnDescription(text);
           }
-
-          // Fallback: any textarea with content
-          for (var k = 0; k < tas.length; k++) {
-            var val = (tas[k].value || tas[k].innerText || '').trim();
-            if (val.length > 0) return val;
-          }
-          return '';
-        })()
-      ''';
-      final res = await controller.runJavaScriptReturningResult(js);
-      var str = res.toString();
-      if (str.startsWith('"') && str.endsWith('"') && str.length >= 2) {
-        try {
-          str = jsonDecode(str) as String;
-        } catch (_) {
-          str = str.substring(1, str.length - 1);
         }
       }
-      text = str.trim();
-    } catch (e) {
-      debugPrint('[Yad2-A11y] Error extracting description via DOM: $e');
+
+      // Priority 2: Check EditText / textarea nodes directly
+      for (final node in nodes) {
+        final isEditText = node.className.toLowerCase().contains('edittext');
+        if (isEditText) {
+          debugPrint(
+            '[Yad2-A11y] Inspecting EditText node: text="${node.text}" desc="${node.desc}"',
+          );
+          if (isValidExtractedDescription(node.text)) {
+            text = node.text.trim();
+            debugPrint(
+              '[Yad2-A11y] Found description in EditText text: "$text"',
+            );
+            return _saveAndReturnDescription(text);
+          }
+          if (isValidExtractedDescription(node.desc)) {
+            text = node.desc.trim();
+            debugPrint(
+              '[Yad2-A11y] Found description in EditText desc: "$text"',
+            );
+            return _saveAndReturnDescription(text);
+          }
+        }
+      }
+
+      // Priority 3: Any node with valid description (e.g. inside dialog / modal preview)
+      for (final node in nodes) {
+        if (isValidExtractedDescription(node.text)) {
+          text = node.text.trim();
+          debugPrint('[Yad2-A11y] Found description in node text: "$text"');
+          return _saveAndReturnDescription(text);
+        }
+        if (isValidExtractedDescription(node.desc)) {
+          text = node.desc.trim();
+          debugPrint('[Yad2-A11y] Found description in node desc: "$text"');
+          return _saveAndReturnDescription(text);
+        }
+      }
     }
 
-    // 2. Fallback: Accessibility tree check if DOM didn't return text
-    if (text.isEmpty) {
-      try {
+    // Priority 4: Accessibility channel fallback (findNodeTextAfterTarget)
+    try {
+      for (final offset in [1, 2, 3]) {
         final a11yText = await _channel
             .invokeMethod<String>('findNodeTextAfterTarget', {
-              'target': 'פרטים חשובים על הרכב|זה המקום לתאר',
+              'target': 'פרטים חשובים על הרכב|זה המקום לתאר|מה חשוב לך שידעו',
               'targetInstance': 1,
               'threshold': 0.75,
-              'offset': 1,
+              'offset': offset,
             });
-        if (a11yText != null && a11yText.trim().isNotEmpty) {
+        if (a11yText != null && isValidExtractedDescription(a11yText)) {
           text = a11yText.trim();
+          debugPrint(
+            '[Yad2-A11y] Extracted description via findNodeTextAfterTarget (offset: $offset): "$text"',
+          );
+          return _saveAndReturnDescription(text);
         }
-      } catch (e) {
-        debugPrint('[Yad2-A11y] Error extracting description via A11y: $e');
       }
+    } catch (e) {
+      debugPrint(
+        '[Yad2-A11y] Error extracting description via findNodeTextAfterTarget: $e',
+      );
     }
 
-    return text;
+    // Fallback: Computer Vision and LLM Validation
+    if (text.isEmpty) {
+      debugPrint(
+        '[Yad2-A11y] 🔄 Accessibility tree yielded no description. Falling back to Computer Vision & LLM validation...',
+      );
+      text = await _extractDescriptionViaVisionAndLlm();
+    }
+
+    return _saveAndReturnDescription(text);
+  }
+
+  Future<String> _extractDescriptionViaVisionAndLlm() async {
+    try {
+      debugPrint(
+        '[Yad2-A11y] 📷 Capturing fresh UI context / screenshot for Computer Vision...',
+      );
+      final ctx = await _observeUIFresh();
+      if (ctx == null || ctx.screenshot.isEmpty) {
+        debugPrint(
+          '[Yad2-A11y] UI screenshot not available for Computer Vision.',
+        );
+        return '';
+      }
+
+      String ocrText = '';
+      if (ocrService != null) {
+        debugPrint(
+          '[Yad2-A11y] 🔍 Running Google Cloud Vision OCR on screenshot...',
+        );
+        final fullOcr = await ocrService!.extractFullText(ctx.screenshot);
+        if (fullOcr != null && fullOcr.trim().isNotEmpty) {
+          ocrText = fullOcr.trim();
+          debugPrint('====================================================');
+          debugPrint('📷 [Yad2-A11y] Computer Vision (OCR) Extracted Text:');
+          for (final line in ocrText.split('\n')) {
+            debugPrint(line);
+          }
+          debugPrint('====================================================');
+        }
+      }
+
+      // Send to LLM for validation & extraction
+      debugPrint(
+        '[Yad2-A11y] 🤖 Calling LLM to validate and extract vehicle description...',
+      );
+      final llmResult = await _extractDescriptionWithLlm(
+        ocrText: ocrText.isNotEmpty ? ocrText : null,
+        screenshot: ctx.screenshot,
+      );
+
+      if (llmResult != null && isValidExtractedDescription(llmResult)) {
+        debugPrint(
+          '[Yad2-A11y] ✅ LLM validated & extracted description: "$llmResult"',
+        );
+        return llmResult;
+      }
+    } catch (e) {
+      debugPrint(
+        '[Yad2-A11y] Error during Computer Vision & LLM validation fallback: $e',
+      );
+    }
+    return '';
+  }
+
+  Future<String?> _extractDescriptionWithLlm({
+    String? ocrText,
+    Uint8List? screenshot,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final apiKey =
+          (prefs.getString('anthropic_api_key') ??
+                      const String.fromEnvironment(
+                        'ANTHROPIC_API_KEY',
+                        defaultValue: '',
+                      ))
+                  .trim()
+                  .isNotEmpty
+              ? (prefs.getString('anthropic_api_key') ??
+                      const String.fromEnvironment('ANTHROPIC_API_KEY'))
+                  .trim()
+              : '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';
+
+      final systemPrompt =
+          'You are an expert AI assistant inspecting a vehicle listing form on Yad2. '
+          'Your task is to identify and extract ONLY the user-written vehicle description '
+          '(e.g. car condition, mechanical status, test validity, upgrades, accessories, care history). '
+          'Do NOT extract UI buttons (like עדכנתי בואו נמשיך, לשלב הבא, סגור), UI section titles '
+          '(like פרטים חשובים על הרכב, מה חשוב לך שידעו על הרכב), or placeholder instructions '
+          '(like זה המקום לתאר את הרכב). '
+          'If no user-written vehicle description is present, reply strictly with: NONE. '
+          'Do not include markdown or explanations. Return ONLY the exact vehicle description text or NONE.';
+
+      final messages = <Map<String, dynamic>>[
+        {'role': 'system', 'content': systemPrompt},
+      ];
+
+      if (ocrText != null && ocrText.isNotEmpty) {
+        messages.add({
+          'role': 'user',
+          'content':
+              'Here is the text extracted by Computer Vision OCR from the screen:\n---\n$ocrText\n---\n'
+              'Extract the user vehicle description, or return NONE if not found.',
+        });
+      } else if (screenshot != null && screenshot.isNotEmpty) {
+        final b64 = base64Encode(screenshot);
+        messages.add({
+          'role': 'user',
+          'content': [
+            {
+              'type': 'text',
+              'text':
+                  'Extract the user vehicle description from this Yad2 listing screen image. Return NONE if no user description is present.',
+            },
+            {
+              'type': 'image_url',
+              'image_url': {'url': 'data:image/png;base64,$b64'},
+            },
+          ],
+        });
+      } else {
+        return null;
+      }
+
+      final body = jsonEncode({
+        'model': 'gpt-5.6-luna',
+        'messages': messages,
+        'max_completion_tokens': 350,
+      });
+
+      final res = await http
+          .post(
+            Uri.parse('https://api.openai.com/v1/chat/completions'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $apiKey',
+            },
+            body: body,
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200) {
+        final decoded =
+            jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+        final content =
+            decoded['choices']?[0]?['message']?['content']?.toString().trim() ??
+            '';
+        if (content.isNotEmpty && !content.toUpperCase().contains('NONE')) {
+          return content;
+        }
+      } else {
+        debugPrint(
+          '[Yad2-A11y] LLM extraction error HTTP ${res.statusCode}: ${res.body}',
+        );
+      }
+    } catch (e) {
+      debugPrint('[Yad2-A11y] LLM extraction call failed: $e');
+    }
+    return null;
   }
 
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
     await _scrollDown(0.35);
-    await _dismissKnownPopups();
-    await Future.delayed(const Duration(milliseconds: 5500));
 
-    // Copy text from textarea with placeholder: "זה המקום לתאר את הפרטים הבולטים"
-    // or by label: "פרטים חשובים על הרכב"
-    final desc = await _extractVehicleDescriptionText();
-    extractedDescription = desc;
-    lastExtractedDescription = desc;
-    debugPrint('====================================================');
-    debugPrint('📝 [Yad2-Extracted-Description]: "$desc"');
-    debugPrint('====================================================');
+    // 3. Dismiss any known popups like "עדכנתי, בואו נמשיך"
+    await _dismissKnownPopups();
+    await Future.delayed(const Duration(milliseconds: 1500));
 
     final submitted = await _retryUntil(
       () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא|לשלב')),
@@ -1196,9 +1468,40 @@ class Yad2AccessibilityAutomationService {
         'Additional-info submit not found.',
       );
     }
+
     await Future.delayed(const Duration(milliseconds: 900));
+    try {
+      stdout.write('\x1B[2J\x1B[0;0H');
+    } catch (_) {}
+    debugPrint('\x1B[2J\x1B[0;0H');
+
+    String desc = await _extractVehicleDescriptionText();
+    debugPrint(
+      '[Yad2-A11y] Injecting pre-existing description into Yad2 field: $desc',
+    );
+
     if (await _dismissKnownPopups()) {
       await _scrollDown(0.2);
+      // 1. First, check if a dialog/popup is presenting the additional info BEFORE dismissing it!
+      String desc = await _extractVehicleDescriptionText();
+      // 2. If formData has a pre-existing description and Yad2 has none, enter it into Yad2
+      final hasPreExistingDesc =
+          formData.description.trim().isNotEmpty &&
+          isValidExtractedDescription(formData.description);
+      if (!isValidExtractedDescription(desc) && hasPreExistingDesc) {
+        await toolEnterTextAtFocusedJs(formData.description.trim());
+        desc = formData.description.trim();
+      }
+
+      try {
+        stdout.write('\x1B[2J\x1B[0;0H');
+      } catch (_) {}
+      debugPrint('\x1B[2J\x1B[0;0H');
+
+      debugPrint(
+        '[Yad2-A11y] Injecting pre-existing description into Yad2 field: $desc',
+      );
+
       await _retryUntil(
         () => tapSmart('לשלב הבא|שלב הבא|לשלב'),
         timeout: const Duration(seconds: 5),
@@ -2301,7 +2604,9 @@ class Yad2AccessibilityAutomationService {
     if (expectedCount != null && expectedCount == 0) {
       return false;
     }
-    if (expectedCount != null && expectedCount > 0 && images.length > expectedCount) {
+    if (expectedCount != null &&
+        expectedCount > 0 &&
+        images.length > expectedCount) {
       images = images.sublist(images.length - expectedCount.toInt());
     }
     final base64Files = <Map<String, String>>[];
@@ -2597,3 +2902,35 @@ bool _matchesAny(String? actual, String expected) {
 
 String _clip(String value, int maxChars) =>
     value.length <= maxChars ? value : value.substring(0, maxChars);
+
+class _A11yTreeNode {
+  final String className;
+  final String text;
+  final String desc;
+  final bool isClickable;
+
+  const _A11yTreeNode({
+    required this.className,
+    required this.text,
+    required this.desc,
+    required this.isClickable,
+  });
+}
+
+List<_A11yTreeNode> _parseA11yTree(String treeStr) {
+  final nodes = <_A11yTreeNode>[];
+  final regex = RegExp(
+    r'\[([^\]]+)\]\s+text="([\s\S]*?)"\s+desc="([\s\S]*?)"\s+clickable=(true|false)',
+  );
+  for (final match in regex.allMatches(treeStr)) {
+    nodes.add(
+      _A11yTreeNode(
+        className: match.group(1) ?? '',
+        text: match.group(2) ?? '',
+        desc: match.group(3) ?? '',
+        isClickable: match.group(4) == 'true',
+      ),
+    );
+  }
+  return nodes;
+}

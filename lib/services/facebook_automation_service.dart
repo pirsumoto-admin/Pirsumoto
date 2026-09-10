@@ -7,6 +7,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'yad2_automation_models.dart' show VehiclePublishData;
+import 'yad2_accessibility_automation_service_optimized.dart'
+    show Yad2AccessibilityAutomationService;
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Vehicle Listing Automation Service
@@ -2017,12 +2019,18 @@ class FacebookAutomationService {
 
   // Phase 15 — Enter description
   Future<void> _phaseEnterDescription() async {
-    final descriptionText = (formData.description.trim().isNotEmpty)
+    final hasValidDesc = formData.description.trim().isNotEmpty &&
+        Yad2AccessibilityAutomationService.isValidExtractedDescription(
+          formData.description,
+        );
+    final descriptionText = hasValidDesc
         ? formData.description.trim()
         : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\n'
             'יד: ${formData.hand} | ק"מ: ${formData.kilometers}\n'
             'סוג דלק: ${formData.fuelType}';
-    debugPrint('[FB-A11y] EnterDescription (length: ${descriptionText.length}):\n$descriptionText');
+    debugPrint(
+      '[FB-A11y] EnterDescription (length: ${descriptionText.length}, validCustom: $hasValidDesc):\n$descriptionText',
+    );
 
     await toolLogDomFormElements(tag: 'FB-Description-DOM');
 

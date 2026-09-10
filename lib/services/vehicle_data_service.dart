@@ -42,6 +42,10 @@ class VehicleDataService {
           vehicle['moed_aliya_lakvish'] ?? '',
         ),
         'testExpiry': _formatTestDate(vehicle['tokef_dt']?.toString() ?? ''),
+        'lastTestDate': vehicle['mivchan_acharon_dt']?.toString() ?? '',
+        'tokef_dt': vehicle['tokef_dt']?.toString() ?? '',
+        'moed_aliya_lakvish': vehicle['moed_aliya_lakvish']?.toString() ?? '',
+        'shnat_yitzur': vehicle['shnat_yitzur']?.toString() ?? '',
       };
     } catch (e) {
       return null;

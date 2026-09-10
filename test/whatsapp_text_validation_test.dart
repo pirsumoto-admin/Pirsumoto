@@ -1,11 +1,12 @@
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pirsumoto/services/whatsapp_text_validation_service.dart';
+import 'package:pirsumoto/services/yad2_accessibility_automation_service_optimized.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 WhatsAppTextValidationService _buildService({
   String rawColor = 'כחול',
-  int? lastTestKilometer = 90000,
+  int? lastTestKilometer,
   List<String>? replies,
   void Function()? onVehicleLookup,
   void Function()? onStop,
@@ -185,8 +186,16 @@ void main() {
         equals('120000'),
       );
       expect(
+        service.extractFieldsFromText('120.000 קמ')['km'],
+        equals('120000'),
+      );
+      expect(
         service.extractFieldsFromText('שעון 95000')['km'],
         equals('95000'),
+      );
+      expect(
+        service.extractFieldsFromText('על השעון 88,000')['km'],
+        equals('88000'),
       );
       expect(
         service.extractFieldsFromText('קילומטראז׳ 80 אלף')['km'],
@@ -195,6 +204,14 @@ void main() {
       expect(
         service.extractFieldsFromText('150000 קילומטרים')['km'],
         equals('150000'),
+      );
+      expect(
+        service.extractFieldsFromText('50,000 מייל')['km'],
+        equals('80467'),
+      );
+      expect(
+        service.extractFieldsFromText('60000 miles')['km'],
+        equals('96560'),
       );
     });
 
@@ -652,7 +669,7 @@ void main() {
 
         expect(vehicleLookups, 1);
         expect(initial?['km'], isNull);
-        expect(initial?['kilometer_test_aharon'], '90000');
+        expect(initial?['kilometer_test_aharon'], isNull);
         expect(replies.length, equals(2));
         expect(replies[0], contains('מחפש את פרטי הרכב ב-gov.il'));
         expect(replies[1], contains('מצאתי את הרכב: מאזדה 3 2018'));
@@ -1166,6 +1183,180 @@ void main() {
         final paths = List<String>.from(jsonDecode(stateCapped!['image_paths']!));
         expect(paths.length, equals(2));
         expect(paths, equals(['/path/photo3.jpg', '/path/photo4.jpg']));
+      },
+    );
+  });
+
+  group('MOE Missing Data Validation & Description Tests', () {
+    const service = WhatsAppTextValidationService();
+
+    test('should reject invalid description numbers like 0412 or 0/400 and accept valid description', () {
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('0412'), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('0/400'), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('04/12'), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('1234567'), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('עדכנתי, בואו נמשיך'), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription(''), isFalse);
+      expect(Yad2AccessibilityAutomationService.isValidExtractedDescription('קצר'), isFalse);
+      expect(
+        Yad2AccessibilityAutomationService.isValidExtractedDescription(
+          'רכב שמור ומטופל במוסך מורשה, ללא תאונות, טסט לשנה מלאה',
+        ),
+        isTrue,
+      );
+    });
+
+    test('should extract fuel_type from text', () {
+      final benzine = service.extractFieldsFromText('רכב במצב מעולה דלק בנזין');
+      expect(benzine['fuel_type'], equals('בנזין'));
+
+      final diesel = service.extractFieldsFromText('מנוע דיזל סולר יד ראשונה');
+      expect(diesel['fuel_type'], equals('דיזל'));
+
+      final hybrid = service.extractFieldsFromText('היברידי 2020 במצב חדש');
+      expect(hybrid['fuel_type'], equals('היברידי'));
+
+      final electric = service.extractFieldsFromText('רכב חשמלי טסלה');
+      expect(electric['fuel_type'], equals('חשמל'));
+    });
+
+    test('when data was NOT fetched from MOE, maker, model, fuel_type, and year are strictly required', () async {
+      final fieldsMissingGov = {
+        'license_plate': '12345678',
+        'license_not_found_gov': 'true',
+        'gov_vehicle_lookup_status': 'not_found',
+        'km': '90000',
+        'price': '35000',
+        'hand': '1',
+      };
+
+      final validation = await service.validateFormFields(fieldsMissingGov);
+      expect(validation.isValid, isFalse);
+      expect(validation.fieldErrors.containsKey('maker'), isTrue);
+      expect(validation.fieldErrors.containsKey('model'), isTrue);
+      expect(validation.fieldErrors.containsKey('fuel_type'), isTrue);
+      expect(validation.fieldErrors.containsKey('year'), isTrue);
+
+      // Now fill the required fields
+      final fieldsCompleteGov = {
+        ...fieldsMissingGov,
+        'maker': 'טויוטה',
+        'model': 'קורולה',
+        'fuel_type': 'בנזין',
+        'year': '2019',
+      };
+
+      final validationComplete = await service.validateFormFields(fieldsCompleteGov);
+      expect(validationComplete.fieldErrors.containsKey('maker'), isFalse);
+      expect(validationComplete.fieldErrors.containsKey('model'), isFalse);
+      expect(validationComplete.fieldErrors.containsKey('fuel_type'), isFalse);
+      expect(validationComplete.fieldErrors.containsKey('year'), isFalse);
+    });
+
+    test('when data WAS fetched from MOE, maker, model, and fuel_type are not marked as error in basic check', () async {
+      final fieldsWithGov = {
+        'license_plate': '12345678',
+        'license_not_found_gov': 'false',
+        'gov_vehicle_lookup_status': 'succeeded',
+        'km': '90000',
+        'price': '35000',
+        'hand': '1',
+      };
+
+      final validation = await service.validateFormFields(fieldsWithGov);
+      expect(validation.fieldErrors.containsKey('fuel_type'), isFalse);
+      expect(validation.fieldErrors.containsKey('maker'), isFalse);
+      expect(validation.fieldErrors.containsKey('model'), isFalse);
+    });
+  });
+
+  group('WhatsAppTextValidationService Last Test Kilometers & Estimation Logic', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+      'when API returns last test kilometers, calculates estimated km, sets km in state, and does not require user to enter km',
+      () async {
+        final replies = <String>[];
+        final service = WhatsAppTextValidationService(
+          vehicleDataFetcher: (_) async => {
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2021',
+            'color': 'כחול',
+            'fuelType': 'בנזין',
+            'ownership': 'פרטי',
+            'registrationMonth': '1',
+            'lastTestDate': '2026-03-01',
+            'testExpiry': '3,2027',
+          },
+          kilometerHistoryFetcher: (_) async => 62000,
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+        );
+
+        final state = await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: 'km_exists_sender',
+          timestamp: 1000,
+        );
+
+        // Raw test km is saved
+        expect(state?['kilometer_test_aharon'], equals('62000'));
+        // Estimated km is calculated and populated
+        expect(state?['km'], isNotNull);
+        final calculatedKm = int.parse(state!['km']!);
+        expect(calculatedKm, greaterThan(62000));
+
+        // The user should not be asked for km
+        final missingList = jsonDecode(state['last_requested_fields'] ?? '[]') as List;
+        expect(missingList.contains('km'), isFalse);
+
+        expect(replies.length, equals(2));
+        expect(replies.last, isNot(contains('קילומטראז\'')));
+      },
+    );
+
+    test(
+      'when API does NOT return test data, km remains missing and is required from the user',
+      () async {
+        final replies = <String>[];
+        final service = WhatsAppTextValidationService(
+          vehicleDataFetcher: (_) async => {
+            'maker': 'מאזדה',
+            'model': '3',
+            'year': '2021',
+            'color': 'כחול',
+            'fuelType': 'בנזין',
+            'ownership': 'פרטי',
+            'registrationMonth': '1',
+            'testExpiry': '3,2027',
+          },
+          kilometerHistoryFetcher: (_) async => null,
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+        );
+
+        final state = await service.handleIncomingTextMessage(
+          text: '12345678',
+          senderKey: 'km_missing_sender',
+          timestamp: 1000,
+        );
+
+        expect(state?['kilometer_test_aharon'], isNull);
+        expect(state?['km'], isNull);
+
+        // km must be requested as a required field
+        final missingList = jsonDecode(state?['last_requested_fields'] ?? '[]') as List;
+        expect(missingList.contains('km'), isTrue);
+
+        expect(replies.length, equals(2));
+        expect(replies.last, contains('קילומטראז\''));
       },
     );
   });
