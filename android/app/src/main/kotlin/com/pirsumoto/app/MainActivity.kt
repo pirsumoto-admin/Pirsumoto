@@ -8,6 +8,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 
@@ -77,38 +78,31 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             
             if (call.method == "checkPermission") {
-                var isConnected = PirsumotoAccessibilityService.instance != null
-                if (!isConnected) {
-                    val isEnabledInSettings = isAccessibilityServiceEnabled(context, PirsumotoAccessibilityService::class.java)
-                    if (isEnabledInSettings) {
-                        try {
-                            val component = android.content.ComponentName(context, PirsumotoAccessibilityService::class.java)
-                            val pm = context.packageManager
-                            pm.setComponentEnabledSetting(
-                                component,
-                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                android.content.pm.PackageManager.DONT_KILL_APP
-                            )
-                            pm.setComponentEnabledSetting(
-                                component,
-                                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                android.content.pm.PackageManager.DONT_KILL_APP
-                            )
-                            Log.d("A11Y", "Toggled AccessibilityService component to revive zombie service")
-                        } catch (e: Exception) {
-                            Log.e("A11Y", "Failed to toggle AccessibilityService component", e)
-                        }
-                        try { Thread.sleep(100) } catch (_: Exception) {}
-                        isConnected = PirsumotoAccessibilityService.instance != null
-                    }
+                if (PirsumotoAccessibilityService.instance != null) {
+                    result.success(true)
+                    return@setMethodCallHandler
                 }
-                result.success(isConnected)
+
+                val isEnabledInSettings = isAccessibilityServiceEnabled(context, PirsumotoAccessibilityService::class.java)
+                if (isEnabledInSettings) {
+                    // Give Android up to 500ms to bind the service instance if it just connected
+                    var attempts = 0
+                    while (PirsumotoAccessibilityService.instance == null && attempts < 10) {
+                        try { Thread.sleep(50) } catch (_: Exception) {}
+                        attempts++
+                    }
+                    Log.d("A11Y", "Accessibility enabled in settings. Instance connected: ${PirsumotoAccessibilityService.instance != null}")
+                    result.success(true)
+                    return@setMethodCallHandler
+                }
+
+                result.success(false)
                 return@setMethodCallHandler
             }
             if (call.method == "openSettings") {
                 val componentName = android.content.ComponentName(
-                    context.packageName,
-                    context.packageName + ".PirsumotoAccessibilityService"
+                    context,
+                    PirsumotoAccessibilityService::class.java
                 )
                 val componentNameStr = componentName.flattenToString()
                 val bundle = android.os.Bundle()
@@ -154,6 +148,52 @@ class MainActivity : FlutterActivity() {
                 return@setMethodCallHandler
             }
 
+            if (call.method == "startCaptureAutoApproval") {
+                val service = PirsumotoAccessibilityService.instance
+                service?.startAutoApprovingCapture()
+                result.success(service != null)
+                return@setMethodCallHandler
+            }
+            if (call.method == "startRemoteCaptureService") {
+                RemoteControlCaptureService.start(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "stopRemoteCaptureService") {
+                RemoteControlCaptureService.stop(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "getScreenDimensions") {
+                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val (width, height, density) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val bounds = wm.currentWindowMetrics.bounds
+                    Triple(bounds.width(), bounds.height(), context.resources.displayMetrics.density.toDouble())
+                } else {
+                    val dm = DisplayMetrics()
+                    @Suppress("DEPRECATION")
+                    wm.defaultDisplay.getRealMetrics(dm)
+                    Triple(dm.widthPixels, dm.heightPixels, dm.density.toDouble())
+                }
+                result.success(mapOf(
+                    "width" to width,
+                    "height" to height,
+                    "density" to density
+                ))
+                return@setMethodCallHandler
+            }
+            if (call.method == "getDeviceInfo") {
+                result.success(mapOf(
+                    "model" to Build.MODEL,
+                    "manufacturer" to Build.MANUFACTURER,
+                    "brand" to Build.BRAND,
+                    "device" to Build.DEVICE,
+                    "product" to Build.PRODUCT,
+                    "sdkInt" to Build.VERSION.SDK_INT
+                ))
+                return@setMethodCallHandler
+            }
+
             val service = PirsumotoAccessibilityService.instance
             if (service == null) {
                 result.error("UNAVAILABLE", "Accessibility Service not connected. Please enable it in Settings.", null)
@@ -161,7 +201,7 @@ class MainActivity : FlutterActivity() {
             }
 
             val rootNode = service.rootInActiveWindow
-            if (rootNode == null && call.method != "injectTextNative" && call.method != "pressBack" && call.method != "tapScreen" && call.method != "pasteText") {
+            if (rootNode == null && call.method != "injectTextNative" && call.method != "pressBack" && call.method != "pressHome" && call.method != "pressRecents" && call.method != "tapScreen" && call.method != "pasteText" && !call.method.startsWith("remote")) {
                 result.error("UNAVAILABLE", "Cannot get root window node", null)
                 return@setMethodCallHandler
             }
@@ -298,6 +338,28 @@ class MainActivity : FlutterActivity() {
                     service.tapBounds(android.graphics.Rect(x.toInt(), y.toInt(), x.toInt(), y.toInt()))
                     result.success(true)
                 }
+                "remoteTap" -> {
+                    val x = (call.argument<Double>("x") ?: 0.0).toFloat()
+                    val y = (call.argument<Double>("y") ?: 0.0).toFloat()
+                    val success = service.tapAt(x, y)
+                    result.success(success)
+                }
+                "remoteLongPress" -> {
+                    val x = (call.argument<Double>("x") ?: 0.0).toFloat()
+                    val y = (call.argument<Double>("y") ?: 0.0).toFloat()
+                    val duration = (call.argument<Int>("duration") ?: 700).toLong()
+                    val success = service.longPressAt(x, y, duration)
+                    result.success(success)
+                }
+                "remoteSwipe" -> {
+                    val startX = (call.argument<Double>("startX") ?: 0.0).toFloat()
+                    val startY = (call.argument<Double>("startY") ?: 0.0).toFloat()
+                    val endX = (call.argument<Double>("endX") ?: 0.0).toFloat()
+                    val endY = (call.argument<Double>("endY") ?: 0.0).toFloat()
+                    val duration = (call.argument<Int>("duration") ?: 300).toLong()
+                    val success = service.swipe(startX, startY, endX, endY, duration)
+                    result.success(success)
+                }
                 "logTree" -> {
                     val treeStr = service.getTreeString(rootNode!!)
                     result.success(treeStr)
@@ -353,6 +415,14 @@ class MainActivity : FlutterActivity() {
                 }
                 "pressBack" -> {
                     val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                    result.success(pressed)
+                }
+                "pressHome" -> {
+                    val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+                    result.success(pressed)
+                }
+                "pressRecents" -> {
+                    val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
                     result.success(pressed)
                 }
                 "findAndGetBounds" -> {
@@ -527,6 +597,24 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isAccessibilityServiceEnabled(context: Context, serviceClass: Class<*>): Boolean {
+        // Method 1: Query AccessibilityManager for enabled accessibility services
+        try {
+            val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager
+            if (am != null) {
+                val enabledServices = am.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+                for (service in enabledServices) {
+                    val sInfo = service.resolveInfo?.serviceInfo
+                    if (sInfo != null && sInfo.packageName == context.packageName &&
+                        (sInfo.name == serviceClass.name || sInfo.name.endsWith(serviceClass.simpleName))) {
+                        return true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("A11Y", "Error checking AccessibilityManager: $e")
+        }
+
+        // Method 2: Check Secure Settings enabled services string
         val expected = android.content.ComponentName(context, serviceClass)
         val enabledServices = android.provider.Settings.Secure.getString(
             context.contentResolver,
@@ -534,8 +622,12 @@ class MainActivity : FlutterActivity() {
         ) ?: return false
 
         return enabledServices.split(":").any { flattened ->
-            val component = android.content.ComponentName.unflattenFromString(flattened)
-            component?.packageName == expected.packageName && component.className == expected.className
+            val component = android.content.ComponentName.unflattenFromString(flattened.trim())
+            component != null && component.packageName == expected.packageName &&
+                (component.className == expected.className || 
+                 component.className == serviceClass.simpleName ||
+                 component.className == ".${serviceClass.simpleName}" ||
+                 component.shortClassName == ".${serviceClass.simpleName}")
         }
     }
 }

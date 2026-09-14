@@ -1,12 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
-import '../../services/whatsapp_message_bridge_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -165,17 +163,21 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _statusMessage = 'שגיאה: $error';
         });
 
-        if (widget.startedFromWhatsApp &&
-            widget.whatsAppSenderKey != null &&
-            widget.whatsAppSenderKey!.trim().isNotEmpty &&
-            Platform.isAndroid) {
+        if (widget.whatsAppSenderKey != null &&
+            widget.whatsAppSenderKey!.trim().isNotEmpty) {
+          final senderKey = widget.whatsAppSenderKey!.trim();
+          final bool isP2p = senderKey.startsWith('p2p_');
+          final String remoteNotice = isP2p
+              ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
+              : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
+
           unawaited(
-            WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
-              senderKey: widget.whatsAppSenderKey!.trim(),
+            WhatsAppTextValidationService.dispatchReplyToSender(
+              senderKey: senderKey,
               message:
-                  'אוטומציית פייסבוק נעצרה בשלב: ${phase.descriptionHe}\n'
-                  'נא לבדוק את המסך ולהמשיך משם.\n'
-                  'שגיאה: $error',
+                  '⚠️ אוטומציית פייסבוק נעצרה בשלב: ${phase.descriptionHe}\n'
+                  'שגיאה: $error\n\n'
+                  '$remoteNotice',
             ),
           );
         }
@@ -194,14 +196,13 @@ class _FacebookScreenState extends State<FacebookScreen> {
               success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
         });
 
-        if (widget.startedFromWhatsApp &&
-            widget.whatsAppSenderKey != null &&
-            widget.whatsAppSenderKey!.trim().isNotEmpty &&
-            Platform.isAndroid) {
+        if (widget.whatsAppSenderKey != null &&
+            widget.whatsAppSenderKey!.trim().isNotEmpty) {
+          final senderKey = widget.whatsAppSenderKey!.trim();
           if (success) {
             unawaited(
-              WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
-                senderKey: widget.whatsAppSenderKey!.trim(),
+              WhatsAppTextValidationService.dispatchReplyToSender(
+                senderKey: senderKey,
                 message:
                     'פרסום המודעה בפייסבוק מרקטפלייס הושלם בהצלחה! 🚗💨\n'
                     'המודעה פורסמה בהצלחה גם ביד2 וגם בפייסבוק.',
@@ -209,14 +210,20 @@ class _FacebookScreenState extends State<FacebookScreen> {
             );
             unawaited(
               WhatsAppTextValidationService.instance.clearSenderState(
-                widget.whatsAppSenderKey!.trim(),
+                senderKey,
               ),
             );
           } else {
+            final bool isP2p = senderKey.startsWith('p2p_');
+            final String remoteNotice = isP2p
+                ? 'נא לבדוק את מסך השליטה מרחוק (Remote Control) להשלמת הפעולה.'
+                : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) לבדיקת המצב.';
             unawaited(
-              WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
-                senderKey: widget.whatsAppSenderKey!.trim(),
-                message: 'פרסום המודעה בפייסבוק מרקטפלייס נכשל.',
+              WhatsAppTextValidationService.dispatchReplyToSender(
+                senderKey: senderKey,
+                message:
+                    '⚠️ פרסום המודעה בפייסבוק מרקטפלייס נכשל.\n'
+                    '$remoteNotice',
               ),
             );
           }

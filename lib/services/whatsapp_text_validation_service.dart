@@ -140,6 +140,25 @@ class WhatsAppTextValidationService {
   static final Map<String, Map<String, String>> _senderStateCache = {};
   static final Map<String, Map<String, String>> _lastVehicleCache = {};
   static final Map<String, Future<void>> _senderOperations = {};
+  static final Map<String, WhatsAppReplySender> _customReplySenders = {};
+  static final List<AutoPublishLauncher> _customAutoPublishLaunchers = [];
+  static final Map<String, Timer> _imageDebounceTimers = {};
+
+  static void registerReplySender(String senderKey, WhatsAppReplySender sender) {
+    _customReplySenders[senderKey] = sender;
+  }
+
+  static void unregisterReplySender(String senderKey) {
+    _customReplySenders.remove(senderKey);
+  }
+
+  static void registerAutoPublishLauncher(AutoPublishLauncher launcher) {
+    _customAutoPublishLaunchers.add(launcher);
+  }
+
+  static void unregisterAutoPublishLauncher(AutoPublishLauncher launcher) {
+    _customAutoPublishLaunchers.remove(launcher);
+  }
 
   final String? anthropicApiKey;
   final String aiModel;
@@ -315,6 +334,8 @@ class WhatsAppTextValidationService {
 
   Future<void> clearSenderState(String senderKey) async {
     if (senderKey.isEmpty) return;
+    _imageDebounceTimers[senderKey]?.cancel();
+    _imageDebounceTimers.remove(senderKey);
     _senderStateCache.remove(senderKey);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_statePrefKey(senderKey));
@@ -744,6 +765,9 @@ class WhatsAppTextValidationService {
   }) async {
     final lower = trimmedText.toLowerCase();
 
+    _imageDebounceTimers[senderKey]?.cancel();
+    _imageDebounceTimers.remove(senderKey);
+
     if (_isCancelCommand(trimmedText, allowNumericShortcut: true)) {
       _stopAutomation();
       await clearSenderState(senderKey);
@@ -860,12 +884,28 @@ class WhatsAppTextValidationService {
     }
 
     if (expectedImages == 0) {
-      state['image_paths'] = jsonEncode([]);
-      state['KEY_IMAGE_PATHS'] = jsonEncode([]);
-      state['image_received_count'] = '0';
-      state['KEY_IMAGE_RECEIVED_COUNT'] = '0';
+      if (currentImagePaths.isNotEmpty) {
+        final actualCount = currentImagePaths.length;
+        state['image_paths'] = jsonEncode(currentImagePaths);
+        state['KEY_IMAGE_PATHS'] = jsonEncode(currentImagePaths);
+        state['image_expected_count'] = '$actualCount';
+        state['KEY_IMAGE_EXPECTED_COUNT'] = '$actualCount';
+        state['image_received_count'] = '$actualCount';
+        state['KEY_IMAGE_RECEIVED_COUNT'] = '$actualCount';
+        await saveSenderState(senderKey, state);
+      } else {
+        state['image_paths'] = jsonEncode([]);
+        state['KEY_IMAGE_PATHS'] = jsonEncode([]);
+        state['image_received_count'] = '0';
+        state['KEY_IMAGE_RECEIVED_COUNT'] = '0';
+        state['image_expected_count'] = '0';
+        state['KEY_IMAGE_EXPECTED_COUNT'] = '0';
+        await saveSenderState(senderKey, state);
+      }
     } else {
       if (currentImagePaths.length < expectedImages) {
+        state['session_status'] = 'waiting_for_images';
+        await saveSenderState(senderKey, state);
         await _sendReply(
           senderKey,
           'עדיין חסרות ${expectedImages - currentImagePaths.length} תמונות. '
@@ -1231,23 +1271,55 @@ class WhatsAppTextValidationService {
     return text;
   }
 
+  /// Dispatches a reply to the originating channel:
+  /// - If [senderKey] is a P2P Remote Control sender (e.g. 'p2p_remote_user'),
+  ///   routes directly to the registered remote chat receiver (WebRTC chat).
+  /// - Otherwise routes to WhatsApp via WhatsAppMessageBridgeService.
+  static Future<bool> dispatchReplyToSender({
+    required String senderKey,
+    required String message,
+  }) async {
+    return WhatsAppTextValidationService.instance._sendReply(senderKey, message);
+  }
+
   Future<bool> _sendReply(String senderKey, String message) {
     if (senderKey.isEmpty || message.trim().isEmpty) {
       return Future<bool>.value(false);
     }
-    final sender =
+    WhatsAppReplySender? customSender = _customReplySenders[senderKey];
+    if (customSender == null) {
+      for (final entry in _customReplySenders.entries) {
+        if (senderKey.startsWith(entry.key)) {
+          customSender = entry.value;
+          break;
+        }
+      }
+    }
+
+    final sender = customSender ??
         replySender ??
         WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp;
+    final trimmed = message.trim();
+    final formatted = (trimmed.startsWith('🤖') || trimmed.startsWith('⚠️'))
+        ? trimmed
+        : '🤖 פירסומוטו: $trimmed';
     return sender(
       senderKey: senderKey,
-      message: '🤖 פירסומוטו: ${message.trim()}',
+      message: formatted,
     );
   }
 
   Future<bool> _sendStatus(String senderKey, String message) =>
       _sendReply(senderKey, 'עדכון: ${message.trim()}');
 
-  Future<bool> _launchAutoPublish(Map<String, String> state) {
+  Future<bool> _launchAutoPublish(Map<String, String> state) async {
+    for (final launcher in _customAutoPublishLaunchers) {
+      try {
+        launcher(state);
+      } catch (e) {
+        debugPrint('[WhatsAppValidation] customAutoPublishLauncher error: $e');
+      }
+    }
     final launcher =
         autoPublishLauncher ??
         WhatsAppMessageBridgeService.instance.launchAutoPublish;
@@ -1347,49 +1419,74 @@ class WhatsAppTextValidationService {
       return currentState;
     }
 
-    // If already at target count, silently ignore extra image events
-    if (expectedCount > 0 && existingPaths.length >= expectedCount) {
+    const maxAllowedImages = 8;
+    if (existingPaths.length >= maxAllowedImages) {
+      debugPrint(
+        '[WhatsAppValidation] Max images limit ($maxAllowedImages) reached for sender: $senderKey',
+      );
       return currentState;
     }
 
     existingPaths.add(cleanPath);
 
     List<String> finalPaths = existingPaths;
-    if (expectedCount > 0 && existingPaths.length > expectedCount) {
-      finalPaths =
-          existingPaths.skip(existingPaths.length - expectedCount).toList();
+    if (finalPaths.length > maxAllowedImages) {
+      finalPaths = finalPaths.sublist(finalPaths.length - maxAllowedImages);
     }
+
+    final receivedCount = finalPaths.length;
+    final targetExpected =
+        (expectedCount > receivedCount) ? expectedCount : receivedCount;
 
     currentState['image_paths'] = jsonEncode(finalPaths);
     currentState['KEY_IMAGE_PATHS'] = jsonEncode(finalPaths);
-    currentState['image_received_count'] = '${finalPaths.length}';
-    currentState['KEY_IMAGE_RECEIVED_COUNT'] = '${finalPaths.length}';
+    currentState['image_received_count'] = '$receivedCount';
+    currentState['KEY_IMAGE_RECEIVED_COUNT'] = '$receivedCount';
+    currentState['image_expected_count'] = '$targetExpected';
+    currentState['KEY_IMAGE_EXPECTED_COUNT'] = '$targetExpected';
+    currentState['session_status'] = 'ready_to_publish';
+    currentState['ready_to_publish'] = 'true';
     await saveSenderState(senderKey, currentState);
 
-    final receivedCount = finalPaths.length;
-
-    if (expectedCount > 0) {
-      if (receivedCount >= expectedCount) {
-        currentState['session_status'] = 'ready_to_publish';
-        await saveSenderState(senderKey, currentState);
-        await _sendReply(
-          senderKey,
-          'התקבלו $receivedCount מתוך $expectedCount תמונות (עיבוד הושלם).\nלפרסום שלח 0\nלביטול השב ביטול',
-        );
-      } else {
-        await _sendReply(
-          senderKey,
-          'נקלטה תמונה $receivedCount מתוך $expectedCount, מעבד...',
-        );
+    // Schedule debounced batch confirmation response so all images in a burst
+    // are collected before sending a single consolidated confirmation reply.
+    _imageDebounceTimers[senderKey]?.cancel();
+    _imageDebounceTimers[senderKey] = Timer(const Duration(milliseconds: 1400), () async {
+      _imageDebounceTimers.remove(senderKey);
+      final latestState = await loadSenderState(senderKey);
+      List<String> latestPaths = [];
+      final raw = latestState['image_paths'] ?? latestState['KEY_IMAGE_PATHS'];
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          latestPaths = List<String>.from(jsonDecode(raw));
+        } catch (_) {}
       }
-    } else {
-      currentState['session_status'] = 'ready_to_publish';
-      await saveSenderState(senderKey, currentState);
-      await _sendReply(
-        senderKey,
-        'התקבלה תמונה ($receivedCount).\nשלח תמונות נוספות, או שלח 0 כדי להתחיל פרסום (לביטול השב ביטול).',
-      );
-    }
+      final count = latestPaths.length;
+      if (count == 0) return;
+
+      latestState['session_status'] = 'ready_to_publish';
+      latestState['ready_to_publish'] = 'true';
+      latestState['image_received_count'] = '$count';
+      latestState['image_expected_count'] = '$count';
+      latestState['KEY_IMAGE_EXPECTED_COUNT'] = '$count';
+      await saveSenderState(senderKey, latestState);
+
+      final String replyMessage;
+      if (count == 1) {
+        replyMessage =
+            'התקבלה תמונה אחת בהצלחה!\n'
+            'כל הפרטים והתמונות מוכנים לפרסום ביד2.\n'
+            'לפרסום שלח 0\n'
+            'לביטול השב ביטול';
+      } else {
+        replyMessage =
+            'התקבלו $count תמונות בהצלחה!\n'
+            'כל הפרטים והתמונות מוכנים לפרסום ביד2.\n'
+            'לפרסום שלח 0\n'
+            'לביטול השב ביטול';
+      }
+      await _sendReply(senderKey, replyMessage);
+    });
 
     return currentState;
   }
@@ -2094,7 +2191,8 @@ class WhatsAppTextValidationService {
           .timeout(const Duration(seconds: 25));
 
       if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        final decoded =
+            jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
 
         final contentText =
             decoded['choices']?[0]?['message']?['content']?.toString().trim() ??
@@ -2112,7 +2210,7 @@ class WhatsAppTextValidationService {
         }
       } else {
         debugPrint(
-          '[WhatsAppValidationService] AI extraction HTTP ${response.statusCode}',
+          '[WhatsAppValidationService] AI extraction HTTP ${response.statusCode}: ${response.body}',
         );
       }
     } catch (e) {
@@ -2181,17 +2279,29 @@ class WhatsAppTextValidationService {
   Future<String> _resolveAnthropicApiKey() async {
     final configured = anthropicApiKey?.trim() ?? '';
     if (configured.isNotEmpty) return configured;
+    final fromConfig = AgentConfigService.instance.apiKey?.trim() ?? '';
+    if (fromConfig.isNotEmpty) return fromConfig;
     try {
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getString('anthropic_api_key')?.trim() ?? '';
       if (saved.isNotEmpty) return saved;
+      final openAiSaved = prefs.getString('openai_api_key')?.trim() ?? '';
+      if (openAiSaved.isNotEmpty) return openAiSaved;
     } catch (_) {
       // Pure validation can run before Flutter bindings are initialized.
     }
-    return const String.fromEnvironment(
+    final env = const String.fromEnvironment(
       'ANTHROPIC_API_KEY',
       defaultValue: '',
     ).trim();
+    if (env.isNotEmpty) return env;
+    final envOpenAi = const String.fromEnvironment(
+      'OPENAI_API_KEY',
+      defaultValue: '',
+    ).trim();
+    if (envOpenAi.isNotEmpty) return envOpenAi;
+
+    return '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';
   }
 
   Future<bool> _hasAiApiKey() async =>

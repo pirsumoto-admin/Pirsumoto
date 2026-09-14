@@ -19,12 +19,14 @@ class AgentConfigService {
   static const String _prefKeyGeneralRulesJson = 'agent_config_general_rules_json';
   static const String _prefKeyRulesMd = 'agent_config_rules_md';
   static const String _prefKeyVersion = 'agent_config_version';
+  static const String _prefKeyApiKey = 'agent_config_api_key';
 
   // In-memory cached state
   DateTime? _lastUpdated;
   String? _systemPrompt;
   String? _colorMatchingPrompt;
   String? _version;
+  String? _apiKey;
   Map<String, dynamic>? _rules;
   String? _rulesMd;
   dynamic _generalRulesRaw;
@@ -777,6 +779,7 @@ license
       }
 
       _rulesMd = prefs.getString(_prefKeyRulesMd);
+      _apiKey = prefs.getString(_prefKeyApiKey);
     } catch (e) {
       debugPrint('[AgentConfigService] Error reading local cached config: $e');
     } finally {
@@ -825,77 +828,81 @@ license
         remoteLastUpdated = DateTime.fromMillisecondsSinceEpoch(lastUpdatedRaw);
       }
 
-      final bool isRemoteNewer = remoteLastUpdated != null &&
-          (_lastUpdated == null || remoteLastUpdated.isAfter(_lastUpdated!));
+      debugPrint('[AgentConfigService] Updating config from Firestore (remote timestamp: $remoteLastUpdated)...');
 
-      if (isRemoteNewer || force) {
-        debugPrint('[AgentConfigService] Detected newer config version: $remoteLastUpdated (local was: $_lastUpdated). Updating cache...');
-        
-        final remotePrompt = data['systemPrompt']?.toString();
-        if (remotePrompt != null && remotePrompt.trim().isNotEmpty) {
-          _systemPrompt = remotePrompt;
-        }
-
-        final remoteColorPrompt = data['colorMatchingPrompt']?.toString();
-        if (remoteColorPrompt != null && remoteColorPrompt.trim().isNotEmpty) {
-          _colorMatchingPrompt = remoteColorPrompt;
-        }
-
-        final remoteVersion = data['version']?.toString();
-        if (remoteVersion != null && remoteVersion.trim().isNotEmpty) {
-          _version = remoteVersion;
-        }
-
-        final remoteRules = data['rules'];
-        if (remoteRules is Map) {
-          _rules = Map<String, dynamic>.from(remoteRules);
-        }
-
-        final remoteGeneralRules = data['generalRules'] ??
-            (remoteRules is Map ? remoteRules['generalRules'] : null);
-        if (remoteGeneralRules != null) {
-          _generalRulesRaw = remoteGeneralRules;
-        }
-
-        final remoteRulesMd = data['rules_md']?.toString() ??
-            data['rulesMd']?.toString() ??
-            (remoteRules is Map ? remoteRules['rules_md']?.toString() : null);
-        if (remoteRulesMd != null) {
-          _rulesMd = remoteRulesMd;
-        }
-
-        _lastUpdated = remoteLastUpdated ?? DateTime.now();
-
-        // Persist to SharedPreferences
-        final prefs = await SharedPreferences.getInstance();
-        if (_lastUpdated != null) {
-          await prefs.setInt(_prefKeyLastUpdated, _lastUpdated!.millisecondsSinceEpoch);
-        }
-        if (_systemPrompt != null) {
-          await prefs.setString(_prefKeySystemPrompt, _systemPrompt!);
-        }
-        if (_colorMatchingPrompt != null) {
-          await prefs.setString(_prefKeyColorPrompt, _colorMatchingPrompt!);
-        }
-        if (_version != null) {
-          await prefs.setString(_prefKeyVersion, _version!);
-        }
-        if (_rules != null) {
-          await prefs.setString(_prefKeyRulesJson, jsonEncode(_rules));
-        }
-        if (_generalRulesRaw != null) {
-          await prefs.setString(_prefKeyGeneralRulesJson, jsonEncode(_generalRulesRaw));
-        }
-        if (_rulesMd != null) {
-          await prefs.setString(_prefKeyRulesMd, _rulesMd!);
-        }
-
-        debugPrint('[AgentConfigService] Successfully updated system prompt and rules cache.');
-        return true;
-      } else {
-        debugPrint('[AgentConfigService] Config is up to date (lastUpdated: $_lastUpdated).');
-        return false;
+      final remotePrompt = data['systemPrompt']?.toString();
+      if (remotePrompt != null && remotePrompt.trim().isNotEmpty) {
+        _systemPrompt = remotePrompt;
       }
+
+      final remoteColorPrompt = data['colorMatchingPrompt']?.toString();
+      if (remoteColorPrompt != null && remoteColorPrompt.trim().isNotEmpty) {
+        _colorMatchingPrompt = remoteColorPrompt;
+      }
+
+      final remoteVersion = data['version']?.toString();
+      if (remoteVersion != null && remoteVersion.trim().isNotEmpty) {
+        _version = remoteVersion;
+      }
+
+      final remoteApiKey = data['openAiApiKey']?.toString() ?? data['apiKey']?.toString();
+      if (remoteApiKey != null && remoteApiKey.trim().isNotEmpty) {
+        _apiKey = remoteApiKey.trim();
+      }
+
+      final remoteRules = data['rules'];
+      if (remoteRules is Map) {
+        _rules = Map<String, dynamic>.from(remoteRules);
+      } else if (remoteRules is String && remoteRules.trim().isNotEmpty) {
+        _rulesMd = remoteRules.trim();
+      } else if (remoteRules is List) {
+        _generalRulesRaw = remoteRules;
+      }
+
+      final remoteGeneralRules = data['generalRules'] ??
+          (remoteRules is Map ? remoteRules['generalRules'] : null);
+      if (remoteGeneralRules != null) {
+        _generalRulesRaw = remoteGeneralRules;
+      }
+
+      final remoteRulesMd = data['rules_md']?.toString() ??
+          data['rulesMd']?.toString() ??
+          (remoteRules is Map ? remoteRules['rules_md']?.toString() : null);
+      if (remoteRulesMd != null) {
+        _rulesMd = remoteRulesMd;
+      }
+
+      _lastUpdated = remoteLastUpdated ?? DateTime.now();
+
+      // Persist to SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      if (_lastUpdated != null) {
+        await prefs.setInt(_prefKeyLastUpdated, _lastUpdated!.millisecondsSinceEpoch);
+      }
+      if (_systemPrompt != null) {
+        await prefs.setString(_prefKeySystemPrompt, _systemPrompt!);
+      }
+      if (_colorMatchingPrompt != null) {
+        await prefs.setString(_prefKeyColorPrompt, _colorMatchingPrompt!);
+      }
+      if (_version != null) {
+        await prefs.setString(_prefKeyVersion, _version!);
+      }
+      if (_apiKey != null) {
+        await prefs.setString(_prefKeyApiKey, _apiKey!);
+      }
+      if (_rules != null) {
+        await prefs.setString(_prefKeyRulesJson, jsonEncode(_rules));
+      }
+      if (_generalRulesRaw != null) {
+        await prefs.setString(_prefKeyGeneralRulesJson, jsonEncode(_generalRulesRaw));
+      }
+      if (_rulesMd != null) {
+        await prefs.setString(_prefKeyRulesMd, _rulesMd!);
+      }
+
+      debugPrint('[AgentConfigService] Successfully updated system prompt and rules cache.');
+      return true;
     } catch (e) {
       debugPrint('[AgentConfigService] Error fetching agent config from Firestore (falling back to cache): $e');
       return false;
@@ -922,7 +929,10 @@ license
     return const [];
   }
 
-  /// System prompt to pass to the LLM agent turn, automatically including any `rules_md` or `generalRules`.
+  /// Optional API key configured in Firestore
+  String? get apiKey => _apiKey;
+
+  /// System prompt to pass to the LLM agent turn, automatically including any `rules_md` and `generalRules`.
   String get systemPrompt {
     final base = (_systemPrompt != null && _systemPrompt!.trim().isNotEmpty)
         ? _systemPrompt!
@@ -944,7 +954,7 @@ license
       buffer.writeln('</agent_rules>');
     }
 
-    if (legacyRules.isNotEmpty && md == null) {
+    if (legacyRules.isNotEmpty) {
       buffer.writeln('\n\n========================');
       buffer.writeln('כללים כלליים נוספים (GENERAL RULES)');
       buffer.writeln('==================================');
@@ -1069,6 +1079,7 @@ license
     _systemPrompt = null;
     _colorMatchingPrompt = null;
     _version = null;
+    _apiKey = null;
     _rules = null;
     _rulesMd = null;
     _generalRulesRaw = null;

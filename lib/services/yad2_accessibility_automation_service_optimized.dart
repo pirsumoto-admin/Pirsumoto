@@ -14,7 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'ocr_service.dart';
 import 'ui_context.dart';
-import 'whatsapp_message_bridge_service.dart';
+import 'whatsapp_text_validation_service.dart';
 import 'yad2_automation_models.dart' show AutomationPhase, VehiclePublishData;
 
 typedef Yad2RecoveryPlanner =
@@ -2507,21 +2507,64 @@ class Yad2AccessibilityAutomationService {
     return false;
   }
 
+  DateTime? _lastDeadlockNotified;
+
+  Future<void> _notifyDeadlockInterventionRequired(String stepName, String details) async {
+    final senderKey = whatsAppSenderKey?.trim();
+    if (senderKey == null || senderKey.isEmpty) return;
+
+    final now = DateTime.now();
+    if (_lastDeadlockNotified != null &&
+        now.difference(_lastDeadlockNotified!) < const Duration(seconds: 15)) {
+      return; // Debounce notifications
+    }
+    _lastDeadlockNotified = now;
+
+    try {
+      final bool isP2p = senderKey.startsWith('p2p_');
+      final String remoteNotice = isP2p
+          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
+          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
+
+      final message =
+          '⚠️ האוטומציה נתקעה ונדרשת התערבותך!\n'
+          'שלב: $stepName\n'
+          'פירוט: $details\n\n'
+          '$remoteNotice';
+
+      await WhatsAppTextValidationService.dispatchReplyToSender(
+        senderKey: senderKey,
+        message: message,
+      );
+      debugPrint('[Yad2-A11y] Dispatched deadlock notification to $senderKey');
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Failed to dispatch deadlock notification: $e');
+    }
+  }
+
   Future<void> _notifyLoginRequired() async {
-    if (!startedFromWhatsApp ||
-        whatsAppSenderKey == null ||
-        whatsAppSenderKey!.isEmpty) {
+    final senderKey = whatsAppSenderKey?.trim();
+    if (senderKey == null || senderKey.isEmpty) {
       return;
     }
     try {
-      final success = await WhatsAppMessageBridgeService.instance
-          .sendReplyToWhatsApp(
-            senderKey: whatsAppSenderKey!,
-            message: 'אנא התחבר לחשבון יד2 במכשיר הפירסומוטו שלך כדי להמשיך.',
-          );
-      debugPrint('[Yad2-A11y] Sent WhatsApp login prompt: $success');
+      final bool isP2p = senderKey.startsWith('p2p_');
+      final String remoteNotice = isP2p
+          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להזין את פרטי ההתחברות לחשבון יד2.'
+          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי להזין את פרטי ההתחברות לחשבון יד2.';
+
+      final message =
+          '⚠️ נדרשת התחברות לחשבון יד2!\n'
+          'האוטומציה הגיעה למסך כניסה וממתינה להתחברות שלך.\n\n'
+          '$remoteNotice';
+
+      final success = await WhatsAppTextValidationService.dispatchReplyToSender(
+        senderKey: senderKey,
+        message: message,
+      );
+      debugPrint('[Yad2-A11y] Sent login prompt: $success');
     } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to send WhatsApp login prompt: $e');
+      debugPrint('[Yad2-A11y] Failed to send login prompt: $e');
     }
   }
 
@@ -2531,6 +2574,7 @@ class Yad2AccessibilityAutomationService {
     _isPaused = true;
     _pausedPhase = AutomationPhase.phase1;
     unawaited(_beepUser());
+    unawaited(_notifyLoginRequired());
     _loginSamplingTimer = Timer.periodic(const Duration(seconds: 3), (
       timer,
     ) async {
@@ -2664,20 +2708,18 @@ class Yad2AccessibilityAutomationService {
     if (_hasNotifiedCompletion) return;
     _hasNotifiedCompletion = true;
 
-    if (!startedFromWhatsApp ||
-        whatsAppSenderKey == null ||
-        whatsAppSenderKey!.isEmpty) {
+    final senderKey = whatsAppSenderKey?.trim();
+    if (senderKey == null || senderKey.isEmpty) {
       return;
     }
     try {
-      final success = await WhatsAppMessageBridgeService.instance
-          .sendReplyToWhatsApp(
-            senderKey: whatsAppSenderKey!,
-            message: 'תהליך האלעת מודעה ליד 2 הסתיים בהצלחה ✅',
-          );
-      debugPrint('[Yad2-A11y] Sent WhatsApp completion message: $success');
+      final success = await WhatsAppTextValidationService.dispatchReplyToSender(
+        senderKey: senderKey,
+        message: 'תהליך העלאת מודעה ליד2 הסתיים בהצלחה ✅',
+      );
+      debugPrint('[Yad2-A11y] Sent completion message: $success');
     } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to send WhatsApp completion message: $e');
+      debugPrint('[Yad2-A11y] Failed to send completion message: $e');
     }
   }
 
@@ -2810,6 +2852,7 @@ class Yad2AccessibilityAutomationService {
     try {
       await _beepUser();
     } catch (_) {}
+    unawaited(_notifyDeadlockInterventionRequired(phase.description, error));
     onPhaseError?.call(phase, error);
   }
 

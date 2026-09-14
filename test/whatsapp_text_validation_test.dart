@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pirsumoto/services/whatsapp_text_validation_service.dart';
 import 'package:pirsumoto/services/yad2_accessibility_automation_service_optimized.dart';
@@ -1357,6 +1358,94 @@ void main() {
 
         expect(replies.length, equals(2));
         expect(replies.last, contains('קילומטראז\''));
+      },
+    );
+
+    test(
+      'Multi-image upload: accepts several images at once, debounces confirmation, and publishes with all images',
+      () async {
+        final replies = <String>[];
+        final launchedVehicles = <Map<String, String>>[];
+        final service = WhatsAppTextValidationService(
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+          autoPublishLauncher: (data) async {
+            launchedVehicles.add(data);
+            return true;
+          },
+        );
+
+        final sender = 'multi_img_sender_test';
+        await service.saveSenderState(sender, {
+          'license_plate': '12345678',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2020',
+          'color': 'לבן',
+          'fuel_type': 'בנזין',
+          'gear_type': 'אוטומטית',
+          'km': '50000',
+          'price': '75000',
+          'month': '5',
+          'test_month': '11',
+          'test_year': '2026',
+          'hand': '2',
+          'current_ownership': 'פרטית',
+          'previous_ownership': 'פרטית',
+          'vehicle_condition': 'טוב',
+          'session_status': 'ready_for_images',
+        });
+
+        // Create 3 temp test image files
+        final tempDir = await Directory.systemTemp.createTemp('multi_img_test_');
+        final img1 = File('${tempDir.path}/img1.jpg')..writeAsBytesSync([1, 2, 3]);
+        final img2 = File('${tempDir.path}/img2.jpg')..writeAsBytesSync([4, 5, 6]);
+        final img3 = File('${tempDir.path}/img3.jpg')..writeAsBytesSync([7, 8, 9]);
+
+        // Upload 3 images rapidly
+        await service.handleIncomingImage(
+          imageFilePath: img1.path,
+          senderKey: sender,
+        );
+        await service.handleIncomingImage(
+          imageFilePath: img2.path,
+          senderKey: sender,
+        );
+        final stateAfter3 = await service.handleIncomingImage(
+          imageFilePath: img3.path,
+          senderKey: sender,
+        );
+
+        expect(stateAfter3?['session_status'], equals('ready_to_publish'));
+        expect(stateAfter3?['image_received_count'], equals('3'));
+        expect(stateAfter3?['image_expected_count'], equals('3'));
+
+        // Wait for debounce timer to fire
+        await Future.delayed(const Duration(milliseconds: 1600));
+
+        expect(replies.length, equals(1));
+        expect(replies.first, contains('התקבלו 3 תמונות בהצלחה!'));
+        expect(replies.first, contains('לפרסום שלח 0'));
+
+        // Send 0 to publish
+        final statePublish = await service.handleIncomingTextMessage(
+          text: '0',
+          senderKey: sender,
+        );
+
+        expect(statePublish?['session_status'], equals('publishing'));
+        expect(launchedVehicles.length, equals(1));
+        final launchedPaths =
+            List<String>.from(jsonDecode(launchedVehicles.first['image_paths']!));
+        expect(launchedPaths.length, equals(3));
+        expect(launchedPaths, contains(img1.path));
+        expect(launchedPaths, contains(img2.path));
+        expect(launchedPaths, contains(img3.path));
+
+        // Cleanup
+        tempDir.deleteSync(recursive: true);
       },
     );
   });

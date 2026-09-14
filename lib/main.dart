@@ -13,6 +13,8 @@ import 'services/whatsapp_message_bridge_service.dart';
 import 'services/whatsapp_text_validation_service.dart';
 import 'services/yad2_automation_models.dart';
 import 'shared/theme/app_theme.dart';
+import 'remote_control/remote_receiver_service.dart';
+import 'remote_control/remote_control_active_banner.dart';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -60,6 +62,7 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _consumePendingWhatsAppAutoPublish();
       _bootstrapWhatsAppBridge();
+      RemoteControlReceiverService.instance.initialize();
     });
   }
 
@@ -334,12 +337,16 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       final imageFilePath = event.data['imageFilePath']?.toString() ?? '';
       final timestamp = event.data['timestamp'] as int?;
       if (imageFilePath.isNotEmpty && senderKey.isNotEmpty) {
-        await WhatsAppTextValidationService.instance.handleIncomingImage(
+        final updatedState =
+            await WhatsAppTextValidationService.instance.handleIncomingImage(
           imageFilePath: imageFilePath,
           senderKey: senderKey,
           senderName: senderName,
           timestamp: timestamp,
         );
+        if (updatedState != null && updatedState.isNotEmpty) {
+          _applyWhatsAppVehicleData(updatedState);
+        }
       }
     } else if (event.name == 'autoPublishLaunchRequested') {
       final vehicleData = _stringMap(event.data['vehicleData']);
@@ -389,6 +396,16 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
     update('vehicleCondition', data['vehicle_condition']);
     update('description', data['description']);
     update('gear', _gearForForm(data['gear_type']));
+
+    final images = _imagePathsFromVehicleData(data);
+    if (images.isNotEmpty) {
+      final currentImages = ref.read(fp.formControllerProvider).images;
+      for (final img in images) {
+        if (!currentImages.contains(img)) {
+          notifier.addImage(img);
+        }
+      }
+    }
   }
 
   void _startWhatsAppAutoPublish(Map<String, String> data) {
@@ -609,6 +626,14 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       themeMode: ThemeMode.dark, // Defaulting to dark for modern rich aesthetic
       routerConfig: router,
       debugShowCheckedModeBanner: false,
+      builder: (context, child) {
+        return Stack(
+          children: [
+            if (child != null) child,
+            const RemoteControlActiveBanner(),
+          ],
+        );
+      },
     );
   }
 }

@@ -10,7 +10,6 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ui_context.dart';
-import '../../services/whatsapp_message_bridge_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
 import '../../services/yad2_automation_service.dart';
 //import '../../services/yad2_accessibility_automation_service.dart';
@@ -337,25 +336,29 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     required String error,
   }) async {
     final senderKey = widget.whatsAppSenderKey?.trim();
-    if (!widget.startedFromWhatsApp ||
-        senderKey == null ||
+    if (senderKey == null ||
         senderKey.isEmpty ||
-        _whatsAppStopReported ||
-        !Platform.isAndroid) {
+        _whatsAppStopReported) {
       return;
     }
 
     _whatsAppStopReported = true;
     try {
-      await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+      final bool isP2p = senderKey.startsWith('p2p_');
+      final String remoteNotice = isP2p
+          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
+          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
+
+      await WhatsAppTextValidationService.dispatchReplyToSender(
         senderKey: senderKey,
         message:
-            'האוטומציה נעצרה בשלב: $stepName\n'
-            'נא לבדוק את המסך ולהמשיך משם.\n'
-            'שגיאה: $error',
+            '⚠️ האוטומציה נתקעה ונדרשת התערבותך!\n'
+            'שלב: $stepName\n'
+            'שגיאה: $error\n\n'
+            '$remoteNotice',
       );
     } catch (e) {
-      debugPrint('[Yad2Screen] Failed to notify WhatsApp automation stop: $e');
+      debugPrint('[Yad2Screen] Failed to notify automation stop: $e');
     }
   }
 
@@ -367,12 +370,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       debugPrint('[Yad2Screen] Error resetting webview controller: $e');
     }
 
-    if (widget.startedFromWhatsApp &&
-        widget.whatsAppSenderKey != null &&
-        widget.whatsAppSenderKey!.trim().isNotEmpty &&
-        Platform.isAndroid) {
+    if (widget.whatsAppSenderKey != null &&
+        widget.whatsAppSenderKey!.trim().isNotEmpty) {
       try {
-        await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
+        await WhatsAppTextValidationService.dispatchReplyToSender(
           senderKey: widget.whatsAppSenderKey!.trim(),
           message:
               'פרסום המודעה ביד2 הושלם בהצלחה! 🎉\n'
@@ -380,7 +381,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         );
       } catch (e) {
         debugPrint(
-            '[Yad2Screen] Failed to send WhatsApp transition message: $e');
+            '[Yad2Screen] Failed to send transition message: $e');
       }
     }
 

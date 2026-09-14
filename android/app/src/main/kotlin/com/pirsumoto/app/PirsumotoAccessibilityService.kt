@@ -6,6 +6,8 @@ import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -20,20 +22,180 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             private set
     }
 
-    override fun onServiceConnected() {
-        super.onServiceConnected()
-        Log.d("A11Y", "Accessibility Service Connected")
+    init {
         instance = this
     }
 
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        Log.i("A11Y", "PirsumotoAccessibilityService connected and instance assigned: $this")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance == this) {
+            instance = null
+        }
+        Log.i("A11Y", "PirsumotoAccessibilityService destroyed")
+    }
+
     override fun onUnbind(intent: Intent?): Boolean {
-        Log.d("A11Y", "Accessibility Service Unbound")
-        instance = null
+        if (instance == this) {
+            instance = null
+        }
+        Log.i("A11Y", "PirsumotoAccessibilityService unbound")
         return super.onUnbind(intent)
     }
 
+    private var autoApproveMediaProjection = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var autoApproveRunnable: Runnable? = null
+
+    fun startAutoApprovingCapture(durationMs: Long = 10000L) {
+        Log.d("A11Y", "startAutoApprovingCapture initiated for ${durationMs}ms")
+        autoApproveMediaProjection = true
+        autoApproveRunnable?.let { mainHandler.removeCallbacks(it) }
+
+        val startTime = System.currentTimeMillis()
+        val checkRunnable = object : Runnable {
+            override fun run() {
+                if (!autoApproveMediaProjection || System.currentTimeMillis() - startTime > durationMs) {
+                    autoApproveMediaProjection = false
+                    return
+                }
+                if (attemptAutoApproveDialog()) {
+                    Log.i("A11Y", "MediaProjection dialog successfully auto-approved via polling!")
+                    autoApproveMediaProjection = false
+                    return
+                }
+                mainHandler.postDelayed(this, 50)
+            }
+        }
+        autoApproveRunnable = checkRunnable
+        mainHandler.post(checkRunnable)
+    }
+
+    fun stopAutoApprovingCapture() {
+        autoApproveMediaProjection = false
+        autoApproveRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoApproveRunnable = null
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // We only use the service for querying, not event listening
+        if (autoApproveMediaProjection && event != null) {
+            val eventType = event.eventType
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                attemptAutoApproveDialog()
+            }
+        }
+    }
+
+    fun attemptAutoApproveDialog(): Boolean {
+        try {
+            val candidateRoots = mutableListOf<AccessibilityNodeInfo>()
+            rootInActiveWindow?.let { candidateRoots.add(it) }
+            try {
+                for (w in windows) {
+                    w.root?.let { candidateRoots.add(it) }
+                }
+            } catch (_: Exception) {}
+
+            for (root in candidateRoots) {
+                if (checkAndClickConsentDialog(root)) {
+                    return true
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("A11Y", "Error in attemptAutoApproveDialog: $e")
+        }
+        return false
+    }
+
+    private fun checkAndClickConsentDialog(root: AccessibilityNodeInfo): Boolean {
+        val targetTexts = listOf(
+            "start now",
+            "start",
+            "start recording",
+            "התחל עכשיו",
+            "התחל",
+            "התחל הקלטה",
+            "שדר עכשיו",
+            "אישור",
+            "allow",
+            "אפשר"
+        )
+        val targetIds = listOf(
+            "android:id/button1",
+            "com.android.systemui:id/button_start",
+            "com.android.systemui:id/start_button",
+            "com.android.systemui:id/screen_share_mode_options"
+        )
+
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+        fun collect(node: AccessibilityNodeInfo) {
+            allNodes.add(node)
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { collect(it) }
+            }
+        }
+        collect(root)
+
+        val hasMediaProjectionContext = allNodes.any { node ->
+            val txt = (node.text?.toString() ?: "").lowercase()
+            val desc = (node.contentDescription?.toString() ?: "").lowercase()
+            val pkg = (node.packageName?.toString() ?: "").lowercase()
+            txt.contains("פרסומוטו") || txt.contains("pirsumoto") ||
+            txt.contains("recording") || txt.contains("casting") ||
+            txt.contains("screen") || txt.contains("הקלטה") ||
+            txt.contains("שידור") || txt.contains("לשדר") ||
+            txt.contains("מסך") || pkg.contains("systemui")
+        }
+
+        if (!hasMediaProjectionContext) {
+            return false
+        }
+
+        // Auto-check "Don't show again" or "Entire screen" if present
+        for (node in allNodes) {
+            if (node.isCheckable && !node.isChecked) {
+                val txt = (node.text?.toString() ?: "").lowercase()
+                if (txt.contains("don't") || txt.contains("אל תציג") || txt.contains("entire") || txt.contains("כל המסך")) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+            }
+        }
+
+        // Find and click positive / Start button
+        for (node in allNodes) {
+            val viewId = node.viewIdResourceName?.lowercase() ?: ""
+            val txt = (node.text?.toString() ?: "").trim().lowercase()
+
+            val idMatch = targetIds.any { viewId == it.lowercase() }
+            val textMatch = targetTexts.any { txt == it }
+
+            if (idMatch || textMatch) {
+                Log.i("A11Y", "Found MediaProjection consent button: id=$viewId, text=$txt")
+                val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) {
+                    return true
+                }
+                val parent = node.parent
+                if (parent != null && parent.isClickable) {
+                    if (parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        return true
+                    }
+                }
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                if (!rect.isEmpty) {
+                    tapBounds(rect)
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     override fun onInterrupt() {
@@ -552,7 +714,53 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
-    fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, duration: Long = 300L): Boolean {
+    fun tapAt(x: Float, y: Float): Boolean {
+        Log.d("A11Y", "tapAt invoked at ($x, $y)")
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x + 1f, y + 1f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 50L))
+            .build()
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                Log.d("A11Y", "tapAt completed successfully at ($x, $y)")
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                Log.w("A11Y", "tapAt CANCELLED by system at ($x, $y)")
+            }
+        }, null)
+        Log.d("A11Y", "tapAt dispatchGesture returned: $dispatched")
+        return dispatched
+    }
+
+    fun longPressAt(x: Float, y: Float, duration: Long = 700L): Boolean {
+        Log.d("A11Y", "longPressAt invoked at ($x, $y), duration=${duration}ms")
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x + 1f, y + 1f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            .build()
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                Log.d("A11Y", "longPressAt completed successfully at ($x, $y)")
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                Log.w("A11Y", "longPressAt CANCELLED by system at ($x, $y)")
+            }
+        }, null)
+        return dispatched
+    }
+
+    fun pressBackGlobal(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_BACK)
+    }
+
+    fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, duration: Long = 100L): Boolean {
+        Log.d("A11Y", "swipe invoked: ($startX, $startY) -> ($endX, $endY), duration=${duration}ms")
         val path = Path().apply {
             moveTo(startX, startY)
             lineTo(endX, endY)
@@ -563,12 +771,20 @@ class PirsumotoAccessibilityService : AccessibilityService() {
                 GestureDescription.StrokeDescription(
                     path,
                     0,
-                    duration
+                    duration.coerceAtLeast(30L)
                 )
             )
             .build()
 
-        return dispatchGesture(gesture, null, null)
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                Log.d("A11Y", "swipe completed successfully from ($startX, $startY) to ($endX, $endY)")
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                Log.w("A11Y", "swipe CANCELLED by system from ($startX, $startY) to ($endX, $endY)")
+            }
+        }, null)
+        return dispatched
     }
 
     fun enterTextIntoNode(node: AccessibilityNodeInfo, text: String): Boolean {
