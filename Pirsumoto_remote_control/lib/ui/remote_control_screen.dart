@@ -1,8 +1,11 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../remote/coordinate_mapper.dart';
 import '../webrtc/controller_webrtc_session.dart';
+import 'app_theme.dart';
 import 'touch_feedback_overlay.dart';
 import 'remote_keyboard_handler.dart';
 
@@ -25,10 +28,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
 
   Offset? _panStartLocal;
   Offset? _panCurrentLocal;
-  Offset? _panLastDispatchedLocal;
   Offset? _panStartNormalized;
 
-  bool _isHumanControl = true;
+  bool _isHumanControl = false;
 
   @override
   Widget build(BuildContext context) {
@@ -36,70 +38,63 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
       animation: widget.session,
       builder: (context, _) {
         return Scaffold(
-          backgroundColor: const Color(0xFF0D1117),
+          backgroundColor: AppColors.neutral,
           appBar: AppBar(
-            backgroundColor: const Color(0xFF161B22),
+            backgroundColor: AppColors.surface,
             elevation: 0,
-            leadingWidth: 90,
-            leading: TextButton.icon(
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.arrow_back_ios_new, size: 14, color: Color(0xFF58A6FF)),
-              label: Text(
-                'צ\'אט',
-                style: GoogleFonts.inter(
-                  color: const Color(0xFF58A6FF),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-              ),
-            ),
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  widget.deviceName,
-                  style: GoogleFonts.outfit(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  widget.session.isConnected ? 'שליטה מרחוק פעילה' : 'מתחבר...',
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    color: widget.session.isConnected
-                        ? const Color(0xFF3FB950)
-                        : Colors.amberAccent,
-                  ),
-                ),
-              ],
-            ),
             centerTitle: true,
+            bottom: const PreferredSize(
+              preferredSize: Size.fromHeight(1),
+              child: Divider(height: 1, color: AppColors.border),
+            ),
+            leading: IconButton(
+              icon: const Icon(
+                Icons.chevron_left_rounded,
+                size: 28,
+                color: AppColors.onSurface,
+              ),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+
+            // Center: Device Name (e.g. xiaomi A30)
+            title: Text(
+              widget.deviceName,
+              textDirection: TextDirection.ltr,
+              style: GoogleFonts.heebo(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: AppColors.onSurface,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+
+            // Physical top left (actions in RTL): Live Stream Indicator
             actions: [
               Padding(
-                padding: const EdgeInsets.only(right: 12),
+                padding: const EdgeInsets.only(left: 14),
                 child: Center(child: _buildCameraIndicator()),
               ),
             ],
           ),
           body: SafeArea(
             child: RemoteKeyboardHandler(
-              onSendText: (text) => widget.session.sendText(text),
-              onSendKey: (key) => widget.session.sendKey(key),
+              onSendText: (text) {
+                if (_isHumanControl) widget.session.sendText(text);
+              },
+              onSendKey: (key) {
+                if (_isHumanControl) widget.session.sendKey(key);
+              },
               child: Builder(
                 builder: (context) {
                   return Column(
                     children: [
+                      // Video Stream Viewport
                       Expanded(
                         child: _buildVideoArea(context),
                       ),
+
+                      // Fixed Bottom Toolbar (4 columns in RTL order)
                       _buildBottomToolbar(context),
                     ],
                   );
@@ -113,49 +108,71 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
   }
 
   Widget _buildCameraIndicator() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(
-        color: const Color(0xCC161B22),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: widget.session.isConnected
-              ? const Color(0xFF238636)
-              : Colors.amberAccent.withValues(alpha: 0.5),
-          width: 1,
+    if (!widget.session.isConnected) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: AppColors.warningSoft,
+          borderRadius: BorderRadius.circular(999),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: (widget.session.isConnected
-                    ? const Color(0xFF238636)
-                    : Colors.amberAccent)
-                .withValues(alpha: 0.3),
-            blurRadius: 8,
-            spreadRadius: 1,
-          ),
-        ],
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: AppColors.warning,
+              ),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              'מתחבר...',
+              style: GoogleFonts.heebo(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.warning,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.errorSoft,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: AppColors.error.withValues(alpha: 0.2)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
+          const Icon(
             Icons.videocam_rounded,
-            size: 16,
-            color: widget.session.isConnected
-                ? const Color(0xFF3FB950)
-                : Colors.amberAccent,
+            size: 14,
+            color: AppColors.error,
           ),
-          if (widget.session.isConnected && widget.session.pingMs > 0) ...[
-            const SizedBox(width: 5),
-            Text(
-              '${widget.session.pingMs}ms',
-              style: GoogleFonts.inter(
-                color: const Color(0xFF8B949E),
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-              ),
+          const SizedBox(width: 4),
+          Container(
+            width: 6,
+            height: 6,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppColors.error,
             ),
-          ],
+          ),
+          const SizedBox(width: 4),
+          Text(
+            'שידור חי',
+            style: GoogleFonts.heebo(
+              color: AppColors.error,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );
@@ -167,21 +184,30 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.signal_cellular_connected_no_internet_4_bar,
-                size: 48, color: Color(0xFF8B949E)),
-            const SizedBox(height: 16),
+            const Icon(
+              Icons.signal_cellular_connected_no_internet_4_bar_rounded,
+              size: 48,
+              color: AppColors.secondary,
+            ),
+            const SizedBox(height: 14),
             Text(
               widget.session.errorMessage ?? 'החיבור הסתיים',
-              style: GoogleFonts.inter(color: Colors.white70, fontSize: 14),
+              style: GoogleFonts.heebo(color: AppColors.secondary, fontSize: 14),
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () => widget.session.connect(),
-              icon: const Icon(Icons.refresh),
-              label: const Text('התחבר מחדש'),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: Text(
+                'התחבר מחדש',
+                style: GoogleFonts.heebo(fontWeight: FontWeight.w600),
+              ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF238636),
+                backgroundColor: AppColors.primaryAction,
                 foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
           ],
@@ -194,196 +220,301 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
         final containerSize = Size(constraints.maxWidth, constraints.maxHeight);
         final aspectRatio = widget.session.remoteAspectRatio;
 
-        return TouchFeedbackOverlay(
-          key: _touchOverlayKey,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapDown: (details) {
-              // Trigger instant zero-latency visual touch ripple at local touch point
-              _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
-            },
-            onTapUp: (details) {
-              final norm = CoordinateMapper.mapLocalToNormalized(
-                localPosition: details.localPosition,
-                containerSize: containerSize,
-                videoAspectRatio: aspectRatio,
-              );
-              if (norm != null) {
-                widget.session.sendTap(norm.dx, norm.dy);
-              }
-            },
-            onLongPressStart: (details) {
-              _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
-
-              final norm = CoordinateMapper.mapLocalToNormalized(
-                localPosition: details.localPosition,
-                containerSize: containerSize,
-                videoAspectRatio: aspectRatio,
-              );
-              if (norm != null) {
-                widget.session.sendLongPress(norm.dx, norm.dy, durationMs: 700);
-              }
-            },
-            onPanStart: (details) {
-              _panStartLocal = details.localPosition;
-              _panCurrentLocal = details.localPosition;
-              _panLastDispatchedLocal = details.localPosition;
-              _panStartNormalized = CoordinateMapper.mapLocalToNormalized(
-                localPosition: details.localPosition,
-                containerSize: containerSize,
-                videoAspectRatio: aspectRatio,
-              );
-            },
-            onPanUpdate: (details) {
-              _panCurrentLocal = details.localPosition;
-              if (_panLastDispatchedLocal == null) {
-                _panLastDispatchedLocal = details.localPosition;
-                return;
-              }
-
-              final delta = details.localPosition - _panLastDispatchedLocal!;
-              // Dispatch incremental drag every ~14 logical pixels of movement for direct-manipulation scroll
-              if (delta.distance >= 14.0) {
-                final fromNorm = CoordinateMapper.mapLocalToNormalized(
-                  localPosition: _panLastDispatchedLocal!,
-                  containerSize: containerSize,
-                  videoAspectRatio: aspectRatio,
-                );
-                final toNorm = CoordinateMapper.mapLocalToNormalized(
-                  localPosition: details.localPosition,
-                  containerSize: containerSize,
-                  videoAspectRatio: aspectRatio,
-                );
-
-                if (fromNorm != null && toNorm != null) {
-                  widget.session.sendSwipe(
-                    fromNorm.dx,
-                    fromNorm.dy,
-                    toNorm.dx.clamp(0.0, 1.0),
-                    toNorm.dy.clamp(0.0, 1.0),
-                    durationMs: 45,
-                  );
-                }
-                _panLastDispatchedLocal = details.localPosition;
-              }
-            },
-            onPanEnd: (details) {
-              final velocity = details.velocity.pixelsPerSecond;
-              // If the user flicked with significant velocity, dispatch a snappy fling
-              if (velocity.distance > 120.0 && _panCurrentLocal != null) {
-                final flingStartLocal = _panLastDispatchedLocal ?? _panCurrentLocal!;
-                // Scale fling distance according to velocity
-                final flingDistance = velocity * 0.18;
-                final targetLocal = flingStartLocal + flingDistance;
-
-                final fromNorm = CoordinateMapper.mapLocalToNormalized(
-                  localPosition: flingStartLocal,
-                  containerSize: containerSize,
-                  videoAspectRatio: aspectRatio,
-                );
-                final toNorm = CoordinateMapper.mapLocalToNormalized(
-                  localPosition: targetLocal,
-                  containerSize: containerSize,
-                  videoAspectRatio: aspectRatio,
-                );
-
-                if (fromNorm != null && toNorm != null) {
-                  // Crisp 60-120ms gesture triggers Android's native smooth fling inertia
-                  final durationMs = (10000.0 / velocity.distance).round().clamp(60, 120);
-                  widget.session.sendSwipe(
-                    fromNorm.dx,
-                    fromNorm.dy,
-                    toNorm.dx.clamp(0.0, 1.0),
-                    toNorm.dy.clamp(0.0, 1.0),
-                    durationMs: durationMs,
-                  );
-                }
-              } else if (_panStartNormalized != null &&
-                  _panStartLocal != null &&
-                  _panCurrentLocal != null &&
-                  _panLastDispatchedLocal == _panStartLocal) {
-                // If it was a small quick drag that didn't trigger incremental threshold
-                final dragDelta = _panCurrentLocal! - _panStartLocal!;
-                if (dragDelta.distance >= 5.0) {
-                  final toNorm = CoordinateMapper.mapLocalToNormalized(
-                    localPosition: _panCurrentLocal!,
+        return Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            TouchFeedbackOverlay(
+              key: _touchOverlayKey,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (details) {
+                  if (!_isHumanControl) return;
+                  _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
+                },
+                onTapUp: (details) {
+                  if (!_isHumanControl) {
+                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'יש ללחוץ על "לקיחת שליטה" כדי לשלוט במכשיר',
+                          style: GoogleFonts.heebo(color: Colors.white),
+                        ),
+                        backgroundColor: AppColors.surfaceSubtle,
+                        duration: const Duration(milliseconds: 1500),
+                      ),
+                    );
+                    return;
+                  }
+                  final norm = CoordinateMapper.mapLocalToNormalized(
+                    localPosition: details.localPosition,
                     containerSize: containerSize,
                     videoAspectRatio: aspectRatio,
                   );
-                  if (toNorm != null) {
-                    widget.session.sendSwipe(
-                      _panStartNormalized!.dx,
-                      _panStartNormalized!.dy,
-                      toNorm.dx.clamp(0.0, 1.0),
-                      toNorm.dy.clamp(0.0, 1.0),
-                      durationMs: 80,
-                    );
+                  if (norm != null) {
+                    widget.session.sendTap(norm.dx, norm.dy);
                   }
-                }
-              }
-              _panStartLocal = null;
-              _panCurrentLocal = null;
-              _panLastDispatchedLocal = null;
-              _panStartNormalized = null;
-            },
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: aspectRatio,
-                child: RTCVideoView(
-                  widget.session.videoRenderer,
-                  key: ValueKey<String>(
-                    'rtc_remote_${widget.session.videoRenderer.textureId}_${widget.session.videoRenderer.srcObject?.id}',
+                },
+                onLongPressStart: (details) {
+                  if (!_isHumanControl) return;
+                  _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
+
+                  final norm = CoordinateMapper.mapLocalToNormalized(
+                    localPosition: details.localPosition,
+                    containerSize: containerSize,
+                    videoAspectRatio: aspectRatio,
+                  );
+                  if (norm != null) {
+                    widget.session.sendLongPress(norm.dx, norm.dy, durationMs: 700);
+                  }
+                },
+                onPanStart: (details) {
+                  if (!_isHumanControl) return;
+                  _panStartLocal = details.localPosition;
+                  _panCurrentLocal = details.localPosition;
+                  _panStartNormalized = CoordinateMapper.mapLocalToNormalized(
+                    localPosition: details.localPosition,
+                    containerSize: containerSize,
+                    videoAspectRatio: aspectRatio,
+                  );
+                },
+                onPanUpdate: (details) {
+                  if (!_isHumanControl) return;
+                  _panCurrentLocal = details.localPosition;
+                },
+                onPanEnd: (details) {
+                  if (!_isHumanControl) return;
+                  if (_panStartLocal != null && _panCurrentLocal != null) {
+                    final totalDistance = (_panCurrentLocal! - _panStartLocal!).distance;
+                    final velocity = details.velocity.pixelsPerSecond;
+
+                    if (totalDistance >= 25.0 || velocity.distance >= 250.0) {
+                      final endNormalized = CoordinateMapper.mapLocalToNormalized(
+                        localPosition: _panCurrentLocal!,
+                        containerSize: containerSize,
+                        videoAspectRatio: aspectRatio,
+                      );
+
+                      if (_panStartNormalized != null && endNormalized != null) {
+                        widget.session.sendSwipe(
+                          _panStartNormalized!.dx,
+                          _panStartNormalized!.dy,
+                          endNormalized.dx,
+                          endNormalized.dy,
+                          durationMs: 250,
+                        );
+                      }
+                    }
+                  }
+
+                  _panStartLocal = null;
+                  _panCurrentLocal = null;
+                  _panStartNormalized = null;
+                },
+                child: Container(
+                  color: Colors.black,
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: aspectRatio,
+                      child: RTCVideoView(
+                        widget.session.videoRenderer,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
+                    ),
                   ),
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                 ),
               ),
             ),
-          ),
+            if (!_isHumanControl && widget.session.isConnected)
+              Positioned(
+                top: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.8),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.lock_outline_rounded,
+                        size: 14,
+                        color: AppColors.secondary,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'מצב צפייה בלבד (לחץ "לקיחת שליטה" לשליטה במסך)',
+                        style: GoogleFonts.heebo(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: AppColors.secondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
         );
       },
     );
   }
 
+  Future<void> _handleClearAndResetSession() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.border),
+        ),
+        title: Text(
+          'ניקוי הצ\'אט ואתחול סשן',
+          style: GoogleFonts.heebo(
+            color: AppColors.onSurface,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        content: Text(
+          'פעולה זו תמחק את כל היסטוריית ההודעות בצ\'אט ותאתחל סשן חדש ונקי מול המכשיר.',
+          style: GoogleFonts.heebo(color: AppColors.secondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'ביטול',
+              style: GoogleFonts.heebo(color: AppColors.secondary),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: Text(
+              'ניקוי ואתחול',
+              style: GoogleFonts.heebo(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final deviceId = widget.session.signaling.deviceId;
+
+    // 1. Clear SharedPreferences local chat storage
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('chat_messages_$deviceId');
+    } catch (e) {
+      debugPrint('[RemoteControl] Error clearing local prefs: $e');
+    }
+
+    // 2. Clear Firestore messages for this device
+    try {
+      final msgs = await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(deviceId)
+          .collection('messages')
+          .get();
+      for (final doc in msgs.docs) {
+        await doc.reference.delete();
+      }
+    } catch (e) {
+      debugPrint('[RemoteControl] Error clearing Firestore messages: $e');
+    }
+
+    // 3. Send reset command to receiver via WebRTC (if connected)
+    try {
+      widget.session.sendReset();
+      widget.session.sendChatMessage('ביטול');
+    } catch (_) {}
+
+    // 4. Send reset instruction to Firestore so FirebaseChatReceiver resets as well
+    try {
+      final messageId = 'reset_${DateTime.now().millisecondsSinceEpoch}';
+      await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(deviceId)
+          .collection('messages')
+          .doc(messageId)
+          .set({
+        'id': messageId,
+        'sender': 'user',
+        'type': 'reset',
+        'text': 'ביטול',
+        'status': 'pending',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'הצ\'אט נוקה והסשן אותחל מחדש',
+            style: GoogleFonts.heebo(color: Colors.white),
+          ),
+          backgroundColor: AppColors.surfaceSubtle,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
   Widget _buildBottomToolbar(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: const BoxDecoration(
-        color: Color(0xFF161B22),
+        color: AppColors.surface,
         border: Border(
-          top: BorderSide(color: Color(0xFF30363D), width: 1),
+          top: BorderSide(color: AppColors.border, width: 1),
         ),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          // Device Back Button
+          // 1. Back (חזרה) - Physical Right in RTL
           _buildActionButton(
-            icon: Icons.arrow_back_rounded,
-            label: 'חזור במכשיר',
-            onTap: () => widget.session.sendBack(),
-          ),
-
-          // Device Home Button
-          _buildActionButton(
-            icon: Icons.home_rounded,
-            label: 'בית',
-            onTap: () => widget.session.sendHome(),
-          ),
-
-          // Native Keyboard Toggle
-          _buildActionButton(
-            icon: Icons.keyboard_rounded,
-            label: 'מקלדת',
+            icon: Icons.arrow_forward_rounded, // Right-pointing back arrow in RTL
+            label: 'חזרה',
+            color: _isHumanControl ? AppColors.onSurface : AppColors.secondary,
             onTap: () {
-              RemoteKeyboardHandler.of(context)?.toggleKeyboard();
+              if (!_isHumanControl) {
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      'יש ללחוץ על "לקיחת שליטה" כדי לשלוט במכשיר',
+                      style: GoogleFonts.heebo(color: Colors.white),
+                    ),
+                    backgroundColor: AppColors.surfaceSubtle,
+                    duration: const Duration(milliseconds: 1500),
+                  ),
+                );
+                return;
+              }
+              widget.session.sendBack();
             },
           ),
 
-          // Automation Handover Toggle
+          // 2. Control Pointer (לקיחת שליטה / שחרור שליטה)
           _buildActionButton(
-            icon: _isHumanControl ? Icons.smart_toy_outlined : Icons.touch_app_rounded,
-            label: _isHumanControl ? 'העבר לבוט' : 'שליטה ידנית',
-            color: _isHumanControl ? Colors.amberAccent : const Color(0xFF58A6FF),
+            icon: Icons.touch_app_rounded,
+            label: _isHumanControl ? 'שחרור שליטה' : 'לקיחת שליטה',
+            color: _isHumanControl ? AppColors.primaryAction : AppColors.secondary,
+            isHighlighted: _isHumanControl,
             onTap: () {
               final nextState = !_isHumanControl;
               setState(() {
@@ -395,40 +526,60 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
             },
           ),
 
-          // Disconnect Button
+          // 3. Clear (ניקוי) - Clean chat & reset session
           _buildActionButton(
-            icon: Icons.power_settings_new,
-            label: 'התנתק',
-            color: Colors.redAccent,
+            icon: Icons.delete_outline_rounded,
+            label: 'ניקוי',
+            color: AppColors.onSurface,
+            onTap: _handleClearAndResetSession,
+          ),
+
+          // 4. Disconnect (ניתוק) - Physical Left in RTL
+          _buildActionButton(
+            icon: Icons.call_end_rounded,
+            label: 'ניתוק',
+            color: AppColors.error,
             onTap: () async {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
-                  backgroundColor: const Color(0xFF161B22),
+                  backgroundColor: AppColors.surface,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
-                    side: const BorderSide(color: Color(0xFF30363D)),
+                    side: const BorderSide(color: AppColors.border),
                   ),
                   title: Text(
                     'ניתוק חיבור',
-                    style: GoogleFonts.outfit(color: Colors.white, fontWeight: FontWeight.bold),
+                    style: GoogleFonts.heebo(
+                      color: AppColors.onSurface,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   content: Text(
                     'האם ברצונך לנתק את החיבור לשליטה מרחוק ולסגור את הסשן?',
-                    style: GoogleFonts.inter(color: const Color(0xFFC9D1D9)),
+                    style: GoogleFonts.heebo(color: AppColors.secondary),
                   ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.of(ctx).pop(false),
-                      child: Text('ביטול', style: GoogleFonts.inter(color: const Color(0xFF8B949E))),
+                      child: Text(
+                        'ביטול',
+                        style: GoogleFonts.heebo(color: AppColors.secondary),
+                      ),
                     ),
                     ElevatedButton(
                       onPressed: () => Navigator.of(ctx).pop(true),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFDA3633),
+                        backgroundColor: AppColors.error,
                         foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
                       ),
-                      child: Text('התנתק', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+                      child: Text(
+                        'ניתוק',
+                        style: GoogleFonts.heebo(fontWeight: FontWeight.w600),
+                      ),
                     ),
                   ],
                 ),
@@ -450,24 +601,31 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
     required IconData icon,
     required String label,
     required VoidCallback onTap,
-    Color color = Colors.white,
+    Color color = AppColors.onSurface,
+    bool isHighlighted = false,
   }) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
-      child: Padding(
+      child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: isHighlighted
+            ? BoxDecoration(
+                color: AppColors.primarySoft,
+                borderRadius: BorderRadius.circular(12),
+              )
+            : null,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 4),
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 3),
             Text(
               label,
-              style: GoogleFonts.inter(
+              style: GoogleFonts.heebo(
                 color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
+                fontSize: 12,
+                fontWeight: isHighlighted ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
           ],

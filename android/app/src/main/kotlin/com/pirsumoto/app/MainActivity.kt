@@ -1,9 +1,11 @@
 package com.pirsumoto.app
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -17,10 +19,88 @@ class MainActivity : FlutterActivity() {
     private val WHATSAPP_CHANNEL = "com.pirsumoto/whatsapp_bridge"
     private val WHATSAPP_EVENTS_CHANNEL = "com.pirsumoto/whatsapp_bridge/events"
 
+    companion object {
+        var isAppInForeground: Boolean = false
+            private set
+        var currentActivity: MainActivity? = null
+            private set
+
+        fun bringToForeground(context: Context): Boolean {
+            Log.i("MainActivity", "bringToForeground called. Current isAppInForeground=$isAppInForeground")
+            try {
+                // 1. Wake up screen if interactive is false
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (pm != null && !pm.isInteractive) {
+                    @Suppress("DEPRECATION")
+                    val wl = pm.newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                        "pirsumoto:remote_control_wakeup"
+                    )
+                    wl.acquire(3000)
+                }
+
+                // 2. Determine target context (prefer active AccessibilityService or currentActivity, or fallback to context)
+                val a11y = PirsumotoAccessibilityService.instance
+                val targetContext = a11y ?: currentActivity ?: context
+
+                val intent = Intent(targetContext, MainActivity::class.java).apply {
+                    action = Intent.ACTION_MAIN
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                }
+
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                val pi = PendingIntent.getActivity(targetContext, 9912, intent, flags)
+                try {
+                    pi.send()
+                } catch (_: Exception) {
+                    targetContext.startActivity(intent)
+                }
+                return true
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to bring app to foreground", e)
+                return false
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         prepareForAutoPublishIntent(intent)
         super.onCreate(savedInstanceState)
+        currentActivity = this
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
         hideSystemUI()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isAppInForeground = true
+        currentActivity = this
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isAppInForeground = false
+    }
+
+    override fun onDestroy() {
+        if (currentActivity == this) {
+            currentActivity = null
+            isAppInForeground = false
+        }
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -145,6 +225,17 @@ class MainActivity : FlutterActivity() {
                     Log.e("A11Y", "Total failure to open accessibility settings", e2)
                     result.success(false)
                 }
+                return@setMethodCallHandler
+            }
+
+            if (call.method == "bringAppToForeground") {
+                WhatsAppDaemonService.bringAppToForeground(context)
+                MainActivity.bringToForeground(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "isAppInForeground") {
+                result.success(isAppInForeground)
                 return@setMethodCallHandler
             }
 

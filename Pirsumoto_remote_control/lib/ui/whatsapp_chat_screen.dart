@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,7 +11,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../signaling/controller_signaling.dart';
 import '../webrtc/controller_webrtc_session.dart';
+import 'app_theme.dart';
+import 'chat_message_bubble.dart';
 import 'remote_control_screen.dart';
 
 enum ChatSender { user, bot }
@@ -20,6 +25,7 @@ class ChatMessageItem {
   final String text;
   final String? mediaType; // 'image', 'audio', 'video'
   final String? localFilePath;
+  final String? mediaUrl;
   final String? caption;
   final DateTime timestamp;
   double uploadProgress;
@@ -32,6 +38,7 @@ class ChatMessageItem {
     this.text = '',
     this.mediaType,
     this.localFilePath,
+    this.mediaUrl,
     this.caption,
     required this.timestamp,
     this.uploadProgress = 1.0,
@@ -46,6 +53,7 @@ class ChatMessageItem {
       'text': text,
       'mediaType': mediaType,
       'localFilePath': localFilePath,
+      'mediaUrl': mediaUrl,
       'caption': caption,
       'timestamp': timestamp.millisecondsSinceEpoch,
       'audioDurationMs': audioDuration?.inMilliseconds,
@@ -54,33 +62,58 @@ class ChatMessageItem {
 
   factory ChatMessageItem.fromJson(Map<String, dynamic> json) {
     return ChatMessageItem(
-      id: json['id'] as String? ??
+      id:
+          json['id'] as String? ??
           'msg_${DateTime.now().millisecondsSinceEpoch}',
-      sender: json['sender'] == 'user' ? ChatSender.user : ChatSender.bot,
+      sender: _readSender(json),
       text: json['text'] as String? ?? '',
       mediaType: json['mediaType'] as String?,
       localFilePath: json['localFilePath'] as String?,
+      mediaUrl: json['mediaUrl'] as String?,
       caption: json['caption'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(
         json['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch,
       ),
       uploadProgress: 1.0,
       isUploading: false,
-      audioDuration: json['audioDurationMs'] != null
-          ? Duration(milliseconds: json['audioDurationMs'] as int)
-          : null,
+      audioDuration:
+          json['audioDurationMs'] != null
+              ? Duration(milliseconds: json['audioDurationMs'] as int)
+              : null,
     );
+  }
+
+  static ChatSender _readSender(Map<String, dynamic> json) {
+    // Keep explicit authorship, including user messages quoting the bot.
+    if (json['sender'] == 'user') return ChatSender.user;
+    if (json['sender'] == 'bot') return ChatSender.bot;
+    for (final field in ['isFromUser', 'fromUser']) {
+      if (json[field] is bool) {
+        return json[field] == true ? ChatSender.user : ChatSender.bot;
+      }
+    }
+
+    // Recover authorship in older saved messages without sender metadata.
+    final text = (json['text'] as String? ?? '').trimLeft();
+    if (RegExp(r'^🤖\s*פירסומוטו').hasMatch(text)) return ChatSender.bot;
+    final id = json['id'] as String? ?? '';
+    if (['msg_', 'img_', 'vid_', 'audio_'].any(id.startsWith)) {
+      return ChatSender.user;
+    }
+    return ChatSender.bot;
   }
 }
 
 class WhatsAppChatScreen extends StatefulWidget {
-  final ControllerWebRtcSession session;
+  final String deviceId;
   final String deviceName;
+  final ControllerWebRtcSession? session;
 
   const WhatsAppChatScreen({
     super.key,
-    required this.session,
+    required this.deviceId,
     required this.deviceName,
+    this.session,
   });
 
   @override
@@ -95,29 +128,29 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   final List<ChatMessageItem> _messages = [];
+  StreamSubscription? _firestoreSub;
   StreamSubscription? _replySub;
-  StreamSubscription? _statusSub;
   StreamSubscription? _playerStateSub;
   StreamSubscription? _playerPositionSub;
 
   bool _isRecording = false;
   int _recordSeconds = 0;
   Timer? _recordTimer;
-  String? _statusSubtitle;
-  Timer? _statusSubtitleTimer;
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _deviceStatusStream;
 
   String? _playingAudioId;
   Duration _currentAudioPosition = Duration.zero;
   Duration _currentAudioDuration = Duration.zero;
 
-  String get _storageKey {
-    final devId = widget.session.signaling.deviceId;
-    return 'chat_messages_${devId.isNotEmpty ? devId : "default"}';
-  }
+  String get _storageKey => 'chat_messages_${widget.deviceId}';
 
   @override
   void initState() {
     super.initState();
+    _deviceStatusStream = FirebaseFirestore.instance
+        .collection('remote_control_devices')
+        .doc(widget.deviceId)
+        .snapshots(includeMetadataChanges: true);
     _listenToSessionEvents();
     _initAudioPlayerListeners();
     _loadMessagesFromPrefs();
@@ -129,15 +162,24 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final jsonStr = prefs.getString(_storageKey);
       if (jsonStr != null && jsonStr.isNotEmpty) {
         final List<dynamic> decoded = jsonDecode(jsonStr);
-        final loaded = decoded
-            .map((item) =>
-                ChatMessageItem.fromJson(item as Map<String, dynamic>))
-            .toList();
+        final loaded =
+            decoded
+                .map(
+                  (item) =>
+                      ChatMessageItem.fromJson(item as Map<String, dynamic>),
+                )
+                .toList();
         if (loaded.isNotEmpty) {
           if (!mounted) return;
           setState(() {
+            final merged = {
+              for (final message in _messages) message.id: message,
+              // Saved messages retain local media paths.
+              for (final message in loaded) message.id: message,
+            };
             _messages.clear();
-            _messages.addAll(loaded);
+            _messages.addAll(merged.values);
+            _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
           });
           _scrollToBottom();
           return;
@@ -169,53 +211,99 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   Future<void> _clearChatData() async {
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1F2C34),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFF2A3942)),
-        ),
-        title: Text(
-          'ניקוי היסטוריית צ\'אט',
-          style: GoogleFonts.outfit(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        content: Text(
-          'האם אתה בטוח שברצונך למחוק את כל היסטוריית ההודעות השמורה עבור מכשיר זה?',
-          style: GoogleFonts.inter(color: const Color(0xFFD1D7DB)),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(
-              'ביטול',
-              style: GoogleFonts.inter(color: const Color(0xFF8696A0)),
+      builder:
+          (ctx) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: AppColors.border),
             ),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFDA3633),
-              foregroundColor: Colors.white,
+            title: Text(
+              'ניקוי השיחה ואתחול סשן',
+              style: GoogleFonts.heebo(
+                color: AppColors.onSurface,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-            child: Text(
-              'מחק הכל',
-              style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+            content: Text(
+              'פעולה זו תמחק את כל היסטוריית ההודעות ותאתחל סשן חדש ונקי מול המכשיר.',
+              style: GoogleFonts.heebo(color: AppColors.secondary),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text(
+                  'ביטול',
+                  style: GoogleFonts.heebo(color: AppColors.secondary),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.error,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: Text(
+                  'ניקוי ואתחול',
+                  style: GoogleFonts.heebo(fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
     );
 
     if (confirm == true) {
+      // 1. Clear SharedPreferences
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.remove(_storageKey);
       } catch (e) {
         debugPrint('[WhatsAppChat] Error clearing prefs: $e');
       }
+
+      // 2. Clear Firestore messages for this device
+      try {
+        final msgs = await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .get();
+        for (final doc in msgs.docs) {
+          await doc.reference.delete();
+        }
+      } catch (e) {
+        debugPrint('[WhatsAppChat] Error clearing Firestore messages: $e');
+      }
+
+      // 3. Send reset command to receiver via WebRTC if connected
+      if (widget.session?.isConnected == true) {
+        try {
+          widget.session!.sendReset();
+          widget.session!.sendChatMessage('ביטול');
+        } catch (_) {}
+      }
+
+      // 4. Send reset instruction to Firestore so FirebaseChatReceiver resets
+      try {
+        final messageId = 'reset_${DateTime.now().millisecondsSinceEpoch}';
+        await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .doc(messageId)
+            .set({
+          'id': messageId,
+          'sender': 'user',
+          'type': 'reset',
+          'text': 'ביטול',
+          'status': 'pending',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } catch (_) {}
 
       if (!mounted) return;
       setState(() {
@@ -228,7 +316,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'היסטוריית הצ\'אט נמחקה בהצלחה',
+              'היסטוריית הצ\'אט נוקתה והסשן אותחל מחדש',
               style: GoogleFonts.inter(color: Colors.white),
             ),
             backgroundColor: const Color(0xFF1F2C34),
@@ -252,35 +340,75 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   void _listenToSessionEvents() {
-    _replySub = widget.session.chatReplies.listen((reply) {
+    // 1. Listen to Firestore messages (persistent cloud channel - works without WebRTC)
+    final messagesStream =
+        FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .orderBy('timestamp', descending: false)
+            .snapshots();
+
+    _firestoreSub = messagesStream.listen((snapshot) {
       if (!mounted) return;
-      setState(() {
-        _statusSubtitle = null;
-        _messages.add(
-          ChatMessageItem(
-            id: reply.id,
-            sender: ChatSender.bot,
-            text: reply.text,
-            timestamp: DateTime.fromMillisecondsSinceEpoch(reply.timestamp),
-          ),
-        );
-      });
-      _scrollToBottom();
-      _saveMessagesToPrefs();
+      bool hasNew = false;
+      for (final change in snapshot.docChanges) {
+        if (change.type == DocumentChangeType.added) {
+          final data = change.doc.data();
+          if (data == null) continue;
+          final id = data['id'] as String? ?? change.doc.id;
+          final sender = data['sender'] as String? ?? '';
+          final type = data['type'] as String? ?? 'message';
+
+          if (type == 'status') continue;
+
+          if (sender == 'bot' || sender == 'user') {
+            final ts =
+                data['timestamp'] as int? ??
+                DateTime.now().millisecondsSinceEpoch;
+            if (!_messages.any((m) => m.id == id)) {
+              _messages.add(
+                ChatMessageItem.fromJson({
+                  ...data,
+                  'id': id,
+                  'timestamp': ts,
+                }),
+              );
+              hasNew = true;
+            }
+          }
+        }
+      }
+      if (hasNew) {
+        _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        setState(() {});
+        _scrollToBottom();
+        _saveMessagesToPrefs();
+      }
     });
 
-    _statusSub = widget.session.chatStatuses.listen((status) {
-      if (!mounted) return;
-      setState(() {
-        _statusSubtitle = status.text;
-      });
-      _statusSubtitleTimer?.cancel();
-      _statusSubtitleTimer = Timer(const Duration(seconds: 4), () {
-        if (mounted) {
-          setState(() => _statusSubtitle = null);
+    // 2. If WebRTC session is active, also listen to direct data channel events
+    if (widget.session != null) {
+      _replySub = widget.session!.chatReplies.listen((reply) {
+        if (!mounted) return;
+        if (!_messages.any((m) => m.id == reply.id)) {
+          setState(() {
+            _messages.add(
+              ChatMessageItem(
+                id: reply.id,
+                sender: ChatSender.bot,
+                text: reply.text,
+                timestamp: DateTime.fromMillisecondsSinceEpoch(reply.timestamp),
+              ),
+            );
+          });
+          _scrollToBottom();
+          _saveMessagesToPrefs();
         }
       });
-    });
+
+
+    }
   }
 
   void _initAudioPlayerListeners() {
@@ -311,12 +439,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   @override
   void dispose() {
+    _firestoreSub?.cancel();
     _replySub?.cancel();
-    _statusSub?.cancel();
     _playerStateSub?.cancel();
     _playerPositionSub?.cancel();
     _recordTimer?.cancel();
-    _statusSubtitleTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     _audioRecorder.dispose();
@@ -338,7 +465,121 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   // --- Sending Actions ---
 
-  void _sendTextMessage([String? presetText]) {
+  Future<void> _sendMediaFileToFirebase({
+    required File file,
+    required String mediaType,
+    required ChatMessageItem msgItem,
+    String? caption,
+  }) async {
+    try {
+      final bytes = await file.readAsBytes();
+      final msgRef = FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(widget.deviceId)
+          .collection('messages')
+          .doc(msgItem.id);
+
+      const int maxSingleDocSize =
+          750 * 1024; // 750 KB safe limit for single doc
+      const int chunkSize = 400 * 1024; // 400 KB per chunk document
+
+      if (bytes.length <= maxSingleDocSize) {
+        // --- Path 1: Single document with native Blob (0% overhead, raw bytes) ---
+        if (mounted) {
+          setState(() => msgItem.uploadProgress = 0.6);
+        }
+
+        await msgRef.set({
+          'id': msgItem.id,
+          'sender': 'user',
+          'senderName': 'Remote User',
+          'text': caption ?? '',
+          'mediaType': mediaType,
+          'mediaBlob': Blob(bytes),
+          'fileName': file.uri.pathSegments.last,
+          'caption': caption,
+          'type': 'media',
+          'status': 'pending',
+          'totalChunks': 1,
+          'fileSize': bytes.length,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } else {
+        // --- Path 2: File > 750KB: Use Subcollection Chunks with native Blob ---
+        final totalChunks = (bytes.length / chunkSize).ceil();
+        debugPrint(
+          '[WhatsAppChat] File size ${bytes.length} bytes exceeds 750KB. Uploading in $totalChunks chunks...',
+        );
+
+        // Write parent message first with status: uploading_chunks
+        await msgRef.set({
+          'id': msgItem.id,
+          'sender': 'user',
+          'senderName': 'Remote User',
+          'text': caption ?? '',
+          'mediaType': mediaType,
+          'fileName': file.uri.pathSegments.last,
+          'caption': caption,
+          'type': 'media',
+          'status': 'uploading_chunks',
+          'totalChunks': totalChunks,
+          'fileSize': bytes.length,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+
+        // Write each chunk with its own Blob
+        for (int i = 0; i < totalChunks; i++) {
+          final start = i * chunkSize;
+          final end =
+              (start + chunkSize < bytes.length)
+                  ? start + chunkSize
+                  : bytes.length;
+          final chunkBytes = bytes.sublist(start, end);
+
+          await msgRef.collection('chunks').doc('$i').set({
+            'chunkIndex': i,
+            'totalChunks': totalChunks,
+            'blob': Blob(chunkBytes),
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+
+          if (mounted) {
+            setState(() {
+              msgItem.uploadProgress = (i + 1) / (totalChunks + 1);
+            });
+          }
+        }
+
+        // Mark parent message as pending now that all chunks are uploaded
+        await msgRef.update({'status': 'pending'});
+      }
+
+      if (mounted) {
+        setState(() {
+          msgItem.uploadProgress = 1.0;
+          msgItem.isUploading = false;
+        });
+        _saveMessagesToPrefs();
+      }
+    } catch (e) {
+      debugPrint('[WhatsAppChat] Error sending media: $e');
+      if (mounted) {
+        setState(() {
+          msgItem.isUploading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('שגיאה בשליחת קובץ: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _sendTextMessage([String? presetText]) async {
     final text = (presetText ?? _textController.text).trim();
     if (text.isEmpty) return;
 
@@ -360,7 +601,31 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     _scrollToBottom();
     _saveMessagesToPrefs();
 
-    widget.session.sendChatMessage(text, senderName: 'Remote User');
+    try {
+      await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(widget.deviceId)
+          .collection('messages')
+          .doc(messageId)
+          .set({
+            'id': messageId,
+            'sender': 'user',
+            'senderName': 'Remote User',
+            'text': text,
+            'type': 'message',
+            'status': 'pending',
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+    } catch (e) {
+      debugPrint('[WhatsAppChat] Error sending text to Firestore: $e');
+    }
+
+    if (widget.session?.isConnected == true) {
+      try {
+        widget.session!.sendChatMessage(text, senderName: 'Remote User');
+      } catch (_) {}
+    }
   }
 
   Future<void> _sendSingleImageFile(File file) async {
@@ -383,20 +648,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     _scrollToBottom();
     _saveMessagesToPrefs();
 
-    await widget.session.sendChatMediaFile(
+    await _sendMediaFileToFirebase(
       file: file,
       mediaType: 'image',
-      onProgress: (progress) {
-        if (mounted) {
-          setState(() {
-            msgItem.uploadProgress = progress;
-            if (progress >= 1.0) {
-              msgItem.isUploading = false;
-              _saveMessagesToPrefs();
-            }
-          });
-        }
-      },
+      msgItem: msgItem,
     );
   }
 
@@ -424,7 +679,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
       for (final picked in pickedList) {
         await _sendSingleImageFile(File(picked.path));
-        // Small delay to let WebRTC data channel buffers flush cleanly
         await Future.delayed(const Duration(milliseconds: 120));
       }
     } catch (e) {
@@ -459,20 +713,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _scrollToBottom();
       _saveMessagesToPrefs();
 
-      await widget.session.sendChatMediaFile(
+      await _sendMediaFileToFirebase(
         file: file,
         mediaType: 'video',
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              msgItem.uploadProgress = progress;
-              if (progress >= 1.0) {
-                msgItem.isUploading = false;
-                _saveMessagesToPrefs();
-              }
-            });
-          }
-        },
+        msgItem: msgItem,
       );
     } catch (e) {
       debugPrint('[WhatsAppChat] Pick video failed: $e');
@@ -491,7 +735,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           '${tempDir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
 
       await _audioRecorder.start(
-        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 64000),
+        const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 32000),
         path: path,
       );
 
@@ -550,20 +794,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _scrollToBottom();
       _saveMessagesToPrefs();
 
-      await widget.session.sendChatMediaFile(
+      await _sendMediaFileToFirebase(
         file: file,
         mediaType: 'audio',
-        onProgress: (progress) {
-          if (mounted) {
-            setState(() {
-              msgItem.uploadProgress = progress;
-              if (progress >= 1.0) {
-                msgItem.isUploading = false;
-                _saveMessagesToPrefs();
-              }
-            });
-          }
-        },
+        msgItem: msgItem,
       );
     } catch (e) {
       debugPrint('[WhatsAppChat] Stop recording error: $e');
@@ -589,7 +823,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   void _showAttachmentMenu() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1F2C34),
+      backgroundColor: AppColors.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -604,7 +838,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               children: [
                 _buildAttachmentTile(
                   icon: Icons.camera_alt_rounded,
-                  color: const Color(0xFFE91E63),
+                  color: AppColors.primaryAction,
                   label: 'מצלמה',
                   onTap: () {
                     Navigator.pop(ctx);
@@ -613,7 +847,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 _buildAttachmentTile(
                   icon: Icons.photo_library_rounded,
-                  color: const Color(0xFF9C27B0),
+                  color: AppColors.primary,
                   label: 'גלריה (תמונות)',
                   onTap: () {
                     Navigator.pop(ctx);
@@ -622,7 +856,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 _buildAttachmentTile(
                   icon: Icons.videocam_rounded,
-                  color: const Color(0xFF00BCD4),
+                  color: AppColors.windows,
                   label: 'סרטון וידאו',
                   onTap: () {
                     Navigator.pop(ctx);
@@ -631,7 +865,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 _buildAttachmentTile(
                   icon: Icons.directions_car_rounded,
-                  color: const Color(0xFF00A884),
+                  color: AppColors.success,
                   label: 'תבנית רכב',
                   onTap: () {
                     Navigator.pop(ctx);
@@ -661,13 +895,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         children: [
           CircleAvatar(
             radius: 28,
-            backgroundColor: color,
-            child: Icon(icon, color: Colors.white, size: 28),
+            backgroundColor: color.withValues(alpha: 0.15),
+            child: Icon(icon, color: color, size: 28),
           ),
           const SizedBox(height: 8),
           Text(
             label,
-            style: GoogleFonts.inter(color: Colors.white, fontSize: 12),
+            style: GoogleFonts.heebo(
+              color: AppColors.onSurface,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ],
       ),
@@ -675,11 +913,49 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Future<void> _switchToRemoteControl() async {
+    ControllerWebRtcSession? session = widget.session;
+    if (session == null || !session.isConnected) {
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('מתחבר לשליטה מרחוק במסך (WebRTC)...'),
+            duration: Duration(seconds: 2),
+            backgroundColor: Color(0xFF1F2C34),
+          ),
+        );
+        final user = FirebaseAuth.instance.currentUser;
+        final controllerId =
+            user?.displayName ??
+            'Controller_${DateTime.now().millisecondsSinceEpoch % 1000}';
+        final signaling = ControllerSignalingClient(
+          deviceId: widget.deviceId,
+          controllerId: controllerId,
+        );
+        session = ControllerWebRtcSession(
+          signaling: signaling,
+          sessionType: 'remote_control',
+        );
+        await session.initRenderer();
+        session.connect();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('שגיאה בהתחברות לשליטה מרחוק: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder:
             (_) => RemoteControlScreen(
-              session: widget.session,
+              session: session!,
               deviceName: widget.deviceName,
             ),
       ),
@@ -692,48 +968,26 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0B141A),
+      backgroundColor: AppColors.neutral,
       appBar: _buildAppBar(),
       body: Column(
         children: [
-          // P2P Direct Connection Banner
+          // Date Separator Pill ("היום")
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            color: const Color(0xFF182229),
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color:
-                        widget.session.isConnected
-                            ? const Color(0xFF00A884)
-                            : Colors.amber,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    widget.session.isConnected
-                        ? 'תקשורת P2P WebRTC ישירה ומאובטחת ללא שרת תיווך'
-                        : 'מתחבר ב-WebRTC...',
-                    style: GoogleFonts.inter(
-                      fontSize: 11,
-                      color: const Color(0xFF8696A0),
-                    ),
-                  ),
-                ),
-                if (widget.session.pingMs > 0)
-                  Text(
-                    '${widget.session.pingMs}ms',
-                    style: GoogleFonts.inter(
-                      fontSize: 10,
-                      color: const Color(0xFF8696A0),
-                    ),
-                  ),
-              ],
+            margin: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceSubtle,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Text(
+              'היום',
+              style: GoogleFonts.heebo(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: AppColors.secondary,
+              ),
             ),
           ),
 
@@ -741,7 +995,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               itemCount: _messages.length,
               itemBuilder: (context, index) {
                 final message = _messages[index];
@@ -757,224 +1011,351 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     );
   }
 
+  Widget _buildConnectionStatus() {
+    Widget label(String text) => Text(
+      text,
+      style: GoogleFonts.heebo(
+        fontSize: 11.5,
+        fontWeight: FontWeight.w500,
+        color: AppColors.success,
+      ),
+    );
+
+    final session = widget.session;
+    if (session != null) {
+      return ListenableBuilder(
+        listenable: session,
+        builder: (context, _) => label(
+          session.isConnected
+              ? 'מחובר'
+              : session.isConnecting
+                  ? 'מתחבר'
+                  : 'מנוצק',
+        ),
+      );
+    }
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _deviceStatusStream,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return label('מתחבר');
+        }
+        final device = snapshot.data;
+        final status = device?.data()?['status'];
+        final connected =
+            !snapshot.hasError &&
+            device != null &&
+            !device.metadata.isFromCache &&
+            ['online', 'idle', 'ready', 'connected'].contains(status);
+        return label(connected ? 'מחובר' : 'מנוצק');
+      },
+    );
+  }
+
   PreferredSizeWidget _buildAppBar() {
-    return AppBar(
-      backgroundColor: const Color(0xFF1F2C34),
-      centerTitle: true,
-      leadingWidth: 80,
-      leading: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(width: 4),
-          IconButton(
-            icon: const Icon(Icons.arrow_back, color: Colors.white),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            style: IconButton.styleFrom(
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              minimumSize: const Size(32, 32),
-              padding: EdgeInsets.zero,
-            ),
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-          const SizedBox(width: 4),
-          const CircleAvatar(
-            radius: 18,
-            backgroundColor: Color(0xFF00A884),
-            child: Icon(Icons.smart_toy_rounded, color: Colors.white, size: 20),
-          ),
-        ],
-      ),
-      title: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Text(
-            'פירסומוטו בוט',
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          Text(
-            _statusSubtitle ??
-                (widget.session.isConnected
-                    ? 'מחובר (P2P WebRTC)'
-                    : 'מתחבר...'),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              color:
-                  _statusSubtitle != null
-                      ? const Color(0xFF00A884)
-                      : const Color(0xFF8696A0),
-              fontWeight:
-                  _statusSubtitle != null ? FontWeight.w600 : FontWeight.normal,
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        IconButton(
-          tooltip: 'נקה היסטוריית צ\'אט',
-          icon: const Icon(
-            Icons.delete_sweep_rounded,
-            color: Color(0xFFEF4444),
-          ),
-          onPressed: _clearChatData,
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(62),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surface,
+          border: Border(bottom: BorderSide(color: AppColors.border, width: 1)),
         ),
-        IconButton(
-          tooltip: 'עבור לשליטה מרחוק במסך',
-          icon: const Icon(
-            Icons.screen_share_rounded,
-            color: Color(0xFF58A6FF),
-          ),
-          onPressed: _switchToRemoteControl,
-        ),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert, color: Color(0xFF8696A0)),
-          color: const Color(0xFF1F2C34),
-          onSelected: (val) {
-            if (val == 'clear') {
-              _clearChatData();
-            } else if (val == 'publish') {
-              _sendTextMessage('0');
-            } else if (val == 'cancel') {
-              _sendTextMessage('ביטול');
-            }
-          },
-          itemBuilder:
-              (ctx) => [
-                PopupMenuItem(
-                  value: 'publish',
-                  child: Text(
-                    'פרסם ביד2 (0)',
-                    style: GoogleFonts.inter(color: Colors.white),
+        child: SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              children: [
+                // 1. Back button with arrow pointing to the LEFT (mirrored direction as requested)
+                InkWell(
+                  onTap: () => Navigator.of(context).pop(),
+                  borderRadius: BorderRadius.circular(20),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: Icon(
+                      Icons.arrow_back_ios_new_rounded, // Mirrored to point left
+                      color: AppColors.onSurface,
+                      size: 20,
+                    ),
                   ),
                 ),
-                PopupMenuItem(
-                  value: 'cancel',
-                  child: Text(
-                    'ביטול סשן',
-                    style: GoogleFonts.inter(color: Colors.redAccent),
+                const SizedBox(width: 4),
+
+                // 2. Avatar
+                CircleAvatar(
+                  radius: 19,
+                  backgroundColor: AppColors.android.withValues(alpha: 0.12),
+                  child: const Icon(
+                    Icons.android_rounded,
+                    color: AppColors.android,
+                    size: 26,
                   ),
                 ),
-                PopupMenuItem(
-                  value: 'clear',
-                  child: Text(
-                    'נקה הודעות במסך',
-                    style: GoogleFonts.inter(color: const Color(0xFF8696A0)),
+                const SizedBox(width: 10),
+
+                // 3. Title & Connection Status
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.deviceName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.heebo(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.onSurface,
+                        ),
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: AppColors.success,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          _buildConnectionStatus(),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                // 4. "שליטה" Button (Monitor icon)
+                InkWell(
+                  onTap: _switchToRemoteControl,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.screen_share_outlined,
+                          color: AppColors.onSurface,
+                          size: 22,
+                        ),
+                        Text(
+                          'שליטה',
+                          style: GoogleFonts.heebo(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.onSurface,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+
+                // 5. "ניקוי" Button (Trash icon)
+                InkWell(
+                  onTap: _clearChatData,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.delete_outline_rounded,
+                          color: AppColors.onSurface,
+                          size: 22,
+                        ),
+                        Text(
+                          'ניקוי',
+                          style: GoogleFonts.heebo(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.onSurface,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
+            ),
+          ),
         ),
-      ],
+      ),
     );
   }
 
   Widget _buildMessageBubble(ChatMessageItem message) {
     final isUser = message.sender == ChatSender.user;
     final timeStr = intl.DateFormat('HH:mm').format(message.timestamp);
+    final isAdDraft =
+        !isUser &&
+        (message.text.contains('המודעה מוכנה') ||
+            message.text.contains('טיוטה'));
 
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.78,
-        ),
-        decoration: BoxDecoration(
-          color: isUser ? const Color(0xFF005C4B) : const Color(0xFF202C33),
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(14),
-            topRight: const Radius.circular(14),
-            bottomLeft: Radius.circular(isUser ? 14 : 0),
-            bottomRight: Radius.circular(isUser ? 0 : 14),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.15),
-              blurRadius: 4,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Media Display
-            if (message.mediaType == 'image' && message.localFilePath != null)
-              _buildImageMessageContent(message),
+    return ChatMessageBubble(
+      isUser: isUser,
+      time: timeStr,
+      isUploading: message.isUploading,
+      child: Column(
+        textDirection: TextDirection.rtl,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Media Display (Images, Audio, Video)
+          if (message.mediaType == 'image' &&
+              (message.localFilePath != null || message.mediaUrl != null))
+            _buildImageMessageContent(message),
 
-            if (message.mediaType == 'audio' && message.localFilePath != null)
-              _buildAudioMessageContent(message),
+          if (message.mediaType == 'audio' && message.localFilePath != null)
+            _buildAudioMessageContent(message),
 
-            if (message.mediaType == 'video' && message.localFilePath != null)
-              _buildVideoMessageContent(message),
+          if (message.mediaType == 'video' && message.localFilePath != null)
+            _buildVideoMessageContent(message),
 
-            // Text content
-            if (message.text.isNotEmpty)
-              Padding(
-                padding: EdgeInsets.only(
-                  top: message.mediaType != null ? 6 : 0,
-                ),
-                child: Text(
-                  message.text,
-                  style: GoogleFonts.inter(
-                    fontSize: 14.5,
-                    color: Colors.white,
-                    height: 1.35,
-                  ),
-                  textDirection: TextDirection.rtl,
+          // Ad Card Preview (if message is ad ready)
+          if (isAdDraft) ...[_buildAdDraftCard(), const SizedBox(height: 6)],
+
+          // Text content
+          if (message.text.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(
+                top: message.mediaType != null || isAdDraft ? 6 : 2,
+                bottom: 2,
+              ),
+              child: Text(
+                message.text,
+                textAlign: TextAlign.right,
+                textDirection: TextDirection.rtl,
+                style: GoogleFonts.heebo(
+                  fontSize: 15,
+                  color: AppColors.onSurface,
+                  height: 1.4,
                 ),
               ),
+            ),
 
-            // Bot Quick Action Chips (e.g. if ready to publish)
-            if (!isUser && _hasActionOptions(message.text))
-              _buildQuickActionChips(message.text),
+          // Bot Quick Action Chips
+          if (!isUser && _hasActionOptions(message.text))
+            _buildQuickActionChips(message.text),
+        ],
+      ),
+    );
+  }
 
-            // Timestamp and Status Checkmarks
-            const SizedBox(height: 4),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                Text(
-                  timeStr,
-                  style: GoogleFonts.inter(
-                    fontSize: 10,
-                    color: const Color(0xFF8696A0),
+  Widget _buildAdDraftCard() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: AppColors.surfaceSubtle,
+        border: Border.all(color: AppColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Vehicle Image Preview with live text overlay badge
+          Stack(
+            children: [
+              AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Image.asset(
+                  'assets/images/login-hero.jpg',
+                  fit: BoxFit.cover,
+                  errorBuilder:
+                      (_, _, _) => Container(
+                        color: AppColors.primarySoft,
+                        child: const Center(
+                          child: Icon(
+                            Icons.directions_car_rounded,
+                            size: 40,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      ),
+                ),
+              ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryAction,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'חדש במלאי',
+                    style: GoogleFonts.heebo(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
-                if (isUser) ...[
-                  const SizedBox(width: 4),
-                  if (message.isUploading)
-                    const SizedBox(
-                      width: 10,
-                      height: 10,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: Colors.white54,
-                      ),
-                    )
-                  else
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'הרכב הבא שלך מחכה',
+                  style: GoogleFonts.heebo(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'רכבים איכותיים. אנשים מאושרים יותר.',
+                  style: GoogleFonts.heebo(
+                    fontSize: 12,
+                    color: AppColors.secondary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
                     const Icon(
-                      Icons.done_all_rounded,
-                      size: 14,
-                      color: Color(0xFF53BDEB), // WhatsApp blue double tick
+                      Icons.check_box_rounded,
+                      color: AppColors.success,
+                      size: 16,
                     ),
-                ],
+                    const SizedBox(width: 5),
+                    Text(
+                      'הטיוטה נשמרה',
+                      style: GoogleFonts.heebo(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.success,
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1007,17 +1388,18 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (asksForImages) {
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFF9C27B0),
+          backgroundColor: AppColors.primarySoft,
+          side: const BorderSide(color: AppColors.primaryAction, width: 0.8),
           avatar: const Icon(
             Icons.photo_library_rounded,
             size: 14,
-            color: Colors.white,
+            color: AppColors.primaryAction,
           ),
           label: Text(
             'העלה תמונות (גלריה)',
-            style: GoogleFonts.inter(
-              color: Colors.white,
-              fontSize: 11,
+            style: GoogleFonts.heebo(
+              color: AppColors.primaryAction,
+              fontSize: 11.5,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1026,15 +1408,19 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       );
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFFE91E63),
+          backgroundColor: AppColors.surface,
+          side: const BorderSide(color: AppColors.border),
           avatar: const Icon(
             Icons.camera_alt_rounded,
             size: 14,
-            color: Colors.white,
+            color: AppColors.primaryAction,
           ),
           label: Text(
             'צלם תמונה',
-            style: GoogleFonts.inter(color: Colors.white, fontSize: 11),
+            style: GoogleFonts.heebo(
+              color: AppColors.primaryAction,
+              fontSize: 11.5,
+            ),
           ),
           onPressed: () => _pickImage(ImageSource.camera),
         ),
@@ -1047,17 +1433,18 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         text.contains('נתקעה')) {
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFFD32F2F),
+          backgroundColor: AppColors.errorSoft,
+          side: BorderSide(color: AppColors.error.withValues(alpha: 0.3)),
           avatar: const Icon(
-            Icons.settings_remote_rounded,
+            Icons.screen_share_rounded,
             size: 14,
-            color: Colors.white,
+            color: AppColors.error,
           ),
           label: Text(
-            'עבור לשליטה מרחוק (Remote Control)',
-            style: GoogleFonts.inter(
-              color: Colors.white,
-              fontSize: 11,
+            'עבור לשליטה מרחוק',
+            style: GoogleFonts.heebo(
+              color: AppColors.error,
+              fontSize: 11.5,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1069,13 +1456,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (text.contains('0') || text.contains('לפרסום')) {
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFF00A884),
-          avatar: const Icon(Icons.publish, size: 14, color: Colors.white),
+          backgroundColor: AppColors.successSoft,
+          side: const BorderSide(color: AppColors.success, width: 0.8),
+          avatar: const Icon(Icons.publish, size: 14, color: AppColors.success),
           label: Text(
             'פרסם עכשיו (0)',
-            style: GoogleFonts.inter(
-              color: Colors.white,
-              fontSize: 11,
+            style: GoogleFonts.heebo(
+              color: AppColors.success,
+              fontSize: 11.5,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1087,10 +1475,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (text.contains('המשך')) {
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFF21262D),
+          backgroundColor: AppColors.surfaceSubtle,
+          side: const BorderSide(color: AppColors.border),
           label: Text(
             'המשך מהפרסום הנוכחי',
-            style: GoogleFonts.inter(color: Colors.white, fontSize: 11),
+            style: GoogleFonts.heebo(
+              color: AppColors.onSurface,
+              fontSize: 11.5,
+            ),
           ),
           onPressed: () => _sendTextMessage('המשך'),
         ),
@@ -1100,10 +1492,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (text.contains('ביטול')) {
       chips.add(
         ActionChip(
-          backgroundColor: const Color(0xFF30363D),
+          backgroundColor: AppColors.surfaceSubtle,
+          side: const BorderSide(color: AppColors.border),
           label: Text(
             'ביטול',
-            style: GoogleFonts.inter(color: Colors.redAccent, fontSize: 11),
+            style: GoogleFonts.heebo(
+              color: AppColors.secondary,
+              fontSize: 11.5,
+            ),
           ),
           onPressed: () => _sendTextMessage('ביטול'),
         ),
@@ -1114,23 +1510,59 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: Wrap(spacing: 6, runSpacing: 4, children: chips),
+      child: Wrap(spacing: 8, runSpacing: 6, children: chips),
     );
   }
 
   Widget _buildImageMessageContent(ChatMessageItem message) {
-    final file = File(message.localFilePath!);
+    final hasLocal =
+        message.localFilePath != null &&
+        File(message.localFilePath!).existsSync();
+    final hasUrl = message.mediaUrl != null && message.mediaUrl!.isNotEmpty;
+
     return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(12),
       child: Stack(
         alignment: Alignment.center,
         children: [
-          Image.file(
-            file,
-            width: double.infinity,
-            height: 200,
-            fit: BoxFit.cover,
-          ),
+          if (hasLocal)
+            Image.file(
+              File(message.localFilePath!),
+              width: double.infinity,
+              height: 200,
+              fit: BoxFit.cover,
+            )
+          else if (hasUrl)
+            Image.network(
+              message.mediaUrl!,
+              width: double.infinity,
+              height: 200,
+              fit: BoxFit.cover,
+              errorBuilder:
+                  (_, _, _) => Container(
+                    color: AppColors.surfaceSubtle,
+                    height: 140,
+                    child: const Center(
+                      child: Icon(
+                        Icons.broken_image_rounded,
+                        color: AppColors.secondary,
+                        size: 36,
+                      ),
+                    ),
+                  ),
+            )
+          else
+            Container(
+              color: AppColors.surfaceSubtle,
+              height: 140,
+              child: const Center(
+                child: Icon(
+                  Icons.image_rounded,
+                  color: AppColors.secondary,
+                  size: 36,
+                ),
+              ),
+            ),
           if (message.isUploading)
             Container(
               color: Colors.black45,
@@ -1142,14 +1574,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                   children: [
                     CircularProgressIndicator(
                       value: message.uploadProgress,
-                      color: const Color(0xFF00A884),
+                      color: AppColors.primaryAction,
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'שולח ב-P2P... ${(message.uploadProgress * 100).toInt()}%',
-                      style: GoogleFonts.inter(
+                      'מעלה... ${(message.uploadProgress * 100).toInt()}%',
+                      style: GoogleFonts.heebo(
                         color: Colors.white,
-                        fontSize: 11,
+                        fontSize: 12,
                       ),
                     ),
                   ],
@@ -1177,7 +1609,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               isPlaying
                   ? Icons.pause_circle_filled_rounded
                   : Icons.play_circle_fill_rounded,
-              color: const Color(0xFF00A884),
+              color: AppColors.primaryAction,
               size: 38,
             ),
             onPressed: () => _toggleAudioPlay(message),
@@ -1193,8 +1625,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                   _currentAudioDuration.inMilliseconds)
                               .clamp(0.0, 1.0)
                           : 0.0,
-                  backgroundColor: const Color(0xFF30363D),
-                  color: const Color(0xFF00A884),
+                  backgroundColor: AppColors.border,
+                  color: AppColors.primaryAction,
                   minHeight: 4,
                 ),
                 const SizedBox(height: 4),
@@ -1203,21 +1635,25 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                   children: [
                     Text(
                       durationStr,
-                      style: GoogleFonts.inter(
-                        fontSize: 10,
-                        color: const Color(0xFF8696A0),
+                      style: GoogleFonts.heebo(
+                        fontSize: 11,
+                        color: AppColors.secondary,
                       ),
                     ),
                     if (message.isUploading)
                       Text(
                         'מעלה... ${(message.uploadProgress * 100).toInt()}%',
-                        style: GoogleFonts.inter(
-                          fontSize: 10,
-                          color: const Color(0xFF00A884),
+                        style: GoogleFonts.heebo(
+                          fontSize: 11,
+                          color: AppColors.primaryAction,
                         ),
                       )
                     else
-                      const Icon(Icons.mic, size: 14, color: Color(0xFF8696A0)),
+                      const Icon(
+                        Icons.mic_none_rounded,
+                        size: 14,
+                        color: AppColors.secondary,
+                      ),
                   ],
                 ),
               ],
@@ -1230,19 +1666,23 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   Widget _buildVideoMessageContent(ChatMessageItem message) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(12),
       child: Container(
         height: 160,
         width: double.infinity,
-        color: const Color(0xFF161B22),
+        color: AppColors.surfaceSubtle,
         child: Stack(
           alignment: Alignment.center,
           children: [
-            const Icon(Icons.movie_rounded, color: Color(0xFF8B949E), size: 48),
+            const Icon(
+              Icons.movie_rounded,
+              color: AppColors.secondary,
+              size: 48,
+            ),
             Container(
               decoration: const BoxDecoration(
                 shape: BoxShape.circle,
-                color: Color(0xFF00A884),
+                color: AppColors.primaryAction,
               ),
               padding: const EdgeInsets.all(10),
               child: const Icon(
@@ -1256,8 +1696,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 color: Colors.black54,
                 child: Center(
                   child: Text(
-                    'שולח וידאו ב-P2P... ${(message.uploadProgress * 100).toInt()}%',
-                    style: GoogleFonts.inter(color: Colors.white, fontSize: 11),
+                    'שולח וידאו... ${(message.uploadProgress * 100).toInt()}%',
+                    style: GoogleFonts.heebo(color: Colors.white, fontSize: 11),
                   ),
                 ),
               ),
@@ -1269,31 +1709,43 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   Widget _buildInputBar() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      color: const Color(0xFF1F2C34),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(top: BorderSide(color: AppColors.border, width: 1)),
+      ),
       child: SafeArea(
         child: Row(
           children: [
-            // Attachment Button
-            IconButton(
-              tooltip: 'קבצים מצורפים',
-              icon: const Icon(
-                Icons.attach_file_rounded,
-                color: Color(0xFF8696A0),
+            // Physical Right in RTL: Circular Coral Send Button
+            Container(
+              width: 44,
+              height: 44,
+              decoration: const BoxDecoration(
+                color: AppColors.primary,
+                shape: BoxShape.circle,
               ),
-              onPressed: _showAttachmentMenu,
-            ),
-            // Direct Multi-Image Gallery Button
-            IconButton(
-              tooltip: 'העלאת תמונות מהגלריה',
-              icon: const Icon(
-                Icons.add_photo_alternate_rounded,
-                color: Color(0xFF8696A0),
+              child: IconButton(
+                padding: EdgeInsets.zero,
+                tooltip: 'שלח',
+                icon: const Icon(
+                  Icons.send_rounded,
+                  textDirection: TextDirection.ltr,
+                  color: Colors.white,
+                  size: 26,
+                ),
+                onPressed: () {
+                  if (_isRecording) {
+                    _stopAndSendRecording(cancel: false);
+                  } else {
+                    _sendTextMessage();
+                  }
+                },
               ),
-              onPressed: _pickMultiImage,
             ),
+            const SizedBox(width: 8),
 
-            // Text Input or Recording State
+            // Center: Text Input or Recording State
             Expanded(
               child:
                   _isRecording
@@ -1303,8 +1755,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                           vertical: 10,
                         ),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2A3942),
+                          color: AppColors.errorSoft,
                           borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: AppColors.error.withValues(alpha: 0.3),
+                          ),
                         ),
                         child: Row(
                           children: [
@@ -1313,15 +1768,16 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                               height: 10,
                               decoration: const BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: Colors.redAccent,
+                                color: AppColors.error,
                               ),
                             ),
-                            const SizedBox(width: 10),
+                            const SizedBox(width: 8),
                             Text(
-                              'מקליט הודעה קולית... ${_formatDuration(_recordSeconds)}',
-                              style: GoogleFonts.inter(
-                                color: Colors.white,
+                              'הקלטת הודעה... ${_formatDuration(_recordSeconds)}',
+                              style: GoogleFonts.heebo(
+                                color: AppColors.error,
                                 fontSize: 13,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
                             const Spacer(),
@@ -1330,9 +1786,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                   () => _stopAndSendRecording(cancel: true),
                               child: Text(
                                 'ביטול',
-                                style: GoogleFonts.inter(
-                                  color: Colors.redAccent,
+                                style: GoogleFonts.heebo(
+                                  color: AppColors.error,
                                   fontSize: 12,
+                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
@@ -1341,73 +1798,83 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                       )
                       : Container(
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2A3942),
+                          color: AppColors.surfaceSubtle,
                           borderRadius: BorderRadius.circular(24),
+                          border: Border.all(color: AppColors.border),
                         ),
-                        child: TextField(
-                          controller: _textController,
-                          style: GoogleFonts.inter(
-                            color: Colors.white,
-                            fontSize: 15,
-                          ),
-                          textDirection: TextDirection.rtl,
-                          maxLines: 4,
-                          minLines: 1,
-                          decoration: InputDecoration(
-                            hintText: 'הקלד/י הודעה...',
-                            hintStyle: GoogleFonts.inter(
-                              color: const Color(0xFF8696A0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _textController,
+                                style: GoogleFonts.heebo(
+                                  color: AppColors.onSurface,
+                                  fontSize: 15,
+                                ),
+                                textDirection: TextDirection.rtl,
+                                maxLines: 4,
+                                minLines: 1,
+                                decoration: InputDecoration(
+                                  hintText: '...הודעה למכשיר',
+                                  hintStyle: GoogleFonts.heebo(
+                                    color: AppColors.secondary,
+                                    fontSize: 14,
+                                  ),
+                                  hintTextDirection: TextDirection.rtl,
+                                  border: InputBorder.none,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 10,
+                                  ),
+                                ),
+                                onChanged: (text) => setState(() {}),
+                                onSubmitted: (_) => _sendTextMessage(),
+                              ),
                             ),
-                            hintTextDirection: TextDirection.rtl,
-                            border: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 10,
+                            GestureDetector(
+                              onLongPressStart: (_) => _startRecording(),
+                              onLongPressEnd: (_) => _stopAndSendRecording(cancel: false),
+                              child: IconButton(
+                                tooltip: 'הקלטת הודעה',
+                                icon: const Icon(
+                                  Icons.mic_none_rounded,
+                                  color: AppColors.secondary,
+                                  size: 22,
+                                ),
+                                onPressed: () {
+                                  if (_isRecording) {
+                                    _stopAndSendRecording(cancel: false);
+                                  } else {
+                                    _startRecording();
+                                  }
+                                },
+                              ),
                             ),
-                          ),
-                          onChanged: (text) => setState(() {}),
-                          onSubmitted: (_) => _sendTextMessage(),
+                          ],
                         ),
                       ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 8),
 
-            // Mic or Send Button
-            if (_isRecording)
-              FloatingActionButton.small(
-                backgroundColor: const Color(0xFF00A884),
-                foregroundColor: Colors.white,
-                elevation: 0,
-                onPressed: () => _stopAndSendRecording(cancel: false),
-                child: const Icon(Icons.send_rounded, size: 18),
-              )
-            else if (_textController.text.trim().isNotEmpty)
-              FloatingActionButton.small(
-                backgroundColor: const Color(0xFF00A884),
-                foregroundColor: Colors.white,
-                elevation: 0,
-                onPressed: () => _sendTextMessage(),
-                child: const Icon(Icons.send_rounded, size: 18),
-              )
-            else
-              GestureDetector(
-                onLongPressStart: (_) => _startRecording(),
-                onLongPressEnd: (_) => _stopAndSendRecording(cancel: false),
-                child: FloatingActionButton.small(
-                  backgroundColor: const Color(0xFF00A884),
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  onPressed: () {
-                    // Tap to start/stop
-                    if (_isRecording) {
-                      _stopAndSendRecording(cancel: false);
-                    } else {
-                      _startRecording();
-                    }
-                  },
-                  child: const Icon(Icons.mic, size: 20),
-                ),
+            // Physical Left in RTL: Attachment '+' Button in circular container
+            Container(
+              width: 38,
+              height: 38,
+              decoration: const BoxDecoration(
+                color: AppColors.surfaceSubtle,
+                shape: BoxShape.circle,
               ),
+              child: IconButton(
+                padding: EdgeInsets.zero,
+                tooltip: 'קבצים מצורפים',
+                icon: const Icon(
+                  Icons.add_rounded,
+                  color: AppColors.onSurface,
+                  size: 24,
+                ),
+                onPressed: _showAttachmentMenu,
+              ),
+            ),
           ],
         ),
       ),

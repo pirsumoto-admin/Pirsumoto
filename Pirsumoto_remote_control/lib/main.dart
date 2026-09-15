@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'firebase_options.dart';
+import 'ui/app_theme.dart';
 import 'ui/device_select_screen.dart';
 import 'ui/login_screen.dart';
 
@@ -25,26 +25,24 @@ class PirsumotoRemoteControlApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'פרסומוטו Remote Control',
+      title: 'Pirsumoto Relay',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0A0E17),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF238636),
-          secondary: Color(0xFF2EA043),
-          surface: Color(0xFF161B22),
-        ),
-        textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
-      ),
+      theme: AppTheme.lightTheme,
+      builder: (context, child) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
-              backgroundColor: Color(0xFF0D1117),
+              backgroundColor: AppColors.neutral,
               body: Center(
                 child: CircularProgressIndicator(
-                  color: Color(0xFF238636),
+                  color: AppColors.primaryAction,
                 ),
               ),
             );

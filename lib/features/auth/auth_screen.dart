@@ -70,9 +70,14 @@ class _AuthScreenState extends ConsumerState<AuthScreen>
   Widget build(BuildContext context) {
     final isLoading = ref.watch(authControllerProvider);
 
-    return Scaffold(
-      backgroundColor: AppTheme.backgroundColor,
-      body: Stack(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+      },
+      child: Scaffold(
+        backgroundColor: AppTheme.backgroundColor,
+        body: Stack(
         children: [
           // Background Gradient Orbs
           Positioned(
@@ -227,6 +232,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen>
             ),
           ),
         ],
+      ),
       ),
     );
   }

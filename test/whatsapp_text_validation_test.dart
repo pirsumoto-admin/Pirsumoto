@@ -1448,5 +1448,165 @@ void main() {
         tempDir.deleteSync(recursive: true);
       },
     );
+
+    test(
+      'Image upload verification: uploading image without car details asks for license plate and does not set ready_to_publish',
+      () async {
+        final replies = <String>[];
+        final service = WhatsAppTextValidationService(
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+        );
+
+        final sender = 'img_no_details_sender_test';
+        await service.saveSenderState(sender, {});
+
+        final tempDir = await Directory.systemTemp.createTemp('no_details_img_test_');
+        final img = File('${tempDir.path}/car.jpg')..writeAsBytesSync([1, 2, 3]);
+
+        final stateAfter = await service.handleIncomingImage(
+          imageFilePath: img.path,
+          senderKey: sender,
+        );
+
+        expect(stateAfter?['session_status'], equals('awaiting_license'));
+        expect(stateAfter?['ready_to_publish'], isNot(equals('true')));
+
+        await Future.delayed(const Duration(milliseconds: 1600));
+
+        expect(replies.length, equals(1));
+        expect(replies.first, contains('התקבלה תמונה אחת בהצלחה!'));
+        expect(replies.first, contains('מספר רישוי'));
+        expect(replies.first, isNot(contains('לפרסום שלח 0')));
+
+        tempDir.deleteSync(recursive: true);
+      },
+    );
+
+    test(
+      'Image upload verification: uploading image with plate but missing details prompts for missing fields and does not set ready_to_publish',
+      () async {
+        final replies = <String>[];
+        final service = WhatsAppTextValidationService(
+          replySender: ({required senderKey, required message}) async {
+            replies.add(message);
+            return true;
+          },
+        );
+
+        final sender = 'img_partial_details_sender_test';
+        await service.saveSenderState(sender, {
+          'license_plate': '12345678',
+          'maker': 'מאזדה',
+          'model': '3',
+          'year': '2020',
+          // price and km are missing
+        });
+
+        final tempDir = await Directory.systemTemp.createTemp('partial_details_img_test_');
+        final img = File('${tempDir.path}/car.jpg')..writeAsBytesSync([1, 2, 3]);
+
+        final stateAfter = await service.handleIncomingImage(
+          imageFilePath: img.path,
+          senderKey: sender,
+        );
+
+        expect(stateAfter?['session_status'], equals('collecting_details'));
+        expect(stateAfter?['ready_to_publish'], isNot(equals('true')));
+
+        await Future.delayed(const Duration(milliseconds: 1600));
+
+        expect(replies.length, equals(1));
+        expect(replies.first, contains('התקבלה תמונה אחת בהצלחה!'));
+        expect(replies.first, contains('חסרים עדיין הנתונים הבאים'));
+        expect(replies.first, isNot(contains('לפרסום שלח 0')));
+
+        tempDir.deleteSync(recursive: true);
+      },
+    );
+
+    test('should normalize transcribed audio plate numbers and remove dots/compound tens', () {
+      final service = WhatsAppTextValidationService.instance;
+
+      // 52.116.309 -> thirty-nine transcribed as 309 -> collapsed to 5211639
+      expect(service.normalizeTranscribedPlateText('52.116.309'), equals('5211639'));
+      expect(service.normalizeTranscribedPlateText('51.116.309'), equals('5111639'));
+      expect(service.normalizeTranscribedPlateText('51 116 309'), equals('5111639'));
+      expect(service.normalizeTranscribedPlateText('51-116-309'), equals('5111639'));
+      expect(service.normalizeTranscribedPlateText('52 . 116 . 309'), equals('5211639'));
+
+      // 51.116.39 -> dots removed -> 5111639
+      expect(service.normalizeTranscribedPlateText('51.116.39'), equals('5111639'));
+      expect(service.normalizeTranscribedPlateText('51 116 39'), equals('5111639'));
+      expect(service.normalizeTranscribedPlateText('51-116-39'), equals('5111639'));
+
+      // 8 digits dotted
+      expect(service.normalizeTranscribedPlateText('123.45.678'), equals('12345678'));
+      expect(service.normalizeTranscribedPlateText('123.405.678'), equals('12345678'));
+      expect(service.normalizeTranscribedPlateText('501.116.39'), equals('5111639'));
+
+      // Compound tens
+      expect(service.normalizeTranscribedPlateText('30 9'), equals('39'));
+      expect(service.normalizeTranscribedPlateText('30.9'), equals('39'));
+      expect(service.normalizeTranscribedPlateText('30-9'), equals('39'));
+      expect(service.normalizeTranscribedPlateText('30 ו 9'), equals('39'));
+
+      // Inside a sentence
+      expect(
+        service.normalizeTranscribedPlateText('מספר הרכב שלי 52.116.309 תודה'),
+        equals('מספר הרכב שלי 5211639 תודה'),
+      );
+    });
+
+    test('when vehicle is not found in gov.il, bot responds with captured number, not found notice, and asks to proceed', () async {
+      final replies = <String>[];
+      final sender = 'test_gov_not_found_voice_${DateTime.now().millisecondsSinceEpoch}';
+
+      final service = WhatsAppTextValidationService(
+        vehicleDataFetcher: (plate) async => null, // Vehicle not found in gov.il
+        replySender: ({required String message, required String senderKey}) async {
+          replies.add(message);
+          return true;
+        },
+      );
+
+      // Transcribed audio with dots and 309
+      final state = await service.handleIncomingTextMessage(
+        text: '52.116.309',
+        senderKey: sender,
+        senderName: 'Test Voice User',
+      );
+
+      expect(state?['license_plate'], equals('5211639'));
+      expect(state?['license_not_found_gov'], equals('true'));
+      expect(state?['gov_vehicle_lookup_status'], equals('not_found'));
+
+      expect(replies.isNotEmpty, isTrue);
+      final lastReply = replies.last;
+      expect(lastReply, contains('זה מספר הרישוי שנקלט: 5211639'));
+      expect(lastReply, contains('לא נמצאו פרטי רכב במאגר gov.il'));
+      expect(lastReply, contains('האם ברצונך להמשיך בכל זאת בהזנה ידנית'));
+      expect(lastReply, contains('אנא הזן את כל פרטי הרכב הנדרשים'));
+      expect(lastReply, contains('יצרן'));
+      expect(lastReply, contains('דגם'));
+      expect(lastReply, isNot(contains('מתחיל לאתר את פרטי הרכב')));
+
+      // Next, user says "כן" to proceed with manual entry
+      replies.clear();
+      final state2 = await service.handleIncomingTextMessage(
+        text: 'כן',
+        senderKey: sender,
+        senderName: 'Test Voice User',
+      );
+
+      expect(state2?['gov_not_found_acknowledged'], equals('true'));
+      expect(state2?['manual_entry_confirmed'], equals('true'));
+      expect(replies.isNotEmpty, isTrue);
+      expect(replies.last, contains('מצוין, נמשיך בהזנה ידנית של פרטי הרכב'));
+      expect(replies.last, contains('אנא הזן את כל פרטי הרכב הנדרשים'));
+    });
   });
 }
+

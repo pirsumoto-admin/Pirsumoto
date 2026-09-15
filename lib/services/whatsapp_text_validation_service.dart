@@ -596,6 +596,46 @@ class WhatsAppTextValidationService {
     }
 
     if (!startsNewSession &&
+        currentState['license_not_found_gov'] == 'true' &&
+        currentState['gov_not_found_acknowledged'] != 'true' &&
+        _isAffirmativeResponse(trimmedText)) {
+      final updatedState = Map<String, String>.from(currentState);
+      updatedState['gov_not_found_acknowledged'] = 'true';
+      updatedState['manual_entry_confirmed'] = 'true';
+
+      final missingKeys = _checkMissingKeys(updatedState);
+      updatedState['last_requested_fields'] = jsonEncode(missingKeys);
+
+      final reply = StringBuffer()
+        ..writeln('מצוין, נמשיך בהזנה ידנית של פרטי הרכב.\n')
+        ..writeln('אנא הזן את כל פרטי הרכב הנדרשים:');
+      for (final key in missingKeys) {
+        reply.writeln('• ${_hebrewFieldLabel(key)}');
+      }
+      reply.writeln(
+        '\nשלח את הערכים עם שם השדה, או כרשימה לפי הסדר למעלה. אפשר לשלוח ערך אחד או כמה ערכים יחד.',
+      );
+
+      final replyStr = reply.toString().trim();
+      final chatHistory = _parseChatHistory(updatedState['chat_history']);
+      final eventTimestamp = timestamp ?? DateTime.now().millisecondsSinceEpoch;
+      chatHistory.add({
+        'role': 'user',
+        'text': trimmedText,
+        'timestamp': '$eventTimestamp',
+      });
+      chatHistory.add({
+        'role': 'assistant',
+        'text': replyStr,
+        'timestamp': '${DateTime.now().millisecondsSinceEpoch}',
+      });
+      updatedState['chat_history'] = jsonEncode(chatHistory);
+      await saveSenderState(senderKey, updatedState);
+      await _sendReply(senderKey, replyStr);
+      return updatedState;
+    }
+
+    if (!startsNewSession &&
         _shouldHandleAsCommand(trimmedText, currentState)) {
       return await _handleCommandText(
         trimmedText: trimmedText,
@@ -676,6 +716,11 @@ class WhatsAppTextValidationService {
 
     _normalizeStateFields(newState);
 
+    if (extracted.isNotEmpty) {
+      newState['gov_not_found_acknowledged'] = 'true';
+      newState['manual_entry_confirmed'] = 'true';
+    }
+
     // Yad2 currently defaults this optional field to "טוב" as well.
     if ((newState['vehicle_condition'] == null ||
             newState['vehicle_condition']!.isEmpty) &&
@@ -713,13 +758,35 @@ class WhatsAppTextValidationService {
     ];
 
     final readyToPublish = formVal.isValid && missingKeys.isEmpty;
-    newState['session_status'] =
-        readyToPublish ? 'ready_for_images' : 'collecting_details';
+    final rawImgs = newState['image_paths'] ?? newState['KEY_IMAGE_PATHS'];
+    bool hasImages = false;
+    if (rawImgs != null && rawImgs.isNotEmpty) {
+      try {
+        hasImages = (jsonDecode(rawImgs) as List).isNotEmpty;
+      } catch (_) {}
+    }
+    if (readyToPublish && hasImages) {
+      newState['session_status'] = 'ready_to_publish';
+      newState['ready_to_publish'] = 'true';
+    } else {
+      newState['session_status'] =
+          readyToPublish ? 'ready_for_images' : 'collecting_details';
+    }
     newState['last_requested_fields'] = jsonEncode(allFieldsNeedingAttention);
     newState['last_validation_timestamp'] =
         '${DateTime.now().millisecondsSinceEpoch}';
 
+    final isGovNotFound = newState['license_not_found_gov'] == 'true';
+    final bool isEvasiveAiReply = aiAssistantReply != null &&
+        (aiAssistantReply.contains('מתחיל לאתר') ||
+            aiAssistantReply.contains('אאתר') ||
+            aiAssistantReply.contains('בודק במאגר') ||
+            aiAssistantReply.contains('קיבלתי את מספר הרישוי'));
+
     final reply = (!hasValidationErrors &&
+            !startsNewSession &&
+            !isGovNotFound &&
+            !isEvasiveAiReply &&
             aiAssistantReply != null &&
             aiAssistantReply.trim().isNotEmpty)
         ? aiAssistantReply
@@ -1083,6 +1150,30 @@ class WhatsAppTextValidationService {
         normalized == 'אנא לבטל';
   }
 
+  bool _isAffirmativeResponse(String text) {
+    final normalized = text
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\w\u0590-\u05FF]+'), ' ')
+        .trim();
+    return normalized == 'כן' ||
+        normalized == 'כן תמשיך' ||
+        normalized == 'תמשיך' ||
+        normalized == 'להמשיך' ||
+        normalized == 'המשך' ||
+        normalized == 'המשך בכל זאת' ||
+        normalized == 'להמשיך בכל זאת' ||
+        normalized == 'בטח' ||
+        normalized == 'בסדר' ||
+        normalized == 'סבבה' ||
+        normalized == 'אוקי' ||
+        normalized == 'אוקיי' ||
+        normalized == 'ok' ||
+        normalized == 'yes' ||
+        normalized == 'proceed' ||
+        normalized == 'continue';
+  }
+
   bool _isRepublishCommand(String text) {
     final normalized = text
         .trim()
@@ -1444,8 +1535,33 @@ class WhatsAppTextValidationService {
     currentState['KEY_IMAGE_RECEIVED_COUNT'] = '$receivedCount';
     currentState['image_expected_count'] = '$targetExpected';
     currentState['KEY_IMAGE_EXPECTED_COUNT'] = '$targetExpected';
-    currentState['session_status'] = 'ready_to_publish';
-    currentState['ready_to_publish'] = 'true';
+
+    // Verify whether vehicle details actually exist and are complete
+    final initialPlate = currentState['license_plate'] ??
+        currentState['license'] ??
+        currentState['KEY_LICENSE_PLATE'];
+    final initialMissing = _checkMissingKeys(currentState);
+    final initialFormVal = await validateFormFields(
+      currentState,
+      kilometerTestAharon:
+          int.tryParse(currentState['kilometer_test_aharon'] ?? ''),
+      fetchKilometerWhenMissing: false,
+    );
+    final initialFullyReady =
+        (initialPlate != null && initialPlate.trim().isNotEmpty) &&
+        initialFormVal.isValid &&
+        initialMissing.isEmpty;
+
+    if (initialFullyReady) {
+      currentState['session_status'] = 'ready_to_publish';
+      currentState['ready_to_publish'] = 'true';
+    } else if (initialPlate != null && initialPlate.trim().isNotEmpty) {
+      currentState['session_status'] = 'collecting_details';
+      currentState['ready_to_publish'] = 'false';
+    } else {
+      currentState['session_status'] = 'awaiting_license';
+      currentState['ready_to_publish'] = 'false';
+    }
     await saveSenderState(senderKey, currentState);
 
     // Schedule debounced batch confirmation response so all images in a burst
@@ -1464,27 +1580,69 @@ class WhatsAppTextValidationService {
       final count = latestPaths.length;
       if (count == 0) return;
 
-      latestState['session_status'] = 'ready_to_publish';
-      latestState['ready_to_publish'] = 'true';
       latestState['image_received_count'] = '$count';
       latestState['image_expected_count'] = '$count';
       latestState['KEY_IMAGE_EXPECTED_COUNT'] = '$count';
-      await saveSenderState(senderKey, latestState);
+
+      final latestPlate = latestState['license_plate'] ??
+          latestState['license'] ??
+          latestState['KEY_LICENSE_PLATE'];
+      final latestMissing = _checkMissingKeys(latestState);
+      final latestFormVal = await validateFormFields(
+        latestState,
+        kilometerTestAharon:
+            int.tryParse(latestState['kilometer_test_aharon'] ?? ''),
+        fetchKilometerWhenMissing: false,
+      );
+      final isFullyReady =
+          (latestPlate != null && latestPlate.trim().isNotEmpty) &&
+          latestFormVal.isValid &&
+          latestMissing.isEmpty;
+
+      final countHeader = (count == 1)
+          ? 'התקבלה תמונה אחת בהצלחה!'
+          : 'התקבלו $count תמונות בהצלחה!';
 
       final String replyMessage;
-      if (count == 1) {
+      if (isFullyReady) {
+        latestState['session_status'] = 'ready_to_publish';
+        latestState['ready_to_publish'] = 'true';
         replyMessage =
-            'התקבלה תמונה אחת בהצלחה!\n'
+            '$countHeader\n'
             'כל הפרטים והתמונות מוכנים לפרסום ביד2.\n'
             'לפרסום שלח 0\n'
             'לביטול השב ביטול';
+      } else if (latestPlate == null || latestPlate.trim().isEmpty) {
+        latestState['session_status'] = 'awaiting_license';
+        latestState['ready_to_publish'] = 'false';
+        replyMessage =
+            '$countHeader\n'
+            'כדי להתחיל בפרסום הרכב, אנא שלח מספר רישוי (7 או 8 ספרות).';
       } else {
-        replyMessage =
-            'התקבלו $count תמונות בהצלחה!\n'
-            'כל הפרטים והתמונות מוכנים לפרסום ביד2.\n'
-            'לפרסום שלח 0\n'
-            'לביטול השב ביטול';
+        latestState['session_status'] = 'collecting_details';
+        latestState['ready_to_publish'] = 'false';
+        latestState['last_requested_fields'] = jsonEncode(latestMissing);
+        final detailsPrompt = composeHebrewReply(
+          state: latestState,
+          formVal: latestFormVal,
+          missingKeys: latestMissing,
+        );
+        replyMessage = '$countHeader\n$detailsPrompt';
       }
+
+      final chatHistory = _parseChatHistory(latestState['chat_history']);
+      chatHistory.add({
+        'role': 'assistant',
+        'text': replyMessage,
+        'timestamp': '${DateTime.now().millisecondsSinceEpoch}',
+      });
+      latestState['chat_history'] = jsonEncode(
+        chatHistory.length > 40
+            ? chatHistory.sublist(chatHistory.length - 40)
+            : chatHistory,
+      );
+
+      await saveSenderState(senderKey, latestState);
       await _sendReply(senderKey, replyMessage);
     });
 
@@ -1547,9 +1705,12 @@ class WhatsAppTextValidationService {
     final isGovNotFound = state['license_not_found_gov'] == 'true';
 
     if (hasErrors || hasMissing) {
-      if (isGovNotFound) {
+      if (isGovNotFound && state['gov_not_found_acknowledged'] != 'true') {
+        final plate = state['license_plate'] ?? state['license'] ?? '';
         replyBuilder.writeln(
-          'לא נמצאו פרטי רכב במאגר gov.il עבור מספר רישוי ${state['license_plate'] ?? state['license']}.\n'
+          'זה מספר הרישוי שנקלט: $plate.\n'
+          'לא נמצאו פרטי רכב במאגר gov.il עבור מספר רישוי זה.\n'
+          'האם ברצונך להמשיך בכל זאת בהזנה ידנית, או לשלוח מספר רישוי אחר?\n\n'
           'אנא הזן את כל פרטי הרכב הנדרשים:',
         );
       } else if (isFirstTurn && titleParts.isNotEmpty) {
@@ -1608,10 +1769,27 @@ class WhatsAppTextValidationService {
       if (desc != null && desc.isNotEmpty) {
         replyBuilder.writeln('• פרטים נוספים: $desc');
       }
-      replyBuilder.writeln('\nהנתונים מוכנים. כמה תמונות תרצה להעלות?');
-      replyBuilder.writeln(
-        'השב 1 עד 8 עבור מספר התמונות, 0 לפרסום ללא תמונות, או 9 לביטול.',
-      );
+
+      final rawImgs = state['image_paths'] ?? state['KEY_IMAGE_PATHS'];
+      List<String> imgs = [];
+      if (rawImgs != null && rawImgs.isNotEmpty) {
+        try {
+          imgs = List<String>.from(jsonDecode(rawImgs));
+        } catch (_) {}
+      }
+      if (imgs.isNotEmpty) {
+        final countText = (imgs.length == 1)
+            ? 'תמונה אחת שמורה'
+            : '${imgs.length} תמונות שמורות';
+        replyBuilder.writeln('\nכל הפרטים ו-$countText מוכנים לפרסום ביד2!');
+        replyBuilder.writeln('לפרסום שלח 0');
+        replyBuilder.writeln('לביטול השב ביטול');
+      } else {
+        replyBuilder.writeln('\nהנתונים מוכנים. כמה תמונות תרצה להעלות?');
+        replyBuilder.writeln(
+          'השב 1 עד 8 עבור מספר התמונות, 0 לפרסום ללא תמונות, או 9 לביטול.',
+        );
+      }
     }
 
     return replyBuilder.toString().trim();
@@ -2600,31 +2778,117 @@ class WhatsAppTextValidationService {
     }
   }
 
+  /// Normalizes transcribed license plate strings:
+  /// - Removes dots/periods between number groups (e.g. "52.116.309" or "51.116.39")
+  /// - Collapses compound tens and units where speech-to-text separates them
+  ///   (e.g. "thirty-nine" -> 39 instead of 30 9 or 309).
+  /// - Fixes 2-3-3 pattern (e.g. "52.116.309") into 2-3-2 (7 digits "5211639")
+  String normalizeTranscribedPlateText(String text) {
+    var s = text.trim();
+
+    // 0. Remove spaces around dots or hyphens between digits (e.g. "52 . 116 . 309" -> "52.116.309")
+    s = s.replaceAllMapped(
+      RegExp(r'(\d+)\s*([\.\-])\s*(\d+)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}',
+    );
+
+    // 1. Collapse compound tens separated by whitespace, dot, dash, or 'ו'
+    // e.g. "30 9", "30.9", "30-9", "30 ו 9" -> "39"
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)([2-9]0)[\s\.\-]+(?:ו\s*)?([1-9])(?!\d)'),
+      (m) => '${m.group(1)![0]}${m.group(2)}',
+    );
+
+    // 2. Handle segmented plates like "52.116.309" or "52 116 309" (2-3-3 pattern)
+    // In Israel, a plate starting with 2 digits and middle 3 digits is strictly 7 digits (2-3-2).
+    // If the 3rd segment is 3 digits of form [2-9]0[1-9] (e.g. 309 for thirty-nine),
+    // collapse it to 2 digits (e.g. 309 -> 39).
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)(\d{2})[\s\.\-]+(\d{3})[\s\.\-]+([2-9])0([1-9])(?!\d)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}${m.group(4)}',
+    );
+
+    // 3. Handle segmented plates like "501.116.39" (3-3-2 pattern where 1st is [2-9]0[1-9])
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)([2-9])0([1-9])[\s\.\-]+(\d{3})[\s\.\-]+(\d{2})(?!\d)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}${m.group(4)}',
+    );
+
+    // 4. Handle 8-digit segmented plates like "123.405.678" (3-3-3 where middle is [2-9]0[1-9])
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)(\d{3})[\s\.\-]+([2-9])0([1-9])[\s\.\-]+(\d{3})(?!\d)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}${m.group(4)}',
+    );
+
+    // 5. Remove dots in standard 7-digit segmented plates: "51.116.39" -> "5111639"
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)(\d{2})\.(\d{3})\.(\d{2})(?!\d)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}',
+    );
+
+    // 6. Remove dots in standard 8-digit segmented plates: "123.45.678" -> "12345678"
+    s = s.replaceAllMapped(
+      RegExp(r'(?<!\d)(\d{3})\.(\d{2})\.(\d{3})(?!\d)'),
+      (m) => '${m.group(1)}${m.group(2)}${m.group(3)}',
+    );
+
+    // 7. If the entire string is just digits and dots/spaces/dashes (e.g. "52.116.309" or "51.116.39"),
+    // and contains 7 or 8 digits total, return pure digits without dots:
+    if (RegExp(r'^[\d\s\.\-]+$').hasMatch(s)) {
+      final digits = _digitsOnly(s);
+      if (digits.length >= 7 && digits.length <= 8) {
+        return digits;
+      }
+    }
+
+    return s;
+  }
+
   String? _extractLicensePlate(String text) {
+    final normalized = normalizeTranscribedPlateText(text);
+
     final explicit = RegExp(
-      r'(?:מספר\s*(?:רכב|רישוי)|לוחית(?:\s*רישוי)?|רישוי|license)[^\d]{0,16}(\d[\d\s\-]{5,10}\d)',
+      r'(?:מספר\s*(?:רכב|רישוי)|לוחית(?:\s*רישוי)?|רישוי|license)[^\d]{0,16}(\d[\d\s\.\-]{5,12}\d)',
       caseSensitive: false,
-    ).firstMatch(text);
+    ).firstMatch(normalized);
     if (explicit != null) {
-      final digits = _digitsOnly(explicit.group(1) ?? '');
+      final rawMatch = explicit.group(1) ?? '';
+      var digits = _digitsOnly(rawMatch);
+      if (digits.length == 8 && RegExp(r'^[1-9]\d[\s\.\-]').hasMatch(rawMatch.trim())) {
+        final tail = digits.substring(5);
+        if (RegExp(r'^[2-9]0[1-9]$').hasMatch(tail)) {
+          digits = '${digits.substring(0, 5)}${tail[0]}${tail[2]}';
+        }
+      }
       if (digits.length >= 7 && digits.length <= 8) return digits;
     }
 
     for (final match in RegExp(
-      r'(?<!\d)(\d[\d\s\-]{5,10}\d)(?!\d)',
-    ).allMatches(text)) {
-      final candidate = _digitsOnly(match.group(1) ?? '');
+      r'(?<!\d)(\d[\d\s\.\-]{5,12}\d)(?!\d)',
+    ).allMatches(normalized)) {
+      final rawMatch = match.group(1) ?? '';
+      var candidate = _digitsOnly(rawMatch);
+
+      // If candidate is 8 digits ending in [2-9]0[1-9] but rawMatch started with 2-digit chunk
+      // (e.g. "52116309" from "52.116.309" or "52-116-309"):
+      if (candidate.length == 8 && RegExp(r'^[1-9]\d[\s\.\-]').hasMatch(rawMatch.trim())) {
+        final tail = candidate.substring(5);
+        if (RegExp(r'^[2-9]0[1-9]$').hasMatch(tail)) {
+          candidate = '${candidate.substring(0, 5)}${tail[0]}${tail[2]}';
+        }
+      }
+
       if (candidate.length < 7 || candidate.length > 8) continue;
 
       final before =
-          text
+          normalized
               .substring(match.start > 24 ? match.start - 24 : 0, match.start)
               .toLowerCase();
       final after =
-          text
+          normalized
               .substring(
                 match.end,
-                match.end + 12 < text.length ? match.end + 12 : text.length,
+                match.end + 12 < normalized.length ? match.end + 12 : normalized.length,
               )
               .toLowerCase();
       final looksLikePriceOrKm =

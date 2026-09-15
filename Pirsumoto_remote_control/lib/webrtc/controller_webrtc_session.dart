@@ -414,6 +414,10 @@ class ControllerWebRtcSession extends ChangeNotifier {
     sendCommand(RemoteHandoverCommand(owner: owner));
   }
 
+  void sendReset() {
+    sendCommand(const RemoteResetCommand());
+  }
+
   Future<void> disconnect() async {
     _pingTimer?.cancel();
     _pingTimer = null;

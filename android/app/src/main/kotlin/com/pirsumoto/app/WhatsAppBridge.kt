@@ -752,6 +752,12 @@ class WhatsAppDaemonService : Service() {
             return START_NOT_STICKY
         }
 
+        if (intent?.action == ACTION_BRING_TO_FOREGROUND) {
+            Log.i(TAG, "ACTION_BRING_TO_FOREGROUND received in WhatsAppDaemonService")
+            MainActivity.bringToForeground(this)
+            return START_STICKY
+        }
+
         startForeground(NOTIFICATION_ID, buildNotification())
         startVoiceObserver()
         startImageObserver()
@@ -886,12 +892,29 @@ class WhatsAppDaemonService : Service() {
         const val ACTION_START = "com.pirsumoto.app.whatsapp_bridge.START"
         const val ACTION_STOP = "com.pirsumoto.app.whatsapp_bridge.STOP"
         const val ACTION_RESTART_DAEMON = "com.pirsumoto.app.whatsapp_bridge.RESTART_DAEMON"
+        const val ACTION_BRING_TO_FOREGROUND = "com.pirsumoto.app.whatsapp_bridge.BRING_TO_FOREGROUND"
         private const val CHANNEL_ID = "pirsumoto_whatsapp_bridge"
         private const val NOTIFICATION_ID = 4172
         private const val TAG = "WA-Daemon"
 
         private val STOP_FOREGROUND_REMOVE_COMPAT =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) Service.STOP_FOREGROUND_REMOVE else 1
+
+        fun bringAppToForeground(context: Context) {
+            try {
+                val intent = Intent(context, WhatsAppDaemonService::class.java).apply {
+                    action = ACTION_BRING_TO_FOREGROUND
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send ACTION_BRING_TO_FOREGROUND to WhatsAppDaemonService: $e")
+                MainActivity.bringToForeground(context)
+            }
+        }
     }
 }
 

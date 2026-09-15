@@ -212,31 +212,32 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ],
     );
 
-    return RepaintBoundary(
-      key: _screenshotKey,
-      child: Scaffold(
-        backgroundColor: Colors.white,
-        body: Column(
-          children: [
-            _buildGlobalTopTabs(),
-            Expanded(
-              child: IndexedStack(index: _currentIndex, children: screens),
-            ),
-          ],
-        ),
-        /*
-        floatingActionButton: FloatingActionButton(
-          onPressed: _takeScreenshotAndAnalyze,
-          backgroundColor: const Color(0xFF3B5BDB),
-          child: const Icon(Icons.document_scanner, color: Colors.white),
-          tooltip: 'נתח מסך עם Gemma',
-        ),
-        */
-        bottomNavigationBar: Container(
-          decoration: const BoxDecoration(
-            border: Border(top: BorderSide(color: Color(0xFFEEEEEE), width: 1)),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_currentIndex != 0) {
+          setState(() => _currentIndex = 0);
+        }
+      },
+      child: RepaintBoundary(
+        key: _screenshotKey,
+        child: Scaffold(
+          backgroundColor: Colors.white,
+          body: Column(
+            children: [
+              _buildGlobalTopTabs(),
+              Expanded(
+                child: IndexedStack(index: _currentIndex, children: screens),
+              ),
+            ],
           ),
-          child: bottomNav,
+          bottomNavigationBar: Container(
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: Color(0xFFEEEEEE), width: 1)),
+            ),
+            child: bottomNav,
+          ),
         ),
       ),
     );

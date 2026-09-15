@@ -111,7 +111,19 @@ class RemoteChatReceiver {
 
   /// Process incoming RemoteCommand if it is a chat command
   Future<bool> handleIncomingCommand(RemoteCommand command) async {
-    if (command is RemoteChatTextMessage) {
+    if (command is RemoteResetCommand) {
+      debugPrint('[RemoteChatReceiver] Received RemoteResetCommand: clearing sender state');
+      await WhatsAppTextValidationService.instance.clearSenderState(p2pSenderKey);
+      await WhatsAppTextValidationService.instance.clearSenderState('p2p_$deviceId');
+      webrtc.sendChatReply(
+        RemoteChatStatusMessage(
+          status: 'idle',
+          text: 'הסשן אופס בהצלחה. שלח מספר רישוי להתחלת פרסום חדש.',
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+      return true;
+    } else if (command is RemoteChatTextMessage) {
       await _handleIncomingTextMessage(command);
       return true;
     } else if (command is RemoteChatMediaChunk) {
@@ -265,8 +277,10 @@ class RemoteChatReceiver {
         Uri.parse('https://api.openai.com/v1/audio/transcriptions'),
       );
       request.headers['Authorization'] = 'Bearer $_whisperApiKey';
-      request.fields['model'] = 'gpt-4o-mini-transcribe';
+      request.fields['model'] = 'whisper-1';
       request.fields['language'] = 'he';
+      request.fields['prompt'] =
+          'מספר רכב בישראל (7 או 8 ספרות): 51-116-39, 12-345-67, 123-45-678. שלושים ותשע = 39 (ולא 309), חמישים ואחת = 51 (ולא 501). מאזדה, טויוטה, יונדאי, שנת, יד, קילומטראז, מחיר, צבע, פרסום ביד2 ללא נקודות.';
       request.files.add(await http.MultipartFile.fromPath('file', file.path));
 
       final response = await request.send().timeout(const Duration(seconds: 30));
@@ -284,9 +298,12 @@ class RemoteChatReceiver {
       debugPrint('[RemoteChatReceiver] Whisper transcription error: $e');
     }
 
-    if (transcript != null && transcript.trim().isNotEmpty) {
-      final cleanText = transcript.trim();
-      debugPrint('[RemoteChatReceiver] Audio transcribed: "$cleanText"');
+    final rawTranscript = transcript?.trim() ?? '';
+    final cleanText = WhatsAppTextValidationService.instance
+        .normalizeTranscribedPlateText(rawTranscript);
+
+    if (cleanText.isNotEmpty) {
+      debugPrint('[RemoteChatReceiver] Audio transcribed: "$cleanText" (raw: "$rawTranscript")');
 
       webrtc.sendChatReply(
         RemoteChatStatusMessage(

