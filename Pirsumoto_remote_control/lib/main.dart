@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
@@ -8,6 +9,7 @@ import 'ui/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -19,13 +21,40 @@ void main() async {
   runApp(const PirsumotoRemoteControlApp());
 }
 
-class PirsumotoRemoteControlApp extends StatelessWidget {
+class PirsumotoRemoteControlApp extends StatefulWidget {
   const PirsumotoRemoteControlApp({super.key});
+
+  @override
+  State<PirsumotoRemoteControlApp> createState() =>
+      _PirsumotoRemoteControlAppState();
+}
+
+class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Pirsumoto Relay',
+      title: 'שלט לפרסומוטו',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       builder: (context, child) {
@@ -58,3 +87,4 @@ class PirsumotoRemoteControlApp extends StatelessWidget {
     );
   }
 }
+

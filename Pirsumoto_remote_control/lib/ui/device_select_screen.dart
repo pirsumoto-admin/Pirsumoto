@@ -7,6 +7,7 @@ import '../webrtc/controller_webrtc_session.dart';
 import 'app_theme.dart';
 import 'remote_control_screen.dart';
 import 'whatsapp_chat_screen.dart';
+import 'device_listings_history_screen.dart';
 
 class DeviceSelectScreen extends StatefulWidget {
   const DeviceSelectScreen({super.key});
@@ -66,6 +67,36 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
         builder: (_) => WhatsAppChatScreen(
           deviceId: deviceId,
           deviceName: displayName,
+        ),
+      ),
+    );
+  }
+
+  void _openDeviceHistory({
+    required String deviceId,
+    String? modelName,
+    String? ownerUid,
+  }) {
+    if (deviceId.isEmpty) {
+      setState(() => _error = 'נא להזין מזהה מכשיר');
+      return;
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    final targetOwnerUid = (ownerUid != null && ownerUid.isNotEmpty)
+        ? ownerUid
+        : (user?.uid ?? '');
+
+    final displayName = (modelName != null && modelName.isNotEmpty)
+        ? modelName
+        : 'מכשיר ($deviceId)';
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => DeviceListingsHistoryScreen(
+          deviceId: deviceId,
+          deviceName: displayName,
+          ownerUid: targetOwnerUid,
         ),
       ),
     );
@@ -498,6 +529,28 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                 ),
                               ],
                             ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              height: 38,
+                              child: OutlinedButton.icon(
+                                onPressed: () => _openDeviceHistory(
+                                  deviceId: _customDeviceIdController.text.trim(),
+                                  modelName: 'מכשיר מותאם אישית',
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: AppColors.onSurface,
+                                  side: const BorderSide(color: AppColors.border),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                ),
+                                icon: const Icon(Icons.receipt_long_rounded, size: 16, color: AppColors.primaryAction),
+                                label: Text(
+                                  'היסטוריית מודעות למכשיר זה',
+                                  style: GoogleFonts.heebo(fontWeight: FontWeight.w600, fontSize: 13),
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -603,6 +656,11 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                       modelName: modelName,
                                       sessionType: 'chat',
                                     ),
+                                    onOpenHistory: () => _openDeviceHistory(
+                                      deviceId: deviceId,
+                                      modelName: modelName,
+                                      ownerUid: data['ownerUid'] as String? ?? currentUid,
+                                    ),
                                   );
                                 },
                               ),
@@ -673,6 +731,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
     required bool isDisabled,
     required VoidCallback onConnectRemote,
     required VoidCallback onConnectChat,
+    required VoidCallback onOpenHistory,
   }) {
     final isOnline = status == 'online' || status == 'idle' || status == 'ready' || status == 'connected';
     final isBusy = status == 'busy' || status == 'in_call' || status == 'streaming';
@@ -888,6 +947,37 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                 ),
               ),
             ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // Publication History Button near Remote Control
+          SizedBox(
+            height: 40,
+            child: OutlinedButton.icon(
+              onPressed: onOpenHistory,
+              style: OutlinedButton.styleFrom(
+                backgroundColor: AppColors.surfaceSubtle,
+                foregroundColor: AppColors.onSurface,
+                side: const BorderSide(color: AppColors.border),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              icon: const Icon(
+                Icons.receipt_long_rounded,
+                size: 18,
+                color: AppColors.primaryAction,
+              ),
+              label: Text(
+                'היסטוריית מודעות ופרסומים',
+                style: GoogleFonts.heebo(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.onSurface,
+                ),
+              ),
+            ),
           ),
         ],
       ),
