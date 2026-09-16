@@ -12,6 +12,7 @@ import 'routing/app_router.dart';
 import 'services/whatsapp_message_bridge_service.dart';
 import 'services/whatsapp_text_validation_service.dart';
 import 'services/yad2_automation_models.dart';
+import 'services/db_service.dart';
 import 'shared/theme/app_theme.dart';
 import 'remote_control/remote_receiver_service.dart';
 import 'remote_control/remote_control_active_banner.dart';
@@ -512,6 +513,13 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       services: formState.services,
       description: _firstNonEmpty([formState.description, data['description']]),
       expectedImageCount: expectedCount,
+    );
+
+    unawaited(
+      DBService().saveListingFromPublishData(
+        publishData,
+        platform: 'whatsapp_automation',
+      ),
     );
 
     navigator.push(

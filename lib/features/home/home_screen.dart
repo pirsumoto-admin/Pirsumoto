@@ -1597,12 +1597,33 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
               : <String>[];
     }
 
+    final finalMaker = _makerController.text.isNotEmpty
+        ? _makerController.text
+        : formState.maker;
+    final finalModel = _modelController.text.isNotEmpty
+        ? _modelController.text
+        : formState.model;
+    final finalYear = _yearController.text.isNotEmpty
+        ? _yearController.text
+        : formState.year;
+    final finalFuelType = _fuelTypeController.text.isNotEmpty
+        ? _fuelTypeController.text
+        : formState.fuelType;
+    final finalGear = _gearController.text.isNotEmpty
+        ? _gearController.text
+        : (formState.gear.isNotEmpty ? formState.gear : 'הילוכים אוטומטיים');
+    final finalVehicleCondition = _vehicleConditionController.text.isNotEmpty
+        ? _vehicleConditionController.text
+        : (formState.vehicleCondition.isNotEmpty
+            ? formState.vehicleCondition
+            : 'טוב');
+
     final listingData = {
       'license': _licenseController.text,
       'color': finalColor,
-      'maker': formState.maker,
-      'model': formState.model,
-      'year': formState.year,
+      'maker': finalMaker,
+      'model': finalModel,
+      'year': finalYear,
       'month': finalMonth,
       'test': '$finalTestMonth,$finalTestYear',
       'hand': finalHand,
@@ -1611,7 +1632,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       'km': _kmController.text,
       'price': _priceController.text,
       'handicapped': _handicappedController.value ? 'כן' : 'לא',
-      'vehicleCondition': _vehicleConditionController.text,
+      'vehicleCondition': finalVehicleCondition,
+      'gear': finalGear,
+      'fuelType': finalFuelType,
       'noTest': _noTestController.value,
       'description': formState.description,
       'images': formState.images.map((p) => {'url': p}).toList(),

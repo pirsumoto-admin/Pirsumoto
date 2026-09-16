@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/db_service.dart';
@@ -212,6 +213,12 @@ class ListingsScreen extends ConsumerWidget {
     final hand = listing['hand'] ?? '1';
     final ownership = listing['ownership'] ?? 'חברה';
     final km = listing['km'] ?? '124,550';
+    final maker = (listing['maker'] ?? '').toString().trim();
+    final model = (listing['model'] ?? '').toString().trim();
+    final year = (listing['year'] ?? '').toString().trim();
+    final gear = (listing['gear'] ?? '').toString().trim();
+    final vehicleTitle = [maker, model, year].where((s) => s.isNotEmpty).join(' ');
+
     final isFavorite = listing['isFavorite'] == true;
     dynamic firstImage;
     if (listing['images'] != null && (listing['images'] as List).isNotEmpty) {
@@ -322,11 +329,26 @@ class ListingsScreen extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
+                    if (vehicleTitle.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2.0),
+                        child: Text(
+                          vehicleTitle,
+                          style: const TextStyle(
+                            color: Color(0xFF3B5BDB),
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.right,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                     RichText(
                       text: TextSpan(
                         style: const TextStyle(
                           color: Colors.black,
-                          fontSize: 16,
+                          fontSize: 15,
                         ),
                         children: [
                           TextSpan(
@@ -343,22 +365,17 @@ class ListingsScreen extends ConsumerWidget {
                     const SizedBox(height: 4),
                     Text(
                       'מחיר: ₪ $price',
-                      style: const TextStyle(color: Colors.grey, fontSize: 14),
+                      style: const TextStyle(color: Colors.black87, fontSize: 13, fontWeight: FontWeight.w600),
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'יד: $hand',
-                      style: const TextStyle(color: Colors.grey, fontSize: 14),
+                      'יד: $hand | בעלות: $ownership',
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'בעלות: $ownership',
-                      style: const TextStyle(color: Colors.grey, fontSize: 14),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'ק"מ: $km',
-                      style: const TextStyle(color: Colors.grey, fontSize: 14),
+                      'ק"מ: $km${gear.isNotEmpty ? ' | $gear' : ''}',
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
                     ),
                   ],
                 ),
@@ -372,22 +389,7 @@ class ListingsScreen extends ConsumerWidget {
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: Image.network(
-                      imageUrl,
-                      width: 100,
-                      height: 120,
-                      fit: BoxFit.cover,
-                      errorBuilder:
-                          (_, __, ___) => Container(
-                            width: 100,
-                            height: 120,
-                            color: Colors.grey.shade200,
-                            child: const Icon(
-                              Icons.directions_car,
-                              color: Colors.grey,
-                            ),
-                          ),
-                    ),
+                    child: _buildImageWidget(imageUrl, 100, 120),
                   ),
                   Positioned(
                     top: 4,
@@ -420,6 +422,45 @@ class ListingsScreen extends ConsumerWidget {
         ),
         ),
       ),
+    );
+  }
+
+  Widget _buildImageWidget(String path, double width, double height) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return Image.network(
+        path,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => Container(
+          width: width,
+          height: height,
+          color: Colors.grey.shade200,
+          child: const Icon(Icons.directions_car, color: Colors.grey),
+        ),
+      );
+    }
+    final cleanPath = path.startsWith('file://') ? path.replaceFirst('file://', '') : path;
+    final file = File(cleanPath);
+    if (file.existsSync()) {
+      return Image.file(
+        file,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => Container(
+          width: width,
+          height: height,
+          color: Colors.grey.shade200,
+          child: const Icon(Icons.directions_car, color: Colors.grey),
+        ),
+      );
+    }
+    return Container(
+      width: width,
+      height: height,
+      color: Colors.grey.shade200,
+      child: const Icon(Icons.directions_car, color: Colors.grey),
     );
   }
 }

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/db_service.dart';
@@ -78,13 +79,22 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
   Widget build(BuildContext context) {
     final listing = widget.listing;
     final license = listing['license'] ?? '';
+    final maker = listing['maker'] ?? '';
+    final model = listing['model'] ?? '';
+    final year = listing['year'] ?? '';
     final month = listing['month'] ?? '';
     final testUntil = listing['test'] ?? listing['testUntil'] ?? '';
+    final noTest = listing['noTest'] == true;
     final hand = listing['hand'] ?? '';
     final ownership = listing['ownership'] ?? '';
     final prevOwnership = listing['prevOwnership'] ?? '';
     final km = listing['km'] ?? '';
     final price = listing['price'] ?? '';
+    final gear = listing['gear'] ?? '';
+    final fuelType = listing['fuelType'] ?? '';
+    final vehicleCondition = listing['vehicleCondition'] ?? '';
+    final color = listing['color'] ?? '';
+    final city = listing['city'] ?? '';
     final handicapped = listing['handicapped'] ?? '';
     final description = listing['description'] ?? '';
     final images = _images;
@@ -179,16 +189,10 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
                             onPageChanged: (i) =>
                                 setState(() => _currentImageIndex = i),
                             itemBuilder: (context, i) {
-                              return Image.network(
+                              return _buildImageWidget(
                                 images[i],
                                 width: double.infinity,
                                 height: 250,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => Container(
-                                  color: Colors.grey.shade200,
-                                  child: const Icon(Icons.directions_car,
-                                      color: Colors.grey, size: 80),
-                                ),
                               );
                             },
                           ),
@@ -304,8 +308,11 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
                                 ),
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(4),
-                                  child: Image.network(images[i],
-                                      fit: BoxFit.cover),
+                                  child: _buildImageWidget(
+                                    images[i],
+                                    width: 50,
+                                    height: 50,
+                                  ),
                                 ),
                               ),
                             );
@@ -338,36 +345,71 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
                         const Divider(),
                         _buildDetailRow('מספר רישוי:', license.toString(),
                             isBold: true),
-                        if (month.isNotEmpty) ...[
+                        if (maker.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('יצרן:', maker.toString()),
+                        ],
+                        if (model.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('דגם:', model.toString()),
+                        ],
+                        if (year.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('שנת יצור:', year.toString()),
+                        ],
+                        if (month.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('חודש עליה לכביש:', month.toString()),
                         ],
-                        if (testUntil.isNotEmpty) ...[
+                        if (testUntil.toString().isNotEmpty || noTest) ...[
                           const Divider(),
-                          _buildDetailRow('טסט עד:', testUntil.toString()),
+                          _buildDetailRow(
+                            'טסט עד:',
+                            noTest ? 'ללא טסט' : testUntil.toString(),
+                          ),
                         ],
-                        if (hand.isNotEmpty) ...[
+                        if (hand.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('יד:', hand.toString()),
                         ],
-                        if (ownership.isNotEmpty) ...[
+                        if (gear.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('תיבת הילוכים:', gear.toString()),
+                        ],
+                        if (fuelType.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('סוג דלק:', fuelType.toString()),
+                        ],
+                        if (vehicleCondition.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('מצב הרכב:', vehicleCondition.toString()),
+                        ],
+                        if (color.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('צבע:', color.toString()),
+                        ],
+                        if (city.toString().isNotEmpty) ...[
+                          const Divider(),
+                          _buildDetailRow('עיר:', city.toString()),
+                        ],
+                        if (ownership.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('בעלות נוכחית:', ownership.toString()),
                         ],
-                        if (prevOwnership.isNotEmpty) ...[
+                        if (prevOwnership.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow(
                               'בעלות מקורית:', prevOwnership.toString()),
                         ],
-                        if (km.isNotEmpty) ...[
+                        if (km.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('ק"מ:', km.toString()),
                         ],
-                        if (price.isNotEmpty) ...[
+                        if (price.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('מחיר:', '₪ ${price.toString()}'),
                         ],
-                        if (handicapped.isNotEmpty) ...[
+                        if (handicapped.toString().isNotEmpty) ...[
                           const Divider(),
                           _buildDetailRow('נכה:', handicapped.toString()),
                         ],
@@ -536,6 +578,50 @@ class _ListingDetailsScreenState extends ConsumerState<ListingDetailsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildImageWidget(
+    String path, {
+    required double width,
+    required double height,
+    BoxFit fit = BoxFit.cover,
+  }) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return Image.network(
+        path,
+        width: width,
+        height: height,
+        fit: fit,
+        errorBuilder: (_, _, _) => Container(
+          width: width,
+          height: height,
+          color: Colors.grey.shade200,
+          child: const Icon(Icons.directions_car, color: Colors.grey, size: 60),
+        ),
+      );
+    }
+    final cleanPath = path.startsWith('file://') ? path.replaceFirst('file://', '') : path;
+    final file = File(cleanPath);
+    if (file.existsSync()) {
+      return Image.file(
+        file,
+        width: width,
+        height: height,
+        fit: fit,
+        errorBuilder: (_, _, _) => Container(
+          width: width,
+          height: height,
+          color: Colors.grey.shade200,
+          child: const Icon(Icons.directions_car, color: Colors.grey, size: 60),
+        ),
+      );
+    }
+    return Container(
+      width: width,
+      height: height,
+      color: Colors.grey.shade200,
+      child: const Icon(Icons.directions_car, color: Colors.grey, size: 60),
     );
   }
 }

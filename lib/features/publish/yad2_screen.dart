@@ -16,6 +16,7 @@ import '../../services/yad2_automation_service.dart';
 import '../../services/yad2_accessibility_automation_service_optimized.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 import 'facebook_screen.dart';
 
@@ -416,6 +417,14 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
       final updatedPublishData = widget.publishData.copyWith(
         description: finalDescription,
+      );
+
+      // Persist successful Yad2 publication to Firestore
+      unawaited(
+        DBService().saveListingFromPublishData(
+          updatedPublishData,
+          platform: 'yad2',
+        ),
       );
 
       Navigator.of(context).pushReplacement(

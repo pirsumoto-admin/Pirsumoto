@@ -109,6 +109,13 @@ class WhatsAppChatScreen extends StatefulWidget {
   final String deviceName;
   final ControllerWebRtcSession? session;
 
+  static String? currentActiveDeviceId;
+
+  static bool isInsideChatWith(String deviceId) =>
+      currentActiveDeviceId != null && currentActiveDeviceId == deviceId;
+
+  static bool isInsideAnyChat() => currentActiveDeviceId != null;
+
   const WhatsAppChatScreen({
     super.key,
     required this.deviceId,
@@ -147,6 +154,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   @override
   void initState() {
     super.initState();
+    WhatsAppChatScreen.currentActiveDeviceId = widget.deviceId;
     _deviceStatusStream = FirebaseFirestore.instance
         .collection('remote_control_devices')
         .doc(widget.deviceId)
@@ -456,6 +464,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   @override
   void dispose() {
+    if (WhatsAppChatScreen.currentActiveDeviceId == widget.deviceId) {
+      WhatsAppChatScreen.currentActiveDeviceId = null;
+    }
     _firestoreSub?.cancel();
     _replySub?.cancel();
     _playerStateSub?.cancel();

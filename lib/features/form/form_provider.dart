@@ -186,6 +186,7 @@ class FormController extends _$FormController {
       vehicleCondition: listing['vehicleCondition']?.toString() ?? 'טוב',
       description: listing['description']?.toString() ?? '',
       gear: listing['gear']?.toString() ?? '',
+      fuelType: listing['fuelType']?.toString() ?? '',
       images: images,
       warranties:
           listing['warranties'] != null

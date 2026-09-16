@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
+import 'services/chat_notification_service.dart';
 import 'ui/app_theme.dart';
 import 'ui/device_select_screen.dart';
 import 'ui/login_screen.dart';
@@ -14,8 +15,9 @@ void main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
+    await ChatNotificationService.instance.initialize();
   } catch (e) {
-    debugPrint('[RemoteControlApp] Firebase initialization note: $e');
+    debugPrint('[RemoteControlApp] Firebase/Notification initialization note: $e');
   }
 
   runApp(const PirsumotoRemoteControlApp());
@@ -54,6 +56,7 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: remoteControlNavigatorKey,
       title: 'שלט לפרסומוטו',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,

@@ -6,6 +6,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
+import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 
 // ---------------------------------------------------------------------------
@@ -196,6 +197,15 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _statusMessage =
               success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
         });
+
+        if (success && widget.publishData != null) {
+          unawaited(
+            DBService().saveListingFromPublishData(
+              widget.publishData!,
+              platform: 'facebook',
+            ),
+          );
+        }
 
         if (widget.whatsAppSenderKey != null &&
             widget.whatsAppSenderKey!.trim().isNotEmpty) {
