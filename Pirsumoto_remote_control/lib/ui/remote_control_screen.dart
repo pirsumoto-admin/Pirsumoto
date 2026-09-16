@@ -33,6 +33,14 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
   bool _isHumanControl = false;
 
   @override
+  void dispose() {
+    if (_isHumanControl) {
+      widget.session.sendHandover('automation');
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.session,
@@ -237,7 +245,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
                         content: Text(
-                          'יש ללחוץ על "לקיחת שליטה" כדי לשלוט במכשיר',
+                          'יש ללחוץ על "קבלת שליטה" כדי לשלוט במכשיר',
                           style: GoogleFonts.heebo(color: Colors.white),
                         ),
                         backgroundColor: AppColors.surfaceSubtle,
@@ -325,37 +333,6 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                 ),
               ),
             ),
-            if (!_isHumanControl && widget.session.isConnected)
-              Positioned(
-                top: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.8),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.lock_outline_rounded,
-                        size: 14,
-                        color: AppColors.secondary,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'מצב צפייה בלבד (לחץ "לקיחת שליטה" לשליטה במסך)',
-                        style: GoogleFonts.heebo(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w500,
-                          color: AppColors.secondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
           ],
         );
       },
@@ -427,8 +404,19 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
           .doc(deviceId)
           .collection('messages')
           .get();
-      for (final doc in msgs.docs) {
-        await doc.reference.delete();
+      if (msgs.docs.isNotEmpty) {
+        const chunkSize = 400;
+        for (var i = 0; i < msgs.docs.length; i += chunkSize) {
+          final batch = FirebaseFirestore.instance.batch();
+          final end =
+              (i + chunkSize < msgs.docs.length)
+                  ? i + chunkSize
+                  : msgs.docs.length;
+          for (var j = i; j < end; j++) {
+            batch.delete(msgs.docs[j].reference);
+          }
+          await batch.commit();
+        }
       }
     } catch (e) {
       debugPrint('[RemoteControl] Error clearing Firestore messages: $e');
@@ -437,7 +425,6 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
     // 3. Send reset command to receiver via WebRTC (if connected)
     try {
       widget.session.sendReset();
-      widget.session.sendChatMessage('ביטול');
     } catch (_) {}
 
     // 4. Send reset instruction to Firestore so FirebaseChatReceiver resets as well
@@ -452,7 +439,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
         'id': messageId,
         'sender': 'user',
         'type': 'reset',
-        'text': 'ביטול',
+        'text': '',
         'status': 'pending',
         'timestamp': DateTime.now().millisecondsSinceEpoch,
         'createdAt': FieldValue.serverTimestamp(),
@@ -496,7 +483,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                      'יש ללחוץ על "לקיחת שליטה" כדי לשלוט במכשיר',
+                      'יש ללחוץ על "קבלת שליטה" כדי לשלוט במכשיר',
                       style: GoogleFonts.heebo(color: Colors.white),
                     ),
                     backgroundColor: AppColors.surfaceSubtle,
@@ -509,10 +496,10 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
             },
           ),
 
-          // 2. Control Pointer (לקיחת שליטה / שחרור שליטה)
+          // 2. Control Pointer (קבלת שליטה / שחרור שליטה)
           _buildActionButton(
             icon: Icons.touch_app_rounded,
-            label: _isHumanControl ? 'שחרור שליטה' : 'לקיחת שליטה',
+            label: _isHumanControl ? 'שחרור שליטה' : 'קבלת שליטה',
             color: _isHumanControl ? AppColors.primaryAction : AppColors.secondary,
             isHighlighted: _isHumanControl,
             onTap: () {

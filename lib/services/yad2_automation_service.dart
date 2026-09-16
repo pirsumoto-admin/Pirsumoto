@@ -87,6 +87,7 @@ class Yad2AutomationService {
   }
 
   final void Function(bool visible)? onToggleOverlayVisibility;
+  final VoidCallback? onLoginRequired;
 
   Yad2AutomationService({
     required this.controller,
@@ -98,6 +99,7 @@ class Yad2AutomationService {
     this.onPhaseError,
     this.onAutomationComplete,
     this.onFirstStepDetected,
+    this.onLoginRequired,
     this.onTapPreview,
     this.validator,
     this.onOcrFallback,
@@ -106,6 +108,8 @@ class Yad2AutomationService {
 
   void startAutomation() {
     debugPrint('[Yad2] 🚀 Starting automation (running pre-check)');
+    _isPaused = false;
+    _pausedPhase = null;
     _phase1WaitAttempts = 0;
     _phase1Done = false;
     _stopSampling();
@@ -151,6 +155,7 @@ class Yad2AutomationService {
       );
     }
 
+    onLoginRequired?.call();
     await _beepUser();
 
     if (!_isSampling) {

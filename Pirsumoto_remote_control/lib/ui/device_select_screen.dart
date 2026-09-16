@@ -678,9 +678,9 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
     final isBusy = status == 'busy' || status == 'in_call' || status == 'streaming';
 
     // Status Badge Configuration
-    Color badgeBg;
-    Color badgeTextColor;
-    String badgeLabel;
+    Color? badgeBg;
+    Color? badgeTextColor;
+    String? badgeLabel;
     if (isOnline) {
       badgeBg = AppColors.successSoft;
       badgeTextColor = AppColors.success;
@@ -689,10 +689,6 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
       badgeBg = AppColors.warningSoft;
       badgeTextColor = AppColors.warning;
       badgeLabel = 'בשימוש';
-    } else {
-      badgeBg = AppColors.offlineSoft;
-      badgeTextColor = AppColors.offline;
-      badgeLabel = 'לא מחובר';
     }
 
     // OS Symbol Configuration
@@ -784,36 +780,37 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                 ),
               ),
 
-              // Status Badge (physical left in RTL)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: badgeBg,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: badgeTextColor,
+              // Status Badge (physical left in RTL) - only shown when online / in use
+              if (badgeLabel != null && badgeBg != null && badgeTextColor != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: badgeBg,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: badgeTextColor,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      badgeLabel,
-                      style: GoogleFonts.heebo(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: badgeTextColor,
+                      const SizedBox(width: 5),
+                      Text(
+                        badgeLabel,
+                        style: GoogleFonts.heebo(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: badgeTextColor,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
 

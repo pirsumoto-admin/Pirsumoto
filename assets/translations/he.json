@@ -54,6 +54,7 @@
         "yad2_screen_title": "יד 2 - אימות התחברות מראש",
         "facebook_screen_title": "פייסבוק - אימות התחברות מראש",
         "reload": "רענן",
+        "close_and_reload": "סגור ורענן דף",
         "back_to_dialog": "סגור וחזור"
     }
 }

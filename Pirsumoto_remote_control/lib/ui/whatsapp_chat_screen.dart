@@ -168,6 +168,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                   (item) =>
                       ChatMessageItem.fromJson(item as Map<String, dynamic>),
                 )
+                .where((m) => !m.text.contains('תהליך הפרסום בוטל והסשן נסגר'))
                 .toList();
         if (loaded.isNotEmpty) {
           if (!mounted) return;
@@ -256,23 +257,34 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     );
 
     if (confirm == true) {
-      // 1. Clear SharedPreferences
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove(_storageKey);
-      } catch (e) {
-        debugPrint('[WhatsAppChat] Error clearing prefs: $e');
-      }
+      // 1. Immediately reset in-memory state & SharedPreferences
+      setState(() {
+        _messages.clear();
+        _addInitialWelcomeMessage();
+      });
+      await _saveMessagesToPrefs();
 
-      // 2. Clear Firestore messages for this device
+      // 2. Batch-delete all Firestore messages for this device
       try {
-        final msgs = await FirebaseFirestore.instance
-            .collection('remote_chats')
-            .doc(widget.deviceId)
-            .collection('messages')
-            .get();
-        for (final doc in msgs.docs) {
-          await doc.reference.delete();
+        final msgs =
+            await FirebaseFirestore.instance
+                .collection('remote_chats')
+                .doc(widget.deviceId)
+                .collection('messages')
+                .get();
+        if (msgs.docs.isNotEmpty) {
+          const chunkSize = 400;
+          for (var i = 0; i < msgs.docs.length; i += chunkSize) {
+            final batch = FirebaseFirestore.instance.batch();
+            final end =
+                (i + chunkSize < msgs.docs.length)
+                    ? i + chunkSize
+                    : msgs.docs.length;
+            for (var j = i; j < end; j++) {
+              batch.delete(msgs.docs[j].reference);
+            }
+            await batch.commit();
+          }
         }
       } catch (e) {
         debugPrint('[WhatsAppChat] Error clearing Firestore messages: $e');
@@ -282,7 +294,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       if (widget.session?.isConnected == true) {
         try {
           widget.session!.sendReset();
-          widget.session!.sendChatMessage('ביטול');
         } catch (_) {}
       }
 
@@ -295,22 +306,15 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             .collection('messages')
             .doc(messageId)
             .set({
-          'id': messageId,
-          'sender': 'user',
-          'type': 'reset',
-          'text': 'ביטול',
-          'status': 'pending',
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+              'id': messageId,
+              'sender': 'user',
+              'type': 'reset',
+              'text': '',
+              'status': 'pending',
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
       } catch (_) {}
-
-      if (!mounted) return;
-      setState(() {
-        _messages.clear();
-        _addInitialWelcomeMessage();
-      });
-      _saveMessagesToPrefs();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -351,7 +355,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     _firestoreSub = messagesStream.listen((snapshot) {
       if (!mounted) return;
-      bool hasNew = false;
+      bool hasChanges = false;
       for (final change in snapshot.docChanges) {
         if (change.type == DocumentChangeType.added) {
           final data = change.doc.data();
@@ -360,26 +364,37 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           final sender = data['sender'] as String? ?? '';
           final type = data['type'] as String? ?? 'message';
 
-          if (type == 'status') continue;
+          if (type == 'status' || type == 'reset') continue;
+
+          final text = (data['text'] as String? ?? '').trim();
+          if (text.contains('תהליך הפרסום בוטל והסשן נסגר')) continue;
 
           if (sender == 'bot' || sender == 'user') {
             final ts =
                 data['timestamp'] as int? ??
                 DateTime.now().millisecondsSinceEpoch;
             if (!_messages.any((m) => m.id == id)) {
+              if (_messages.length == 1 && _messages.first.id == 'welcome_1') {
+                _messages.clear();
+              }
               _messages.add(
-                ChatMessageItem.fromJson({
-                  ...data,
-                  'id': id,
-                  'timestamp': ts,
-                }),
+                ChatMessageItem.fromJson({...data, 'id': id, 'timestamp': ts}),
               );
-              hasNew = true;
+              hasChanges = true;
             }
+          }
+        } else if (change.type == DocumentChangeType.removed) {
+          final id = change.doc.id;
+          if (_messages.any((m) => m.id == id)) {
+            _messages.removeWhere((m) => m.id == id);
+            hasChanges = true;
           }
         }
       }
-      if (hasNew) {
+      if (hasChanges) {
+        if (_messages.isEmpty) {
+          _addInitialWelcomeMessage();
+        }
         _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         setState(() {});
         _scrollToBottom();
@@ -391,7 +406,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (widget.session != null) {
       _replySub = widget.session!.chatReplies.listen((reply) {
         if (!mounted) return;
+        if (reply.text.trim().contains('תהליך הפרסום בוטל והסשן נסגר')) return;
         if (!_messages.any((m) => m.id == reply.id)) {
+          if (_messages.length == 1 && _messages.first.id == 'welcome_1') {
+            _messages.clear();
+          }
           setState(() {
             _messages.add(
               ChatMessageItem(
@@ -406,8 +425,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           _saveMessagesToPrefs();
         }
       });
-
-
     }
   }
 
@@ -1025,13 +1042,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (session != null) {
       return ListenableBuilder(
         listenable: session,
-        builder: (context, _) => label(
-          session.isConnected
-              ? 'מחובר'
-              : session.isConnecting
+        builder:
+            (context, _) => label(
+              session.isConnected
+                  ? 'מחובר'
+                  : session.isConnecting
                   ? 'מתחבר'
-                  : 'מנוצק',
-        ),
+                  : 'מנותק',
+            ),
       );
     }
 
@@ -1048,7 +1066,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             device != null &&
             !device.metadata.isFromCache &&
             ['online', 'idle', 'ready', 'connected'].contains(status);
-        return label(connected ? 'מחובר' : 'מנוצק');
+        return label(connected ? 'מחובר' : 'מנותק');
       },
     );
   }
@@ -1074,7 +1092,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                   child: const Padding(
                     padding: EdgeInsets.all(6),
                     child: Icon(
-                      Icons.arrow_back_ios_new_rounded, // Mirrored to point left
+                      Icons
+                          .arrow_back_ios_new_rounded, // Mirrored to point left
                       color: AppColors.onSurface,
                       size: 20,
                     ),
@@ -1363,6 +1382,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   bool _hasActionOptions(String text) {
     return text.contains('0 לפרסום') ||
         text.contains('לפרסום שלח 0') ||
+        text.contains('לפרסום') ||
+        text.contains('פרסם עכשיו') ||
+        text.contains('מוכנים לפרסום') ||
         text.contains('ביטול') ||
         text.contains('המשך') ||
         text.contains('שליטה מרחוק') ||
@@ -1372,7 +1394,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         text.contains('תמונות') ||
         text.contains('תמונה') ||
         text.contains('להעלות') ||
-        text.contains('התקבלו');
+        text.contains('התקבלו') ||
+        text.contains('התקבלה') ||
+        text.contains('נקלטה תמונה');
   }
 
   Widget _buildQuickActionChips(String text) {
@@ -1383,6 +1407,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         text.contains('תמונה') ||
         text.contains('להעלות') ||
         text.contains('התקבלו') ||
+        text.contains('התקבלה') ||
         text.contains('נקלטה תמונה');
 
     if (asksForImages) {
@@ -1453,7 +1478,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       );
     }
 
-    if (text.contains('0') || text.contains('לפרסום')) {
+    if (text.contains('0') ||
+        text.contains('לפרסום') ||
+        text.contains('מוכנים לפרסום') ||
+        text.contains('פרסם עכשיו')) {
       chips.add(
         ActionChip(
           backgroundColor: AppColors.successSoft,
@@ -1833,7 +1861,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                             ),
                             GestureDetector(
                               onLongPressStart: (_) => _startRecording(),
-                              onLongPressEnd: (_) => _stopAndSendRecording(cancel: false),
+                              onLongPressEnd:
+                                  (_) => _stopAndSendRecording(cancel: false),
                               child: IconButton(
                                 tooltip: 'הקלטת הודעה',
                                 icon: const Icon(

@@ -321,6 +321,7 @@ class Yad2AccessibilityAutomationService {
   final String? whatsAppSenderKey;
 
   final void Function(bool visible)? onToggleOverlayVisibility;
+  final VoidCallback? onLoginRequired;
   String? extractedDescription;
   static String? lastExtractedDescription;
 
@@ -339,6 +340,7 @@ class Yad2AccessibilityAutomationService {
     this.onAutomationComplete,
     this.onAutomationFallback,
     this.onFirstStepDetected,
+    this.onLoginRequired,
     this.onTapPreview,
     this.onToggleOverlayVisibility,
   }) {
@@ -406,14 +408,11 @@ class Yad2AccessibilityAutomationService {
   void resumeAutomation() {
     debugPrint('[Yad2-A11y] Resume requested');
     _stopLoginGate();
-    if (!_isPaused) return;
     _isPaused = false;
 
-    final phaseToResume = _pausedPhase ?? _currentPhase;
-    if (phaseToResume != null) {
-      _pausedPhase = null;
-      _processPhase(phaseToResume);
-    }
+    final phaseToResume = _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
+    _pausedPhase = null;
+    _processPhase(phaseToResume);
   }
 
   void stepBack() {
@@ -433,6 +432,9 @@ class Yad2AccessibilityAutomationService {
 
   void startAutomation() {
     debugPrint('[Yad2-A11y] Starting optimized Accessibility automation');
+    _stopLoginGate();
+    _isPaused = false;
+    _pausedPhase = null;
     _hasNotifiedCompletion = false;
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
@@ -2573,6 +2575,7 @@ class Yad2AccessibilityAutomationService {
     debugPrint('[Yad2-A11y] Login gate active.');
     _isPaused = true;
     _pausedPhase = AutomationPhase.phase1;
+    onLoginRequired?.call();
     unawaited(_beepUser());
     unawaited(_notifyLoginRequired());
     _loginSamplingTimer = Timer.periodic(const Duration(seconds: 3), (

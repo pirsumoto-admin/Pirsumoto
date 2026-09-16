@@ -6,6 +6,9 @@ class VehicleDataService {
       'https://data.gov.il/api/3/action/datastore_search';
   static const String _resourceId = '053cea08-09bc-40ec-8f7a-156f0677aff3';
 
+  static const String _gearResourceId =
+      '142afde2-6228-49f9-8a29-9b6c3a0cbe40';
+
   /// Fetch vehicle information by license plate number (Israeli data.gov.il API)
   static Future<Map<String, dynamic>?> fetchVehicleData(
     String licensePlate,
@@ -27,6 +30,7 @@ class VehicleDataService {
       if (records == null || records.isEmpty) return null;
 
       final vehicle = records[0] as Map<String, dynamic>;
+      final gear = await _fetchGearType(vehicle);
 
       return {
         'maker': vehicle['tozeret_nm']?.toString() ?? '',
@@ -46,9 +50,56 @@ class VehicleDataService {
         'tokef_dt': vehicle['tokef_dt']?.toString() ?? '',
         'moed_aliya_lakvish': vehicle['moed_aliya_lakvish']?.toString() ?? '',
         'shnat_yitzur': vehicle['shnat_yitzur']?.toString() ?? '',
+        'gear': gear,
+        'gear_type': gear,
       };
     } catch (e) {
       return null;
+    }
+  }
+
+  static Future<String> _fetchGearType(Map<String, dynamic> vehicle) async {
+    const defaultGear = 'הילוכים אוטומטיים';
+    try {
+      final degemNm = vehicle['degem_nm']?.toString() ?? '';
+      final tozeret = vehicle['tozeret_cd'];
+      final degemcd = vehicle['degem_cd'];
+      final sug = vehicle['sug_degem']?.toString() ?? '';
+      final yearStr = vehicle['shnat_yitzur']?.toString() ?? '';
+
+      final filtersObj = <String, dynamic>{
+        if (degemNm.isNotEmpty) 'degem_nm': degemNm,
+        if (tozeret != null && tozeret.toString().isNotEmpty)
+          'tozeret_cd': tozeret,
+        if (degemcd != null && degemcd.toString().isNotEmpty)
+          'degem_cd': degemcd,
+        if (sug.isNotEmpty) 'sug_degem': sug,
+        if (yearStr.isNotEmpty) 'shnat_yitzur': int.tryParse(yearStr) ?? yearStr,
+      };
+
+      if (filtersObj.isEmpty) return defaultGear;
+
+      final url =
+          '$_apiUrl?resource_id=$_gearResourceId&filters=${Uri.encodeComponent(jsonEncode(filtersObj))}';
+      final response = await http
+          .get(Uri.parse(url), headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) return defaultGear;
+
+      final decoded = jsonDecode(response.body);
+      final records = decoded?['result']?['records'] as List?;
+      if (records != null && records.isNotEmpty) {
+        final dataGear = records[0] as Map<String, dynamic>;
+        final automatic = dataGear['automatic_ind'];
+        if (automatic == 0 || automatic == '0') {
+          return 'שידור ידני';
+        }
+        return 'הילוכים אוטומטיים';
+      }
+      return defaultGear;
+    } catch (_) {
+      return defaultGear;
     }
   }
 

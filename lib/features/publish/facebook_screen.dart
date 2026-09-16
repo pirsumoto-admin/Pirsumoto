@@ -6,6 +6,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
+import '../settings/preset_login_dialog.dart';
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Create Vehicle Listing Screen
@@ -468,6 +469,76 @@ class _FacebookScreenState extends State<FacebookScreen> {
                   ),
                   onPressed: () =>
                       Navigator.of(context).popUntil((r) => r.isFirst),
+                ),
+              ),
+            ),
+          // Floating Button to Setup Credentials / Preset Login Dialog
+          if (_isLoginRequired && !_isComplete && !_hasError)
+            Positioned(
+              bottom: 24,
+              left: 20,
+              right: 20,
+              child: SafeArea(
+                child: Center(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF1877F2), Color(0xFF3B5BDB)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(30),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF1877F2).withValues(alpha: 0.45),
+                          blurRadius: 14,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(30),
+                        onTap: () async {
+                          final shouldReload = await showPresetLoginDialog(
+                            context,
+                            isFromWebView: true,
+                          );
+                          if (mounted && shouldReload == true) {
+                            try {
+                              await _controller.reload();
+                            } catch (_) {}
+                          }
+                        },
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 22,
+                            vertical: 13,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.vpn_key_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                              SizedBox(width: 10),
+                              Text(
+                                'התחברות מראש לאתרים',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),

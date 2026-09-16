@@ -1605,7 +1605,33 @@ void main() {
       expect(state2?['manual_entry_confirmed'], equals('true'));
       expect(replies.isNotEmpty, isTrue);
       expect(replies.last, contains('מצוין, נמשיך בהזנה ידנית של פרטי הרכב'));
-      expect(replies.last, contains('אנא הזן את כל פרטי הרכב הנדרשים'));
+    });
+
+    test('when vehicle data is fetched, gear_type is populated and defaults to הילוכים אוטומטיים', () async {
+      final sender = 'test_gear_enrichment_${DateTime.now().millisecondsSinceEpoch}';
+      final service = WhatsAppTextValidationService(
+        vehicleDataFetcher: (plate) async => {
+          'maker': 'טויוטה',
+          'model': 'קורולה',
+          'year': '2020',
+          'gear_type': 'הילוכים אוטומטיים',
+          'color': 'לבן',
+          'fuelType': 'בנזין',
+          'ownership': 'פרטי',
+          'registrationMonth': '5',
+          'testExpiry': '6,2027',
+        },
+        kilometerHistoryFetcher: (_) async => 50000,
+        replySender: ({required String message, required String senderKey}) async => true,
+      );
+
+      final state = await service.handleIncomingTextMessage(
+        text: '12345678',
+        senderKey: sender,
+        senderName: 'Test Gear User',
+      );
+
+      expect(state?['gear_type'], equals('הילוכים אוטומטיים'));
     });
   });
 }

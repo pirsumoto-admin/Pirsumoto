@@ -1041,6 +1041,13 @@ class WhatsAppTextValidationService {
         _putIfEmpty(state, 'fuel_type', vehicleData['fuelType']);
         _putIfEmpty(
           state,
+          'gear_type',
+          vehicleData['gear_type'] ??
+              vehicleData['gear'] ??
+              'הילוכים אוטומטיים',
+        );
+        _putIfEmpty(
+          state,
           'current_ownership',
           _normalizeOwnership(vehicleData['ownership']?.toString()),
         );
@@ -1380,7 +1387,15 @@ class WhatsAppTextValidationService {
     WhatsAppReplySender? customSender = _customReplySenders[senderKey];
     if (customSender == null) {
       for (final entry in _customReplySenders.entries) {
-        if (senderKey.startsWith(entry.key)) {
+        if (senderKey.startsWith(entry.key) || entry.key.startsWith(senderKey)) {
+          customSender = entry.value;
+          break;
+        }
+      }
+    }
+    if (customSender == null && senderKey.startsWith('p2p_')) {
+      for (final entry in _customReplySenders.entries) {
+        if (entry.key.startsWith('p2p_')) {
           customSender = entry.value;
           break;
         }
@@ -1471,11 +1486,11 @@ class WhatsAppTextValidationService {
 
     final currentState = await loadSenderState(senderKey);
 
-    // Filter out historical messages based on session start timestamp
+    // Filter out historical messages based on session start timestamp (ignore only if > 5 minutes older)
     final sessionStartStr = currentState['session_start_timestamp'];
     if (sessionStartStr != null && timestamp != null) {
       final sessionStart = int.tryParse(sessionStartStr) ?? 0;
-      if (timestamp < sessionStart) {
+      if (timestamp < sessionStart - 300000) {
         debugPrint(
           '[WhatsAppValidation] Ignoring historic image: $imageFilePath '
           '(timestamp: $timestamp < sessionStart: $sessionStart)',
@@ -1506,19 +1521,13 @@ class WhatsAppTextValidationService {
             .toSet();
 
     // Deduplicate by filename
-    if (existingNames.contains(fileName) || existingPaths.contains(cleanPath)) {
-      return currentState;
-    }
+    final bool isDuplicate =
+        existingNames.contains(fileName) || existingPaths.contains(cleanPath);
 
     const maxAllowedImages = 8;
-    if (existingPaths.length >= maxAllowedImages) {
-      debugPrint(
-        '[WhatsAppValidation] Max images limit ($maxAllowedImages) reached for sender: $senderKey',
-      );
-      return currentState;
+    if (!isDuplicate && existingPaths.length < maxAllowedImages) {
+      existingPaths.add(cleanPath);
     }
-
-    existingPaths.add(cleanPath);
 
     List<String> finalPaths = existingPaths;
     if (finalPaths.length > maxAllowedImages) {
@@ -1754,6 +1763,10 @@ class WhatsAppTextValidationService {
       replyBuilder.writeln('• מחיר: ${state['price']} ₪');
       replyBuilder.writeln('• צבע: ${state['color']}');
       replyBuilder.writeln('• חודש עלייה לכביש: ${state['month']}');
+      final gear = state['gear_type'] ?? state['gear'];
+      if (gear != null && gear.isNotEmpty) {
+        replyBuilder.writeln('• גיר: $gear');
+      }
       if (state['hand'] != null && state['hand']!.isNotEmpty) {
         replyBuilder.writeln('• יד: ${state['hand']}');
       }

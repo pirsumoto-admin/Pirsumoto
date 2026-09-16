@@ -50,36 +50,29 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
     private var autoApproveMediaProjection = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var autoApproveRunnable: Runnable? = null
+    private var autoApproveTimeoutRunnable: Runnable? = null
 
-    fun startAutoApprovingCapture(durationMs: Long = 10000L) {
-        Log.d("A11Y", "startAutoApprovingCapture initiated for ${durationMs}ms")
+    fun startAutoApprovingCapture(durationMs: Long = 5000L) {
+        Log.d("A11Y", "startAutoApprovingCapture initiated for ${durationMs}ms (event-driven)")
         autoApproveMediaProjection = true
-        autoApproveRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoApproveTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
 
-        val startTime = System.currentTimeMillis()
-        val checkRunnable = object : Runnable {
-            override fun run() {
-                if (!autoApproveMediaProjection || System.currentTimeMillis() - startTime > durationMs) {
-                    autoApproveMediaProjection = false
-                    return
-                }
-                if (attemptAutoApproveDialog()) {
-                    Log.i("A11Y", "MediaProjection dialog successfully auto-approved via polling!")
-                    autoApproveMediaProjection = false
-                    return
-                }
-                mainHandler.postDelayed(this, 50)
-            }
+        // Attempt once immediately in case the dialog is already open
+        attemptAutoApproveDialog()
+
+        // Safety timeout to turn off auto-approval flag
+        val timeout = Runnable {
+            autoApproveMediaProjection = false
+            autoApproveTimeoutRunnable = null
         }
-        autoApproveRunnable = checkRunnable
-        mainHandler.post(checkRunnable)
+        autoApproveTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, durationMs)
     }
 
     fun stopAutoApprovingCapture() {
         autoApproveMediaProjection = false
-        autoApproveRunnable?.let { mainHandler.removeCallbacks(it) }
-        autoApproveRunnable = null
+        autoApproveTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoApproveTimeoutRunnable = null
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -141,6 +134,14 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             }
         }
         collect(root)
+
+        val isSystemPackage = allNodes.any { node ->
+            val pkg = (node.packageName?.toString() ?: "").lowercase()
+            pkg.contains("systemui") || pkg.contains("android")
+        }
+        if (!isSystemPackage) {
+            return false
+        }
 
         val hasMediaProjectionContext = allNodes.any { node ->
             val txt = (node.text?.toString() ?: "").lowercase()

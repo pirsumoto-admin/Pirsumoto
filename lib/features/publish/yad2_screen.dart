@@ -16,6 +16,7 @@ import '../../services/yad2_automation_service.dart';
 import '../../services/yad2_accessibility_automation_service_optimized.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:image_picker/image_picker.dart';
+import '../settings/preset_login_dialog.dart';
 import 'facebook_screen.dart';
 
 // Shadow AxTree extractor injected into the WebView on each observe() call.
@@ -138,6 +139,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   bool _automationError = false;
   bool _showPauseButton = false;
   bool _isPaused = false;
+  bool _isLoginRequired = false;
+  bool _isPresetLoginDialogOpen = false;
+  bool _isReloading = false;
   bool _whatsAppStopReported = false;
   bool _hideOverlayForStep = false;
 
@@ -173,8 +177,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           ..setNavigationDelegate(
             NavigationDelegate(
               onPageFinished: (url) {
-                if (!_automationStarted) {
+                if (!_automationStarted || _isReloading) {
                   _automationStarted = true;
+                  _isReloading = false;
                   Future.delayed(const Duration(seconds: 2), _startAutomation);
                 }
               },
@@ -425,7 +430,46 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
   }
 
+  Future<void> _openPresetLoginDialog() async {
+    if (_isPresetLoginDialogOpen || !mounted) return;
+    _isPresetLoginDialogOpen = true;
+    try {
+      final shouldReload = await showPresetLoginDialog(
+        context,
+        isFromWebView: true,
+      );
+      if (mounted && shouldReload == true) {
+        setState(() {
+          _isLoginRequired = false;
+          _isReloading = true;
+          _statusMessage = 'מרענן דף וטוען מחדש...';
+        });
+        _automationService?.stop();
+        _automationService?.dispose();
+        _automationService = null;
+        try {
+          await _controller.loadRequest(
+            Uri.parse(
+              'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
+            ),
+          );
+        } catch (_) {
+          await _controller.reload();
+        }
+      }
+    } finally {
+      if (mounted) {
+        _isPresetLoginDialogOpen = false;
+      }
+    }
+  }
+
   void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
+    _automationService?.stop();
+    _automationService?.dispose();
+    _automationService = null;
+    _isReloading = false;
+
     if (widget.useGemmaAutomation) {
       _automationService = Yad2AccessibilityAutomationService(
         formData: widget.publishData,
@@ -505,8 +549,18 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         onFirstStepDetected: () {
           if (mounted) {
             setState(() {
+              _isLoginRequired = false;
               _showPauseButton = true;
             });
+          }
+        },
+        onLoginRequired: () {
+          if (mounted && !_isReloading) {
+            setState(() {
+              _isLoginRequired = true;
+              _statusMessage = 'נדרשת התחברות לחשבון יד2';
+            });
+            _openPresetLoginDialog();
           }
         },
         onToggleOverlayVisibility: (visible) {
@@ -608,8 +662,18 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         onFirstStepDetected: () {
           if (mounted) {
             setState(() {
+              _isLoginRequired = false;
               _showPauseButton = true;
             });
+          }
+        },
+        onLoginRequired: () {
+          if (mounted && !_isReloading) {
+            setState(() {
+              _isLoginRequired = true;
+              _statusMessage = 'נדרשת התחברות לחשבון יד2';
+            });
+            _openPresetLoginDialog();
           }
         },
       );
@@ -848,6 +912,66 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ],
               ),
             ),
+          // Floating Button to Setup Credentials / Preset Login Dialog
+          if (_isLoginRequired && !_hideOverlayForStep && !_automationComplete)
+            Positioned(
+              bottom: 24,
+              left: 20,
+              right: 20,
+              child: SafeArea(
+                child: Center(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFFF7A00), Color(0xFFFF9E40)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(30),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFFF7A00).withValues(alpha: 0.45),
+                          blurRadius: 14,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(30),
+                        onTap: _openPresetLoginDialog,
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 22,
+                            vertical: 13,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.vpn_key_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                              SizedBox(width: 10),
+                              Text(
+                                'התחברות מראש לאתרים',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -870,6 +994,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       bgColor = const Color(0xCCB71C1C);
       icon = Icons.error;
       iconColor = Colors.redAccent;
+    } else if (_isLoginRequired) {
+      bgColor = const Color(0xCCE65100);
+      icon = Icons.lock_outline_rounded;
+      iconColor = Colors.amberAccent;
     }
 
     return Positioned(

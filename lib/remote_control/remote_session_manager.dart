@@ -9,6 +9,7 @@ import 'remote_protocol.dart';
 import 'remote_signaling.dart';
 import 'remote_webrtc_receiver.dart';
 import 'remote_chat_receiver.dart';
+import '../services/whatsapp_text_validation_service.dart';
 
 class RemoteSessionManager extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel('com.pirsumoto/accessibility');
@@ -153,22 +154,20 @@ class RemoteSessionManager extends ChangeNotifier {
       controllerId: controllerId,
       inputOwner: InputOwner.automation,
     ));
+    signaling.setActiveSessionId(sessionId);
 
     try {
-      // 1. Ensure app is in the foreground so MediaProjection dialog can be displayed and approved
+      // Ensure app is in the foreground so Android allows MediaProjection capture token initialization
       try {
         final bool? inForeground = await _channel.invokeMethod<bool>('isAppInForeground');
-        debugPrint('[RemoteSessionManager] Current isAppInForeground: $inForeground');
         if (inForeground != true) {
-          debugPrint('[RemoteSessionManager] Bringing app to foreground via foreground service for remote session...');
+          debugPrint('[RemoteSessionManager] App is in background. Bringing to foreground for screen capture...');
           await _channel.invokeMethod('bringAppToForeground');
-
-          // Wait up to 1500ms for MainActivity to resume
-          for (int i = 0; i < 15; i++) {
+          for (int i = 0; i < 20; i++) {
             await Future.delayed(const Duration(milliseconds: 100));
             final bool? nowInForeground = await _channel.invokeMethod<bool>('isAppInForeground');
             if (nowInForeground == true) {
-              debugPrint('[RemoteSessionManager] App successfully brought to foreground');
+              debugPrint('[RemoteSessionManager] App is now in foreground');
               break;
             }
           }
@@ -177,39 +176,20 @@ class RemoteSessionManager extends ChangeNotifier {
         debugPrint('[RemoteSessionManager] Error checking/bringing app to foreground: $e');
       }
 
-      // 2. Enable AccessibilityService auto-approval to immediately dismiss and approve the system consent dialog
-      try {
-        await _channel.invokeMethod('startCaptureAutoApproval');
-      } catch (e) {
-        debugPrint('[RemoteSessionManager] Failed to start capture auto approval: $e');
-      }
-
-      // 3. Request Screen Capture Permission (auto-approved by AccessibilityService without manual user interaction)
-      bool granted = false;
-      for (int attempt = 1; attempt <= 2; attempt++) {
-        try {
-          debugPrint('[RemoteSessionManager] Requesting screen capture permission (attempt $attempt)...');
-          granted = await Helper.requestCapturePermission(fullScreenOnly: true);
-          if (granted) break;
-        } catch (e) {
-          debugPrint('[RemoteSessionManager] Capture permission attempt $attempt error: $e');
-          if (attempt < 2) {
-            await _channel.invokeMethod('bringAppToForeground');
-            await Future.delayed(const Duration(milliseconds: 500));
-          }
-        }
-      }
+      // Request Screen Capture Permission (immediately granted via PROJECT_MEDIA AppOp)
+      debugPrint('[RemoteSessionManager] Requesting screen capture permission...');
+      final granted = await Helper.requestCapturePermission(fullScreenOnly: true);
       if (!granted) {
         throw Exception('User cancelled or denied screen capture permission');
       }
       debugPrint('[RemoteSessionManager] Screen capture permission granted');
 
-      // 4. Start Android MediaProjection foreground service
+      // Start Android MediaProjection foreground service
       await _channel.invokeMethod('startRemoteCaptureService');
 
       // Initialize WebRTC receiver
       _webrtc = RemoteWebRtcReceiver(
-        onLocalCandidate: (candidate) => signaling.sendIceCandidate(candidate),
+        onLocalCandidate: (candidate) => signaling.sendIceCandidate(candidate, explicitSessionId: sessionId),
         onCommandReceived: _handleIncomingCommand,
         onConnectionStateChange: _handleWebRtcStateChange,
       );
@@ -221,15 +201,15 @@ class RemoteSessionManager extends ChangeNotifier {
         controllerId: controllerId,
       );
 
+      // Start listening to controller candidates immediately so none are dropped
+      signaling.listenToRemoteCandidates(
+        onCandidate: (candidate) => _webrtc?.addCandidate(candidate),
+      );
+
       await _webrtc!.initializePeerConnection(
         width: _screenWidth,
         height: _screenHeight,
         enableScreenCapture: true,
-      );
-
-      // Listen to controller ICE candidates
-      signaling.listenToRemoteCandidates(
-        onCandidate: (candidate) => _webrtc?.addCandidate(candidate),
       );
 
       // Create SDP answer and send via Firestore

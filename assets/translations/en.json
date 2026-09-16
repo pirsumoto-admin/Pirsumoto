@@ -55,6 +55,7 @@
         "yad2_screen_title": "Yad2 - Pre-Login Validation",
         "facebook_screen_title": "Facebook - Pre-Login Validation",
         "reload": "Reload",
+        "close_and_reload": "Close & Reload Page",
         "back_to_dialog": "Close & Return"
     }
 }

@@ -112,4 +112,12 @@ void main() {
       ChatSender.user,
     );
   });
+
+  test('Publish message trigger text is detected correctly', () {
+    const publishMsg =
+        'התקבלה תמונה אחת בהצלחה!\nכל הפרטים והתמונות מוכנים לפרסום ביד2.\nלפרסום שלח 0\nלביטול השב ביטול';
+    expect(publishMsg.contains('לפרסום שלח 0'), isTrue);
+    expect(publishMsg.contains('0'), isTrue);
+    expect(publishMsg.contains('מוכנים לפרסום'), isTrue);
+  });
 }

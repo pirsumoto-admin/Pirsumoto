@@ -31,11 +31,11 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyD1Ul7RaTfbrk1Yjvq07VZMPBTlLQPH1Sw',
-    appId: '1:265879971574:ios:184903005661370b1aaed7',
+    appId: '1:265879971574:ios:6ed1e4ff94cbfad81aaed7',
     messagingSenderId: '265879971574',
     projectId: 'car-publisher',
     storageBucket: 'car-publisher.firebasestorage.app',
-    iosBundleId: 'com.pirsumoto.app',
+    iosBundleId: 'com.pirsumoto.remote.pirsumotoRemoteControl',
   );
 
   static const FirebaseOptions web = FirebaseOptions(
