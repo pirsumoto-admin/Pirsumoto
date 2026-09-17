@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../remote/remote_protocol.dart';
 import '../signaling/controller_signaling.dart';
+import 'webrtc_ice_config.dart';
 
 class ControllerWebRtcSession extends ChangeNotifier {
   final ControllerSignalingClient signaling;
@@ -73,11 +74,7 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
     try {
       final config = {
-        'iceServers': customIceServers ??
-            [
-              {'urls': 'stun:stun.l.google.com:19302'},
-              {'urls': 'stun:stun1.l.google.com:19302'},
-            ],
+        'iceServers': customIceServers ?? WebRtcIceConfig.defaultIceServers,
         'sdpSemantics': 'unified-plan',
         'bundlePolicy': 'max-bundle',
         'rtcpMuxPolicy': 'require',

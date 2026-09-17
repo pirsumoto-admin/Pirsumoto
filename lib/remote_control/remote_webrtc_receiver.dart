@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'remote_protocol.dart';
+import 'webrtc_ice_config.dart';
 
 class RemoteWebRtcReceiver {
   RTCPeerConnection? _peerConnection;
@@ -22,14 +23,10 @@ class RemoteWebRtcReceiver {
 
   RTCPeerConnectionState? get connectionState => _peerConnection?.connectionState;
 
-  /// Default WebRTC configuration with Google STUN
+  /// Default WebRTC configuration with Google STUN + GCP TURN
   Map<String, dynamic> _buildRtcConfig({List<Map<String, dynamic>>? customIceServers}) {
     return {
-      'iceServers': customIceServers ??
-          [
-            {'urls': 'stun:stun.l.google.com:19302'},
-            {'urls': 'stun:stun1.l.google.com:19302'},
-          ],
+      'iceServers': customIceServers ?? WebRtcIceConfig.defaultIceServers,
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
       'rtcpMuxPolicy': 'require',
