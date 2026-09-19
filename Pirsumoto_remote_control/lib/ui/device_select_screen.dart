@@ -8,6 +8,7 @@ import 'app_theme.dart';
 import 'remote_control_screen.dart';
 import 'whatsapp_chat_screen.dart';
 import 'device_listings_history_screen.dart';
+import 'chat_sessions_list_screen.dart';
 
 class DeviceSelectScreen extends StatefulWidget {
   const DeviceSelectScreen({super.key});
@@ -661,6 +662,14 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                       modelName: modelName,
                                       ownerUid: data['ownerUid'] as String? ?? currentUid,
                                     ),
+                                    onOpenQueue: () => Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                        builder: (_) => ChatSessionsListScreen(
+                                          deviceId: deviceId,
+                                          deviceName: modelName,
+                                        ),
+                                      ),
+                                    ),
                                   );
                                 },
                               ),
@@ -732,6 +741,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
     required VoidCallback onConnectRemote,
     required VoidCallback onConnectChat,
     required VoidCallback onOpenHistory,
+    required VoidCallback onOpenQueue,
   }) {
     final isOnline = status == 'online' || status == 'idle' || status == 'ready' || status == 'connected';
     final isBusy = status == 'busy' || status == 'in_call' || status == 'streaming';
@@ -951,33 +961,73 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
 
           const SizedBox(height: 10),
 
-          // Publication History Button near Remote Control
-          SizedBox(
-            height: 40,
-            child: OutlinedButton.icon(
-              onPressed: onOpenHistory,
-              style: OutlinedButton.styleFrom(
-                backgroundColor: AppColors.surfaceSubtle,
-                foregroundColor: AppColors.onSurface,
-                side: const BorderSide(color: AppColors.border),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+          // Action Buttons: History and Queue
+          Row(
+            children: [
+              // Queue Button (Right in RTL reading order)
+              Expanded(
+                child: SizedBox(
+                  height: 40,
+                  child: OutlinedButton.icon(
+                    onPressed: onOpenQueue,
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: AppColors.surfaceSubtle,
+                      foregroundColor: AppColors.onSurface,
+                      side: const BorderSide(color: AppColors.border),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(
+                      Icons.format_list_bulleted_rounded,
+                      size: 18,
+                      color: AppColors.primaryAction,
+                    ),
+                    label: Text(
+                      'תור פרסומים',
+                      style: GoogleFonts.heebo(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.onSurface,
+                      ),
+                    ),
+                  ),
                 ),
               ),
-              icon: const Icon(
-                Icons.receipt_long_rounded,
-                size: 18,
-                color: AppColors.primaryAction,
-              ),
-              label: Text(
-                'היסטוריית מודעות ופרסומים',
-                style: GoogleFonts.heebo(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.onSurface,
+              
+              const SizedBox(width: 8),
+
+              // Publication History Button (Left in RTL reading order)
+              Expanded(
+                child: SizedBox(
+                  height: 40,
+                  child: OutlinedButton.icon(
+                    onPressed: onOpenHistory,
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: AppColors.surfaceSubtle,
+                      foregroundColor: AppColors.onSurface,
+                      side: const BorderSide(color: AppColors.border),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(
+                      Icons.receipt_long_rounded,
+                      size: 18,
+                      color: AppColors.primaryAction,
+                    ),
+                    label: Text(
+                      'היסטוריית מודעות',
+                      style: GoogleFonts.heebo(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.onSurface,
+                      ),
+                    ),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
         ],
       ),

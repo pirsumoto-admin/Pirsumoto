@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -10,12 +9,15 @@ import 'package:intl/intl.dart' as intl;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../signaling/controller_signaling.dart';
 import '../webrtc/controller_webrtc_session.dart';
 import 'app_theme.dart';
 import 'chat_message_bubble.dart';
 import 'remote_control_screen.dart';
+import 'chat_sessions_list_screen.dart';
+import 'chat_session_manager.dart';
+import '../database/sqlite_database_helper.dart';
+import '../services/remote_llm_service.dart';
 
 enum ChatSender { user, bot }
 
@@ -108,6 +110,7 @@ class WhatsAppChatScreen extends StatefulWidget {
   final String deviceId;
   final String deviceName;
   final ControllerWebRtcSession? session;
+  final String? sessionId;
 
   static String? currentActiveDeviceId;
 
@@ -121,6 +124,7 @@ class WhatsAppChatScreen extends StatefulWidget {
     required this.deviceId,
     required this.deviceName,
     this.session,
+    this.sessionId,
   });
 
   @override
@@ -148,12 +152,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   String? _playingAudioId;
   Duration _currentAudioPosition = Duration.zero;
   Duration _currentAudioDuration = Duration.zero;
-
-  String get _storageKey => 'chat_messages_${widget.deviceId}';
+  
+  late final String _sessionId;
+  String _currentLicensePlate = '';
 
   @override
   void initState() {
     super.initState();
+    _sessionId = widget.sessionId ?? DateTime.now().millisecondsSinceEpoch.toString();
     WhatsAppChatScreen.currentActiveDeviceId = widget.deviceId;
     _deviceStatusStream = FirebaseFirestore.instance
         .collection('remote_control_devices')
@@ -166,36 +172,23 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   Future<void> _loadMessagesFromPrefs() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jsonStr = prefs.getString(_storageKey);
-      if (jsonStr != null && jsonStr.isNotEmpty) {
-        final List<dynamic> decoded = jsonDecode(jsonStr);
-        final loaded =
-            decoded
-                .map(
-                  (item) =>
-                      ChatMessageItem.fromJson(item as Map<String, dynamic>),
-                )
-                .where((m) => !m.text.contains('תהליך הפרסום בוטל והסשן נסגר'))
-                .toList();
-        if (loaded.isNotEmpty) {
-          if (!mounted) return;
-          setState(() {
-            final merged = {
-              for (final message in _messages) message.id: message,
-              // Saved messages retain local media paths.
-              for (final message in loaded) message.id: message,
-            };
-            _messages.clear();
-            _messages.addAll(merged.values);
-            _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-          });
-          _scrollToBottom();
-          return;
-        }
+      final loaded = await SqliteDatabaseHelper.instance.getMessages(_sessionId);
+      if (loaded.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          final merged = {
+            for (final message in _messages) message.id: message,
+            for (final message in loaded) message.id: message,
+          };
+          _messages.clear();
+          _messages.addAll(merged.values);
+          _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        });
+        _scrollToBottom();
+        return;
       }
     } catch (e) {
-      debugPrint('[WhatsAppChat] Error loading messages from prefs: $e');
+      debugPrint('[WhatsAppChat] Error loading messages from DB: $e');
     }
 
     // Default: add initial welcome message if empty
@@ -209,11 +202,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   Future<void> _saveMessagesToPrefs() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final data = _messages.map((m) => m.toJson()).toList();
-      await prefs.setString(_storageKey, jsonEncode(data));
+      for (final msg in _messages) {
+        await SqliteDatabaseHelper.instance.insertMessage(_sessionId, widget.deviceId, msg);
+      }
     } catch (e) {
-      debugPrint('[WhatsAppChat] Error saving messages to prefs: $e');
+      debugPrint('[WhatsAppChat] Error saving messages to DB: $e');
     }
   }
 
@@ -407,6 +400,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         setState(() {});
         _scrollToBottom();
         _saveMessagesToPrefs();
+        
+        // Check for completion in the latest bot message added
+        final lastBotMsg = _messages.lastWhere((m) => m.sender == ChatSender.bot, orElse: () => _messages.first);
+        if (lastBotMsg.sender == ChatSender.bot) {
+           _checkAndHandleSessionCompletion(lastBotMsg.text);
+        }
       }
     });
 
@@ -431,8 +430,47 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           });
           _scrollToBottom();
           _saveMessagesToPrefs();
+          _checkAndHandleSessionCompletion(reply.text);
         }
       });
+    }
+  }
+
+  Future<void> _checkAndHandleSessionCompletion(String text) async {
+    if (RemoteLlmService.checkIfPublicationDone(text)) {
+      // Mark current session as done
+      final currentSession = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+      if (currentSession != null && currentSession.status != ChatSessionStatus.done) {
+        currentSession.status = ChatSessionStatus.done;
+        await ChatSessionManager.saveSession(currentSession);
+        
+        // Find next waiting session
+        final nextSession = await ChatSessionManager.getNextWaitingSession(widget.deviceId);
+        if (nextSession != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('פרסום הושלם! עובר לרכב הבא בתור...'),
+              backgroundColor: AppColors.success,
+              duration: Duration(seconds: 2),
+            ),
+          );
+          
+          Future.delayed(const Duration(seconds: 2), () {
+            if (!mounted) return;
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (context) => WhatsAppChatScreen(
+                  deviceId: widget.deviceId,
+                  deviceName: widget.deviceName,
+                  session: widget.session,
+                  sessionId: nextSession.id,
+                ),
+              ),
+            );
+          });
+        }
+      }
     }
   }
 
@@ -628,6 +666,25 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     });
     _scrollToBottom();
     _saveMessagesToPrefs();
+    
+    // Save session if a license plate is detected
+    if (_currentLicensePlate.isEmpty) {
+      final plateMatch = RegExp(r'\b\d{7,8}\b').firstMatch(text);
+      if (plateMatch != null) {
+        _currentLicensePlate = plateMatch.group(0)!;
+      }
+    }
+    
+    if (_currentLicensePlate.isNotEmpty) {
+      ChatSessionManager.saveSession(ChatSession(
+        id: _sessionId,
+        deviceId: widget.deviceId,
+        licensePlate: _currentLicensePlate,
+        startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
+        status: ChatSessionStatus.running,
+        lastMessage: text,
+      ));
+    }
 
     try {
       await FirebaseFirestore.instance
@@ -1190,6 +1247,48 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 const SizedBox(width: 6),
 
+                // 4.5 "שיחות" Button (List icon)
+                InkWell(
+                  onTap: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => ChatSessionsListScreen(
+                          deviceId: widget.deviceId,
+                          deviceName: widget.deviceName,
+                          session: widget.session,
+                        ),
+                      ),
+                    );
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.queue_rounded,
+                          color: AppColors.onSurface,
+                          size: 22,
+                        ),
+                        Text(
+                          'שיחות',
+                          style: GoogleFonts.heebo(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.onSurface,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+
                 // 5. "ניקוי" Button (Trash icon)
                 InkWell(
                   onTap: _clearChatData,
@@ -1265,7 +1364,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 top: message.mediaType != null || isAdDraft ? 6 : 2,
                 bottom: 2,
               ),
-              child: Text(
+              child: SelectableText(
                 message.text,
                 textAlign: TextAlign.right,
                 textDirection: TextDirection.rtl,
