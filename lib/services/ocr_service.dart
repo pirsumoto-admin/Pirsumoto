@@ -66,14 +66,32 @@ class OcrService {
 
   /// Extracts full text from [imageBytes] using Google Cloud Vision API.
   Future<String?> extractFullText(Uint8List imageBytes) async {
+    debugPrint(
+      '[OcrService] 📸 extractFullText called with ${imageBytes.length} bytes of image data',
+    );
+    if (imageBytes.isEmpty) {
+      debugPrint('[OcrService] ⚠️ Image bytes are empty (0 bytes). Returning null.');
+      return null;
+    }
     final base64Image = base64Encode(imageBytes);
     final response = await _callVisionApi(base64Image);
-    if (response == null) return null;
-    final annotations = (response['responses'] as List?)
-        ?.firstOrNull?['textAnnotations'] as List?;
-    if (annotations != null && annotations.isNotEmpty) {
-      return (annotations[0] as Map)['description'] as String?;
+    if (response == null) {
+      debugPrint('[OcrService] ⚠️ Vision API returned null decoded map.');
+      return null;
     }
+    final annotations =
+        (response['responses'] as List?)?.firstOrNull?['textAnnotations']
+            as List?;
+    if (annotations != null && annotations.isNotEmpty) {
+      final desc = (annotations[0] as Map)['description'] as String?;
+      debugPrint(
+        '[OcrService] 💡 Text description extracted from textAnnotations (length: ${desc?.length ?? 0}):\n$desc',
+      );
+      return desc;
+    }
+    debugPrint(
+      '[OcrService] ⚠️ No textAnnotations found in Vision API response.',
+    );
     return null;
   }
 
@@ -81,6 +99,9 @@ class OcrService {
 
   Future<Map<String, dynamic>?> _callVisionApi(String base64Image) async {
     try {
+      debugPrint(
+        '[OcrService] 🚀 Posting to Vision API (Base64 length: ${base64Image.length} chars)...',
+      );
       final body = jsonEncode({
         'requests': [
           {
@@ -98,24 +119,22 @@ class OcrService {
         body: body,
       );
 
+      debugPrint('[OcrService] 📥 HTTP Status: ${res.statusCode}');
+      debugPrint(
+        '[OcrService] 📥 Raw Response Body:\n${res.body.length > 2000 ? "${res.body.substring(0, 2000)}... (truncated)" : res.body}',
+      );
+
       if (res.statusCode != 200) {
-        debugPrint('[OcrService] Vision API error ${res.statusCode}: ${res.body}');
+        debugPrint(
+          '[OcrService] ❌ Vision API error ${res.statusCode}: ${res.body}',
+        );
         return null;
       }
 
       final decoded = jsonDecode(res.body) as Map<String, dynamic>;
-      // Log all recognized text words
-      try {
-        final annotations = (decoded['responses'] as List?)
-            ?.firstOrNull?['textAnnotations'] as List?;
-        if (annotations != null && annotations.isNotEmpty) {
-          final fullText = (annotations[0] as Map)['description'] as String?;
-          debugPrint('[OcrService] === OCR FULL TEXT ===\n$fullText\n=================');
-        }
-      } catch (_) {}
       return decoded;
     } catch (e, st) {
-      debugPrint('[OcrService] Vision API call failed: $e\n$st');
+      debugPrint('[OcrService] ❌ Vision API call failed: $e\n$st');
       return null;
     }
   }

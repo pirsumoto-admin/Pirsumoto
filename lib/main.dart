@@ -20,16 +20,34 @@ import 'remote_control/remote_control_active_banner.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'firebase_options.dart';
 // import 'package:flutter_skill/flutter_skill.dart';
 // import 'package:flutter_gemma/flutter_gemma.dart';
 
 void main() async {
-  // FlutterSkillBinding.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  await EasyLocalization.ensureInitialized();
-  await Firebase.initializeApp();
-  // await FlutterGemma.initialize();
+  
+  if (Platform.isAndroid || Platform.isIOS) {
+    try {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (e) {
+      debugPrint('Failed to set SystemUI: $e');
+    }
+  }
+
+  try {
+    await EasyLocalization.ensureInitialized();
+  } catch (e) {
+    debugPrint('EasyLocalization init failed: $e');
+  }
+
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (e) {
+    debugPrint('Firebase init failed (continuing anyway): $e');
+  }
 
   runApp(
     EasyLocalization(

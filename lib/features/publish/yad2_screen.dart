@@ -14,6 +14,7 @@ import '../../services/whatsapp_text_validation_service.dart';
 import '../../services/yad2_automation_service.dart';
 //import '../../services/yad2_accessibility_automation_service.dart';
 import '../../services/yad2_accessibility_automation_service_optimized.dart';
+import '../../services/yad2_mac_hybrid_automation_service.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/db_service.dart';
@@ -229,6 +230,25 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
   Future<Uint8List?> _captureWebViewScreenshot() async {
     try {
+      if (Platform.isMacOS) {
+        try {
+          const macChannel = MethodChannel('com.pirsumoto/mac_web');
+          final bytes = await macChannel.invokeMethod<Uint8List>(
+            'captureScreenshot',
+          );
+          if (bytes != null && bytes.isNotEmpty) {
+            debugPrint(
+              '[Yad2Screen] 📸 Native macOS WKWebView snapshot captured: ${bytes.length} bytes',
+            );
+            return bytes;
+          }
+        } catch (e) {
+          debugPrint(
+            '[Yad2Screen] ⚠️ Native macOS screenshot method failed: $e. Falling back to repaint boundary.',
+          );
+        }
+      }
+
       final boundary =
           _webViewKey.currentContext?.findRenderObject()
               as RenderRepaintBoundary?;
@@ -480,14 +500,116 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     _isReloading = false;
 
     if (widget.useGemmaAutomation) {
-      _automationService = Yad2AccessibilityAutomationService(
-        formData: widget.publishData,
-        controller: _controller,
-        observeUI: _observeUI,
-        ocrService: ocrService,
-        startedFromWhatsApp: widget.startedFromWhatsApp,
-        whatsAppSenderKey: widget.whatsAppSenderKey,
-        onTapPreview: _showTapMarker,
+      if (Platform.isMacOS) {
+        _automationService = Yad2MacHybridAutomationService(
+          formData: widget.publishData,
+          controller: _controller,
+          observeUI: _observeUI,
+          ocrService: ocrService,
+          startedFromWhatsApp: widget.startedFromWhatsApp,
+          whatsAppSenderKey: widget.whatsAppSenderKey,
+          onTapPreview: _showTapMarker,
+          onAutomationFallback: (source, target) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    source == 'OCR'
+                        ? '🔄 שים לב: המערכת משתמשת בזיהוי תמונה (OCR) עבור "$target"'
+                        : '🔄 שים לב: המערכת משתמשת ב-JavaScript עבור "$target"',
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  backgroundColor:
+                      source == 'OCR' ? Colors.orange : Colors.blueGrey,
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            }
+          },
+          onPhaseComplete: (phase) {
+            if (mounted) setState(() => _statusMessage = phase.description);
+          },
+          onPhaseError: (phase, error) {
+            unawaited(
+              _notifyWhatsAppAutomationStopped(
+                stepName: phase.description,
+                error: error,
+              ),
+            );
+            if (mounted) {
+              setState(() {
+                _isPaused = true;
+                _showPauseButton = false;
+                _statusMessage = 'שגיאה: $error';
+              });
+              Future.delayed(const Duration(seconds: 5), () {
+                if (mounted) {
+                  setState(() {
+                    _statusMessage = '';
+                    _showPauseButton = true;
+                  });
+                }
+              });
+            }
+          },
+          onAutomationComplete: (success) async {
+            if (!success) {
+              unawaited(
+                _notifyWhatsAppAutomationStopped(
+                  stepName: 'סיום האוטומציה',
+                  error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
+                ),
+              );
+              if (mounted) {
+                setState(() {
+                  _automationComplete = true;
+                  _automationError = true;
+                  _statusMessage = 'האוטומציה נכשלה';
+                });
+              }
+            } else {
+              await _handleYad2SuccessAndTransitionToFacebook();
+            }
+          },
+          onFirstStepDetected: () {
+            if (mounted) {
+              setState(() {
+                _isLoginRequired = false;
+                _showPauseButton = true;
+              });
+            }
+          },
+          onLoginRequired: () {
+            if (mounted && !_isReloading) {
+              setState(() {
+                _isLoginRequired = true;
+                _statusMessage = 'נדרשת התחברות לחשבון יד2';
+              });
+              _openPresetLoginDialog();
+            }
+          },
+          onToggleOverlayVisibility: (visible) {
+            if (mounted) {
+              setState(() {
+                _hideOverlayForStep = !visible;
+              });
+            }
+          },
+        );
+      } else {
+        _automationService = Yad2AccessibilityAutomationService(
+          formData: widget.publishData,
+          controller: _controller,
+          observeUI: _observeUI,
+          ocrService: ocrService,
+          startedFromWhatsApp: widget.startedFromWhatsApp,
+          whatsAppSenderKey: widget.whatsAppSenderKey,
+          onTapPreview: _showTapMarker,
         onAutomationFallback: (source, target) {
           if (mounted) {
             ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -580,6 +702,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
       );
+      } // End of Platform.isMacOS else
     } else {
       _automationService = Yad2AutomationService(
         controller: _controller,
