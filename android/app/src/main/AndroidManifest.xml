@@ -7,11 +7,13 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
+    <!-- [WHATSAPP-DISABLED] READ_EXTERNAL_STORAGE was used to scan WhatsApp media folders (API <=32). -->
+    <!-- <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" /> -->
+    <!-- [WHATSAPP-DISABLED] READ_MEDIA_AUDIO was used to access WhatsApp voice notes. -->
+    <!-- <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" /> -->
+    <!-- [WHATSAPP-DISABLED] MANAGE_EXTERNAL_STORAGE was required to access WhatsApp media directory. -->
+    <!-- <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" /> -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
@@ -59,16 +61,20 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+        <!-- Persistent Background / Foreground Service for 24/7 Remote Control & Chat Listener -->
         <service
-            android:name=".WhatsAppDaemonService"
+            android:name=".PirsumotoBackgroundService"
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
+
         <service
             android:name=".RemoteControlCaptureService"
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="mediaProjection" />
+        <!-- [WHATSAPP-DISABLED] WhatsAppNotificationListenerService intercepted WhatsApp notifications.
+             Disabled: main app no longer listens to WhatsApp notifications.
         <service
             android:name=".WhatsAppNotificationListenerService"
             android:label="Pirsumoto WhatsApp Bridge"
@@ -78,6 +84,9 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        -->
+        <!-- [WHATSAPP-DISABLED] WhatsAppBootReceiver restarted the daemon after device reboot.
+             Disabled: daemon is no longer active.
         <receiver
             android:name=".WhatsAppBootReceiver"
             android:enabled="true"
@@ -91,6 +100,7 @@
                 <action android:name="com.pirsumoto.app.whatsapp_bridge.RESTART_DAEMON" />
             </intent-filter>
         </receiver>
+        -->
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

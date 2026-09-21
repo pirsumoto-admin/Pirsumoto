@@ -13,12 +13,34 @@
 #   -s, --device <id>    Specify target ADB device serial if multiple devices connected
 #   -h, --help           Show this help message
 # ==============================================================================
+#
+# [WHATSAPP-DISABLED] The following permissions and components were commented out
+# from AndroidManifest.xml as part of the WhatsApp bridge removal.
+# The main app now uses only the internal P2P chat via whatsapp_chat_screen.dart.
+#
+# Disabled permissions:
+#   - FOREGROUND_SERVICE_DATA_SYNC  (WhatsAppDaemonService foreground type)
+#   - WAKE_LOCK                     (WhatsApp auto-publish screen wake)
+#   - USE_FULL_SCREEN_INTENT        (WhatsApp auto-publish full-screen notification)
+#   - SYSTEM_ALERT_WINDOW           (WhatsApp overlay permission)
+#   - RECEIVE_BOOT_COMPLETED        (WhatsAppBootReceiver restart)
+#   - REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (WhatsApp daemon battery prompt)
+#   - READ_EXTERNAL_STORAGE         (WhatsApp media folder scanning, API <=32)
+#   - READ_MEDIA_AUDIO              (WhatsApp voice notes)
+#   - MANAGE_EXTERNAL_STORAGE       (WhatsApp media directory access)
+#
+# Disabled components:
+#   - WhatsAppDaemonService                (media file watcher)
+#   - WhatsAppNotificationListenerService  (notification interceptor)
+#   - WhatsAppBootReceiver                 (daemon restart on boot)
+# ==============================================================================
 
 set -e
 
 # Package & Activity definitions for Pirsumoto
 PACKAGE_NAME="com.pirsumotoapp"
 MAIN_ACTIVITY="com.pirsumoto.app.MainActivity"
+ACCESSIBILITY_SERVICE="com.pirsumotoapp/com.pirsumoto.app.PirsumotoAccessibilityService"
 DEFAULT_APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
 
 # Formatting colors
@@ -191,10 +213,49 @@ echo -e "\n${GREEN}APK ready: $APK_TO_INSTALL ($(du -h "$APK_TO_INSTALL" | cut -
 # 3. Deploy to device
 if [ -n "$TARGET_DEVICE" ]; then
   echo -e "\n${BLUE}Installing APK on device ($TARGET_DEVICE)...${NC}"
-  $ADB_CMD install -r -d "$APK_TO_INSTALL"
+  $ADB_CMD install -r -d -g "$APK_TO_INSTALL"
   echo -e "${GREEN}✓ Installation successful!${NC}"
 
-  # 4. Launch app if requested
+  # 4. Configure permissions & Accessibility service via ADB
+  echo -e "\n${BLUE}Configuring permissions & Accessibility service...${NC}"
+
+  # Allow Restricted Settings (Required on Android 13+ for sideloaded/ADB apps)
+  echo -e "  → Allowing Restricted Settings (Android 13+)..."
+  $ADB_CMD shell appops set "$PACKAGE_NAME" ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+  $ADB_CMD shell appops set --user 0 "$PACKAGE_NAME" ACCESS_RESTRICTED_SETTINGS allow 2>/dev/null || true
+
+  # Enable Accessibility Service without system prompts
+  echo -e "  → Enabling Accessibility Service..."
+  EXISTING_A11Y=$($ADB_CMD shell settings get secure --user 0 enabled_accessibility_services | tr -d '\r')
+  if [[ "$EXISTING_A11Y" != *"$ACCESSIBILITY_SERVICE"* ]]; then
+    if [ -z "$EXISTING_A11Y" ] || [ "$EXISTING_A11Y" == "null" ]; then
+      NEW_A11Y="$ACCESSIBILITY_SERVICE"
+    else
+      NEW_A11Y="${EXISTING_A11Y}:${ACCESSIBILITY_SERVICE}"
+    fi
+    $ADB_CMD shell settings put secure --user 0 enabled_accessibility_services "$NEW_A11Y" 2>/dev/null || true
+    $ADB_CMD shell settings put secure enabled_accessibility_services "$NEW_A11Y" 2>/dev/null || true
+  fi
+  $ADB_CMD shell settings put secure --user 0 accessibility_enabled 1 2>/dev/null || true
+  $ADB_CMD shell settings put secure accessibility_enabled 1 2>/dev/null || true
+
+  # Grant MediaProjection permission permanently (Prevents casting dialog for Remote Control)
+  echo -e "  → Granting MediaProjection (PROJECT_MEDIA)..."
+  $ADB_CMD shell appops set "$PACKAGE_NAME" PROJECT_MEDIA allow 2>/dev/null || true
+  $ADB_CMD shell appops set --user 0 "$PACKAGE_NAME" PROJECT_MEDIA allow 2>/dev/null || true
+
+  # Grant Notifications permission (Android 13+)
+  echo -e "  → Granting notification permissions..."
+  $ADB_CMD shell pm grant --user 0 "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+  $ADB_CMD shell pm grant "$PACKAGE_NAME" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+
+  # Whitelist from Battery Optimization (Unrestricted background execution)
+  echo -e "  → Whitelisting from battery optimizations (Doze mode)..."
+  $ADB_CMD shell dumpsys deviceidle whitelist +"$PACKAGE_NAME" 2>/dev/null || true
+
+  echo -e "${GREEN}✓ All permissions and Accessibility service configured!${NC}"
+
+  # 5. Launch app if requested
   if [ "$LAUNCH_APP" = true ]; then
     echo -e "\n${BLUE}Launching $PACKAGE_NAME...${NC}"
     $ADB_CMD shell am start -n "$PACKAGE_NAME/$MAIN_ACTIVITY"

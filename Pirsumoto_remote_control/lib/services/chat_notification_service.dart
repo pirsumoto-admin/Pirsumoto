@@ -5,6 +5,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../ui/whatsapp_chat_screen.dart';
+import '../ui/chat_session_manager.dart';
+import '../database/sqlite_database_helper.dart';
+import 'remote_llm_service.dart';
 
 /// Global navigator key to allow notification taps to open the chat screen from anywhere.
 final GlobalKey<NavigatorState> remoteControlNavigatorKey =
@@ -242,6 +245,19 @@ class ChatNotificationService {
     final text = (data['text'] as String? ?? '').trim();
     if (text.isEmpty) return;
     if (text.contains('תהליך הפרסום בוטל והסשן נסגר')) return;
+
+    // Check if publication completed while outside chat screen
+    if (RemoteLlmService.checkIfPublicationDone(text)) {
+      final sessionId = data['sessionId'] as String?;
+      if (sessionId != null && sessionId.isNotEmpty) {
+        final session = await SqliteDatabaseHelper.instance.getSession(sessionId);
+        if (session != null && session.status != ChatSessionStatus.done) {
+          session.status = ChatSessionStatus.done;
+          await ChatSessionManager.saveSession(session);
+        }
+      }
+      await ChatSessionManager.advanceQueueAndStartNext(deviceId);
+    }
 
     // Check if the user is currently inside the WhatsAppChatScreen for this device
     if (WhatsAppChatScreen.isInsideChatWith(deviceId)) {

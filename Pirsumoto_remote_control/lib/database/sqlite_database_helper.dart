@@ -5,7 +5,7 @@ import '../ui/whatsapp_chat_screen.dart'; // To get ChatMessageItem
 
 class SqliteDatabaseHelper {
   static const String _databaseName = 'remote_control_chat.db';
-  static const int _databaseVersion = 1;
+  static const int _databaseVersion = 2;
 
   static const String tableSessions = 'chat_sessions';
   static const String tableMessages = 'chat_messages';
@@ -27,6 +27,7 @@ class SqliteDatabaseHelper {
       path,
       version: _databaseVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -38,7 +39,11 @@ class SqliteDatabaseHelper {
         licensePlate TEXT,
         startTimestamp INTEGER NOT NULL,
         status TEXT NOT NULL,
-        lastMessage TEXT
+        lastMessage TEXT,
+        vehicleDataJson TEXT,
+        imagePathsJson TEXT,
+        expectedImageCount INTEGER,
+        isReadyToPublish INTEGER
       )
     ''');
 
@@ -60,6 +65,17 @@ class SqliteDatabaseHelper {
     
     // Index for quick message retrieval by session
     await db.execute('CREATE INDEX idx_msg_session ON $tableMessages (sessionId)');
+  }
+
+  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      try {
+        await db.execute('ALTER TABLE $tableSessions ADD COLUMN vehicleDataJson TEXT;');
+        await db.execute('ALTER TABLE $tableSessions ADD COLUMN imagePathsJson TEXT;');
+        await db.execute('ALTER TABLE $tableSessions ADD COLUMN expectedImageCount INTEGER;');
+        await db.execute('ALTER TABLE $tableSessions ADD COLUMN isReadyToPublish INTEGER;');
+      } catch (_) {}
+    }
   }
 
   // --- Sessions CRUD ---

@@ -17,7 +17,8 @@ import '../../services/db_service.dart';
 import '../../services/audio_service.dart';
 import '../../services/vehicle_data_service.dart';
 import '../../services/whatsapp_text_validation_service.dart';
-import '../../services/whatsapp_message_bridge_service.dart';
+// [WHATSAPP-DISABLED] WhatsApp message bridge import disabled — app uses P2P chat.
+// import '../../services/whatsapp_message_bridge_service.dart';
 import '../../services/agent_config_service.dart';
 import '../auth/auth_provider.dart';
 import '../listings/listings_screen.dart';
@@ -38,9 +39,8 @@ class HomeScreen extends ConsumerStatefulWidget {
   // ===========================================================================
   // DEBUG PARAMETERS
   // ===========================================================================
-  /// Debug flag to disable the WhatsApp listener and background bridge.
-  /// Set to true to disable WhatsApp listening, false to enable.
-  static bool debugDisableWhatsAppListener = false;
+  // [WHATSAPP-DISABLED] WhatsApp listener debug flag disabled — bridge is no longer active.
+  // static bool debugDisableWhatsAppListener = false;
 
   /// Debug flag to select the target platform for the "פרסום" (Publish) button:
   /// true  => Facebook automation directly (FacebookScreen)
@@ -65,9 +65,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    if (HomeScreen.debugDisableWhatsAppListener) {
-      WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
-    }
+    // [WHATSAPP-DISABLED] WhatsApp listener disabled check removed.
+    // if (HomeScreen.debugDisableWhatsAppListener) {
+    //   WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
+    // }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // _checkGemmaModel();
     });
@@ -385,7 +386,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   bool _useGemmaAutomation = true; // Use Gemma Automation for testing
 
   /// Debug parameters (initialized from HomeScreen static defaults, dynamically toggleable)
-  late bool _disableWhatsAppListener = HomeScreen.debugDisableWhatsAppListener;
+  // [WHATSAPP-DISABLED] _disableWhatsAppListener field disabled — WA bridge removed.
+  // late bool _disableWhatsAppListener = HomeScreen.debugDisableWhatsAppListener;
   late bool _mapPublishToFacebook = HomeScreen.debugMapPublishToFacebook;
 
   @override
@@ -397,9 +399,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _noTestController.value = false;
     _vehicleConditionController.text = 'טוב';
 
-    if (_disableWhatsAppListener) {
-      WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
-    }
+    // [WHATSAPP-DISABLED] WhatsApp listener disabled check removed.
+    // if (_disableWhatsAppListener) {
+    //   WhatsAppMessageBridgeService.instance.setListenerDisabled(true);
+    // }
   }
 
   @override
@@ -535,9 +538,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
 
     try {
       final cleanLicense = license.replaceAll(RegExp(r'[^0-9]'), '');
-      await _sendWhatsAppProgress(
-        'מבצע שליפת נתוני רכב כלליים משרת הממשלה עבור מספר רישוי $license...',
-      );
+      // [WHATSAPP-DISABLED] WA progress notification removed.
+      // await _sendWhatsAppProgress(
+      //   'מבצע שליפת נתוני רכב כלליים משרת הממשלה עבור מספר רישוי $license...',
+      // );
 
       final url =
           'https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&filters=%7B%22mispar_rechev%22%3A%5B$cleanLicense%5D%7D';
@@ -630,9 +634,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
               if (_colors.contains(colorPart)) {
                 matchedColor = colorPart;
               } else {
-                await _sendWhatsAppProgress(
-                  'הצבע שנשלף משרת הממשלה ("$fullColor") אינו ברשימת הצבעים המורשים. מבצע התאמת צבע באמצעות AI...',
-                );
+                // [WHATSAPP-DISABLED] WA progress notification removed.
+                // await _sendWhatsAppProgress(
+                //   '\u05d4\u05e6\u05d1\u05e2 \u05e9\u05e0\u05e9\u05dc\u05e3 \u05de\u05e9\u05e8\u05ea \u05d4\u05de\u05de\u05e9\u05dc\u05d4 ("$fullColor") \u05d0\u05d9\u05e0\u05d5 \u05d1\u05e8\u05e9\u05d9\u05de\u05ea \u05d4\u05e6\u05d1\u05e2\u05d9\u05dd \u05d4\u05de\u05d5\u05e8\u05e9\u05d9\u05dd. \u05de\u05d1\u05e6\u05e2 \u05d4\u05ea\u05d0\u05de\u05ea \u05e6\u05d1\u05e2 \u05d1\u05d0\u05de\u05e6\u05e2\u05d5\u05ea AI...',
+                // );
                 matchedColor = await _matchColorWithLlm(fullColor, _colors);
               }
             }
@@ -669,9 +674,10 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           }
 
           try {
-            await _sendWhatsAppProgress(
-              'מבצע שליפת נתוני קילומטראז\' וטסט משרת הממשלה עבור מספר רישוי $license...',
-            );
+            // [WHATSAPP-DISABLED] WA progress notification removed.
+            // await _sendWhatsAppProgress(
+            //   'מבצע שליפת נתוני קילומטראז\' וטסט משרת הממשלה עבור מספר רישוי $license...',
+            // );
 
             final url3 =
                 'https://data.gov.il/api/3/action/datastore_search?resource_id=56063a99-8a3e-4ff4-912e-5966c0279bad&q=$cleanLicense&offset=0';
@@ -777,36 +783,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     );
   }
 
-  Future<void> _sendWhatsAppProgress(String message) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      String? senderKey;
-      final keys = prefs.getKeys();
-      for (final key in keys) {
-        if (key.startsWith('wa_state_')) {
-          final jsonStr = prefs.getString(key);
-          if (jsonStr != null && jsonStr.isNotEmpty) {
-            try {
-              final map = jsonDecode(jsonStr) as Map<String, dynamic>;
-              final k = map['whatsapp_sender_key']?.toString();
-              if (k != null && k.isNotEmpty) {
-                senderKey = k;
-                break;
-              }
-            } catch (_) {}
-          }
-        }
-      }
-      if (senderKey != null && senderKey.isNotEmpty) {
-        await WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp(
-          senderKey: senderKey,
-          message: message,
-        );
-      }
-    } catch (e) {
-      debugPrint('[HomeScreen] Error sending WhatsApp progress: $e');
-    }
-  }
+  // [WHATSAPP-DISABLED] _sendWhatsAppProgress sent automation status back to WhatsApp.
+  // Disabled: app no longer communicates via WhatsApp.
+  // Future<void> _sendWhatsAppProgress(String message) async { ... }
 
   Future<String> _matchColorWithLlm(
     String rawColor,
@@ -2314,35 +2293,14 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
                   ],
                 ),
                 const Divider(height: 16),
-                // WhatsApp Listener Switch
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  title: const Text(
-                    'השבתת מאזין וואטסאפ (Disable WhatsApp)',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                  ),
-                  subtitle: Text(
-                    _disableWhatsAppListener
-                        ? 'מאזין וואטסאפ מושבת'
-                        : 'מאזין וואטסאפ פעיל',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color:
-                          _disableWhatsAppListener ? Colors.red : Colors.green,
-                    ),
-                  ),
-                  value: _disableWhatsAppListener,
-                  onChanged: (val) {
-                    setState(() {
-                      _disableWhatsAppListener = val;
-                      HomeScreen.debugDisableWhatsAppListener = val;
-                    });
-                    WhatsAppMessageBridgeService.instance.setListenerDisabled(
-                      val,
-                    );
-                  },
-                ),
+                // [WHATSAPP-DISABLED] WhatsApp Listener Switch removed.
+                // WA bridge is disabled — switch has no effect.
+                // SwitchListTile(
+                //   contentPadding: EdgeInsets.zero,
+                //   dense: true,
+                //   title: const Text('\u05d4\u05e9\u05d1\u05ea\u05ea \u05de\u05d0\u05d6\u05d9\u05df \u05d5\u05d5\u05d0\u05d8\u05e1\u05d0\u05e4 (Disable WhatsApp)', ...),
+                //   ...
+                // ),
                 // Publish Target Switch
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,

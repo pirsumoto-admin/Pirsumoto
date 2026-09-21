@@ -166,34 +166,15 @@ echo -e "  → Granting MediaProjection (PROJECT_MEDIA)..."
 $ADB_CMD shell appops set "$PACKAGE_NAME" PROJECT_MEDIA allow 2>/dev/null || true
 $ADB_CMD shell appops set --user 0 "$PACKAGE_NAME" PROJECT_MEDIA allow 2>/dev/null || true
 
-# 3. Enable Notification Listener Service for WhatsApp bridge
-echo -e "  → Enabling Notification Listener..."
-$ADB_CMD shell cmd notification allow_listener "$NOTIFICATION_SERVICE" 2>/dev/null || true
-$ADB_CMD shell cmd notification allow_listener --user 0 "$NOTIFICATION_SERVICE" 2>/dev/null || true
-EXISTING_NOTIF=$($ADB_CMD shell settings get secure --user 0 enabled_notification_listeners | tr -d '\r')
-if [[ "$EXISTING_NOTIF" != *"$NOTIFICATION_SERVICE"* ]]; then
-  if [ -z "$EXISTING_NOTIF" ] || [ "$EXISTING_NOTIF" == "null" ]; then
-    NEW_NOTIF="$NOTIFICATION_SERVICE"
-  else
-    NEW_NOTIF="${EXISTING_NOTIF}:${NOTIFICATION_SERVICE}"
-  fi
-  $ADB_CMD shell settings put secure --user 0 enabled_notification_listeners "$NEW_NOTIF" 2>/dev/null || true
-  $ADB_CMD shell settings put secure enabled_notification_listeners "$NEW_NOTIF" 2>/dev/null || true
-fi
+  # [WHATSAPP-DISABLED] Notification Listener Service disabled.
+  # echo -e "  → Enabling Notification Listener..."
+  # $ADB_CMD shell cmd notification allow_listener "$NOTIFICATION_SERVICE" 2>/dev/null || true
+  # $ADB_CMD shell cmd notification allow_listener --user 0 "$NOTIFICATION_SERVICE" 2>/dev/null || true
 
-# 4. Grant System Alert Window (Draw over other apps)
-echo -e "  → Granting System Alert Window overlay..."
-$ADB_CMD shell appops set "$PACKAGE_NAME" SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
-$ADB_CMD shell appops set --user 0 "$PACKAGE_NAME" SYSTEM_ALERT_WINDOW allow 2>/dev/null || true
-
-# 5. Grant Storage permissions
-echo -e "  → Granting storage permissions..."
-$ADB_CMD shell appops set "$PACKAGE_NAME" MANAGE_EXTERNAL_STORAGE allow 2>/dev/null || true
-$ADB_CMD shell appops set --user 0 "$PACKAGE_NAME" MANAGE_EXTERNAL_STORAGE allow 2>/dev/null || true
-$ADB_CMD shell pm grant --user 0 "$PACKAGE_NAME" android.permission.READ_MEDIA_AUDIO 2>/dev/null || true
-$ADB_CMD shell pm grant "$PACKAGE_NAME" android.permission.READ_MEDIA_AUDIO 2>/dev/null || true
-$ADB_CMD shell pm grant --user 0 "$PACKAGE_NAME" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
-$ADB_CMD shell pm grant "$PACKAGE_NAME" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
+  # [WHATSAPP-DISABLED] WhatsApp storage permissions disabled.
+  # $ADB_CMD shell appops set "$PACKAGE_NAME" MANAGE_EXTERNAL_STORAGE allow 2>/dev/null || true
+  # $ADB_CMD shell pm grant "$PACKAGE_NAME" android.permission.READ_MEDIA_AUDIO 2>/dev/null || true
+  # $ADB_CMD shell pm grant "$PACKAGE_NAME" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
 
 # 6. Grant Notifications permission (Android 13+)
 echo -e "  → Granting notification permissions..."

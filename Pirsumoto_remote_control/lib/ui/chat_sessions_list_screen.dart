@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart' as intl;
 import 'app_theme.dart';
 import 'chat_session_manager.dart';
@@ -27,11 +29,80 @@ class ChatSessionsListScreen extends StatefulWidget {
 class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
   List<ChatSession> _sessions = [];
   bool _isLoading = true;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _liveUpdatesSub;
 
   @override
   void initState() {
     super.initState();
     _loadSessions();
+    _listenToLiveUpdates();
+  }
+
+  @override
+  void dispose() {
+    _liveUpdatesSub?.cancel();
+    super.dispose();
+  }
+
+  void _listenToLiveUpdates() {
+    // Only listen to recent status updates
+    final timestampLimit = DateTime.now().millisecondsSinceEpoch - 10000;
+    
+    _liveUpdatesSub = FirebaseFirestore.instance
+        .collection('remote_chats')
+        .doc(widget.deviceId)
+        .collection('messages')
+        .where('timestamp', isGreaterThan: timestampLimit)
+        .snapshots()
+        .listen((snapshot) async {
+      bool needsReload = false;
+      
+      for (final change in snapshot.docChanges) {
+        if (change.type == DocumentChangeType.added) {
+          final data = change.doc.data();
+          if (data == null) continue;
+          
+          final type = data['type'] as String?;
+          if (type == 'status') {
+            final sessionId = data['sessionId'] as String?;
+            if (sessionId == null) continue;
+            
+            final statusType = data['statusType'] as String?;
+            final text = data['text'] as String?;
+            
+            final session = await SqliteDatabaseHelper.instance.getSession(sessionId);
+            if (session != null) {
+              if (statusType == 'started') {
+                session.status = ChatSessionStatus.running;
+                session.lastMessage = text ?? 'בתהליך פרסום';
+              } else if (statusType == 'finished') {
+                session.status = ChatSessionStatus.done;
+                session.lastMessage = text ?? 'הושלם';
+                
+                // Auto advance queue
+                await ChatSessionManager.advanceQueueAndStartNext(widget.deviceId, session: widget.session);
+              } else if (statusType == 'stopped') {
+                session.status = ChatSessionStatus.done; // or canceled
+                session.lastMessage = text ?? 'הופסק';
+                
+                // Auto advance queue
+                await ChatSessionManager.advanceQueueAndStartNext(widget.deviceId, session: widget.session);
+              } else if (statusType == 'stuck') {
+                session.status = ChatSessionStatus.error;
+                session.lastMessage = text ?? 'נתקע';
+              }
+              
+              await ChatSessionManager.saveSession(session);
+              needsReload = true;
+            }
+          }
+        }
+      }
+      
+      if (needsReload && mounted) {
+        _loadSessions();
+      }
+    });
   }
 
   Future<void> _loadSessions() async {
@@ -69,7 +140,117 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
     }
   }
 
-  Future<void> _deleteSession(String sessionId) async {
+  Future<void> _cancelSession(ChatSession session) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Text(
+          'ביטול פרסום',
+          style: GoogleFonts.heebo(color: AppColors.onSurface, fontWeight: FontWeight.bold),
+          textDirection: TextDirection.rtl,
+        ),
+        content: Text(
+          'האם אתה בטוח שברצונך לבטל את תהליך הפרסום עבור שיחה זו?',
+          style: GoogleFonts.heebo(color: AppColors.secondary),
+          textDirection: TextDirection.rtl,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('חזור', style: GoogleFonts.heebo(color: AppColors.secondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
+            child: Text('בטל פרסום', style: GoogleFonts.heebo(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      final wasRunning = session.status == ChatSessionStatus.running;
+      session.status = ChatSessionStatus.done;
+      session.lastMessage = 'הפרסום בוטל';
+      await ChatSessionManager.saveSession(session);
+
+      // Send cancel / reset command to remote device
+      try {
+        await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .add({
+              'id': 'cancel_${DateTime.now().millisecondsSinceEpoch}',
+              'sessionId': session.id,
+              'sender': 'user',
+              'senderName': 'Remote User',
+              'text': 'ביטול',
+              'type': 'message',
+              'status': 'pending',
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
+        
+        if (wasRunning) {
+          await FirebaseFirestore.instance
+              .collection('remote_chats')
+              .doc(widget.deviceId)
+              .collection('messages')
+              .add({
+                'id': 'reset_${DateTime.now().millisecondsSinceEpoch}',
+                'sessionId': session.id,
+                'sender': 'user',
+                'type': 'reset',
+                'status': 'pending',
+                'timestamp': DateTime.now().millisecondsSinceEpoch,
+                'createdAt': FieldValue.serverTimestamp(),
+              });
+        }
+      } catch (e) {
+        debugPrint('[ChatSessions] Error sending cancel command to Firestore: $e');
+      }
+
+      if (wasRunning && widget.session?.isConnected == true) {
+        try {
+          widget.session!.sendChatMessage('ביטול', senderName: 'Remote User');
+          widget.session!.sendReset();
+        } catch (_) {}
+      }
+
+      // Advance queue to next waiting session
+      final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
+        widget.deviceId,
+        session: widget.session,
+      );
+
+      if (mounted) {
+        if (nextSession != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'הפרסום בוטל. מתחיל פרסום עבור הרכב הבא בתור: ${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id}',
+                textDirection: TextDirection.rtl,
+              ),
+              backgroundColor: AppColors.primary,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('הפרסום בוטל בהצלחה.', textDirection: TextDirection.rtl),
+              backgroundColor: AppColors.surface,
+            ),
+          );
+        }
+      }
+
+      _loadSessions();
+    }
+  }
+
+  Future<void> _deleteSession(ChatSession session) async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -99,7 +280,72 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
     );
 
     if (confirm == true) {
-      await ChatSessionManager.deleteSession(widget.deviceId, sessionId);
+      final wasRunning = session.status == ChatSessionStatus.running;
+      await ChatSessionManager.deleteSession(widget.deviceId, session.id);
+      
+      try {
+        await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .add({
+              'id': 'del_${DateTime.now().millisecondsSinceEpoch}',
+              'sessionId': session.id,
+              'sender': 'user',
+              'type': 'delete_session',
+              'status': 'pending',
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
+
+        if (wasRunning) {
+          await FirebaseFirestore.instance
+              .collection('remote_chats')
+              .doc(widget.deviceId)
+              .collection('messages')
+              .add({
+                'id': 'cancel_${DateTime.now().millisecondsSinceEpoch}',
+                'sessionId': session.id,
+                'sender': 'user',
+                'senderName': 'Remote User',
+                'text': 'ביטול',
+                'type': 'message',
+                'status': 'pending',
+                'timestamp': DateTime.now().millisecondsSinceEpoch,
+                'createdAt': FieldValue.serverTimestamp(),
+              });
+        }
+      } catch (e) {
+        debugPrint('[ChatSessions] Error sending delete command to Firestore: $e');
+      }
+
+      if (wasRunning && widget.session?.isConnected == true) {
+        try {
+          widget.session!.sendChatMessage('ביטול', senderName: 'Remote User');
+          widget.session!.sendReset();
+        } catch (_) {}
+      }
+
+      // If the deleted session was running (or queue can advance), start next in line
+      final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
+        widget.deviceId,
+        session: widget.session,
+      );
+
+      if (mounted) {
+        if (nextSession != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'השיחה נמחקה. מתחיל פרסום עבור הרכב הבא בתור: ${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id}',
+                textDirection: TextDirection.rtl,
+              ),
+              backgroundColor: AppColors.primary,
+            ),
+          );
+        }
+      }
+
       _loadSessions();
     }
   }
@@ -120,23 +366,31 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
 
   String _formatStatus(ChatSessionStatus status) {
     switch (status) {
+      case ChatSessionStatus.draft:
+        return 'טיוטה';
       case ChatSessionStatus.running:
         return 'בתהליך';
       case ChatSessionStatus.waiting:
         return 'ממתין';
       case ChatSessionStatus.done:
         return 'הסתיים';
+      case ChatSessionStatus.error:
+        return 'שגיאה / נתקע';
     }
   }
 
   Color _getStatusColor(ChatSessionStatus status) {
     switch (status) {
+      case ChatSessionStatus.draft:
+        return Colors.blueGrey;
       case ChatSessionStatus.running:
         return Colors.blue;
       case ChatSessionStatus.waiting:
         return Colors.orange;
       case ChatSessionStatus.done:
         return Colors.green;
+      case ChatSessionStatus.error:
+        return AppColors.error;
     }
   }
 
@@ -230,9 +484,32 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                             ],
                           ),
                         ),
-                        leading: IconButton(
-                          icon: const Icon(Icons.delete, color: AppColors.error),
-                          onPressed: () => _deleteSession(session.id),
+                        leading: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (session.status == ChatSessionStatus.running ||
+                                session.status == ChatSessionStatus.waiting)
+                              IconButton(
+                                icon: const Icon(Icons.cancel_outlined, color: AppColors.warning),
+                                tooltip: 'ביטול פרסום',
+                                onPressed: () => _cancelSession(session),
+                              ),
+                            if (session.status == ChatSessionStatus.waiting &&
+                                !_sessions.any((s) => s.status == ChatSessionStatus.running))
+                              IconButton(
+                                icon: const Icon(Icons.play_arrow_rounded, color: AppColors.success),
+                                tooltip: 'התחל פרסום',
+                                onPressed: () async {
+                                  await ChatSessionManager.startSession(widget.deviceId, session.id, session: widget.session);
+                                  _loadSessions();
+                                },
+                              ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, color: AppColors.error),
+                              tooltip: 'מחיקת שיחה',
+                              onPressed: () => _deleteSession(session),
+                            ),
+                          ],
                         ),
                       ),
                     );

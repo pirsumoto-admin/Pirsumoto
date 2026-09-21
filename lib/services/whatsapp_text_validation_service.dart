@@ -5,8 +5,10 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'agent_config_service.dart';
+import 'p2p_auto_publish_launcher.dart';
 import 'vehicle_data_service.dart';
-import 'whatsapp_message_bridge_service.dart';
+// [WHATSAPP-DISABLED] whatsapp_message_bridge_service import disabled.
+// import 'whatsapp_message_bridge_service.dart';
 import 'yad2_accessibility_automation_service_optimized.dart';
 
 typedef VehicleDataFetcher =
@@ -1402,9 +1404,11 @@ class WhatsAppTextValidationService {
       }
     }
 
-    final sender = customSender ??
-        replySender ??
-        WhatsAppMessageBridgeService.instance.sendReplyToWhatsApp;
+    final sender = customSender ?? replySender;
+    if (sender == null) {
+      debugPrint('[WhatsAppValidation] No reply sender registered for $senderKey');
+      return Future<bool>.value(false);
+    }
     final trimmed = message.trim();
     final formatted = (trimmed.startsWith('🤖') || trimmed.startsWith('⚠️'))
         ? trimmed
@@ -1421,16 +1425,23 @@ class WhatsAppTextValidationService {
   Future<bool> _launchAutoPublish(Map<String, String> state) async {
     for (final launcher in _customAutoPublishLaunchers) {
       try {
-        launcher(state);
+        final handled = await launcher(state);
+        if (handled) {
+          debugPrint('[WhatsAppValidation] Auto-publish handled by custom launcher');
+          return true;
+        }
       } catch (e) {
         debugPrint('[WhatsAppValidation] customAutoPublishLauncher error: $e');
       }
     }
-    final launcher =
-        autoPublishLauncher ??
-        WhatsAppMessageBridgeService.instance.launchAutoPublish;
-    return launcher(state);
+    if (autoPublishLauncher != null) {
+      return await autoPublishLauncher!(state);
+    }
+    // Default in-app launcher for internal P2P chat: opens Yad2Screen on main app
+    return await P2PAutoPublishLauncher.launch(state);
   }
+
+  void stopAutomation() => _stopAutomation();
 
   void _stopAutomation() {
     final stopper =

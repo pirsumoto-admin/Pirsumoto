@@ -1,6 +1,13 @@
 const functions = require('@google-cloud/functions-framework');
+const { onRequest } = require('firebase-functions/v2/https');
 const { PubSub } = require('@google-cloud/pubsub');
 const crypto = require('crypto');
+const admin = require('firebase-admin');
+
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
+const db = admin.firestore();
 
 // Initialize Google Cloud Pub/Sub
 const pubsub = new PubSub();
@@ -14,7 +21,7 @@ const LOCAL_BRIDGE_TOKEN = process.env.PIRSUMOTO_LOCAL_BRIDGE_TOKEN;
 
 // SECURITY WARNING: Move these keys to your Cloud Environment Variables in production!
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6I0DFFHKEIB6lMtXqVDYm_7OGg9r9-norHBsXGY-LbruA';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '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';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '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';
 
 // Cache to prevent duplicate webhook processing across rapid delivery attempts
 const processedMessageIds = new Set();
@@ -255,7 +262,7 @@ async function handleLocalBridgeRequest(req, res) {
   }
 }
 
-functions.http('whatsappGatekeeper', async (req, res) => {
+async function handleWhatsappGatekeeper(req, res) {
 
   // ==========================================
   // 1. HANDSHAKE VERIFICATION LOOP (GET)
@@ -383,4 +390,563 @@ functions.http('whatsappGatekeeper', async (req, res) => {
   }
 
   res.status(405).send('Method Not Allowed');
-});
+}
+
+// ============================================================================
+// REMOTE CONTROL SECURE VALIDATION & WHISPER BACKEND PROXY
+// ============================================================================
+
+const DEFAULT_SYSTEM_PROMPT = `
+אתה עוזר שיחה חכם ומומחה לחילוץ מידע עבור צ׳אטבוט WhatsApp לפרסום רכב ביד2 ובפייסבוק מרקטפלייס בישראל.
+
+תפקידך הכפול:
+1. זיהוי כוונת המשתמש (intent) וחילוץ נתונים חדשים או מתוקנים עבור הרכב (extracted_fields) בהתאם לכללים המחמירים של יד2.
+2. ניסוח הודעת מענה קצרה, אדיבה ועוזרת בעברית (assistant_reply) המתאימה לוואטסאפ, המנחה את המשתמש במדויק לעבר השלמת פרטי הרכב ופרסומו.
+
+========================
+זיהוי כוונות (intent)
+====================
+- "republish_last": המשתמש מבקש לפרסם שוב, להמשיך מהיכן שהפסיק/עצר, לשחזר נתוני רכב קודם, או לעשות שימוש בנתוני הרכב האחרון/הקודם שלו.
+- "update_details": המשתמש מספק פרטי רכב (קילומטראז', מחיר, צבע וכו') או מעדכן פרט קודם.
+- "greeting_or_help": המשתמש אומר שלום, מברך, שואל איך זה עובד, או מבקש עזרה כללית מבלי למסור עדיין מספר רישוי או פרטים.
+- "cancel": המשתמש מבקש לבטל את התהליך.
+- "chat": הודעה כללית אחרת.
+
+========================
+כללי מענה בשיחה (assistant_reply)
+================================
+ההודעה תהיה תמיד בעברית טבעית, תמציתית, מקצועית ומותאמת לווצאפ:
+1. כאשר intent הוא "republish_last":
+   - אם ב-last_saved_vehicle קיימים פרטי רכב: אשר שמצאת את הרכב (ציין יצרן, דגם, שנת ייצור ומספר רישוי). אם המשתמש ביקש לשנות פרט (למשל מחיר או ק"מ), אשר את השינוי. בקש תמונות של הרכב כדי להתחיל בפרסום, או שאל האם כל הנתונים מדויקים להמשך.
+   - אם ב-last_saved_vehicle אין פרטי רכב: הסבר בנימוס שלא נמצאו פרטי רכב שמורים קודמים, ובקש לשלוח מספר רישוי בן 7 או 8 ספרות כדי להתחיל.
+2. כאשר intent הוא "greeting_or_help" (ולא פעיל סשן):
+   - הצג את עצמך בתור הבוט של פירסומוטו, הסבר בקצרה שאתה מסייע לפרסם את הרכב ביד2 ובפייסבוק, ובקש מהמשתמש לשלוח את מספר הרישוי של הרכב (7 או 8 ספרות) או להקליט הודעה קולית כדי להתחיל.
+3. כאשר intent הוא "update_details":
+   - אשר בקצרה את הנתונים שנקלטו, והצג את כל השדות החסרים יחד מתוך missing_fields_in_requested_order ברשימה מרוכזת אחת (מופרדים בנקודות או שורות), כך שהמשתמש יוכל למלא ולספק את כולם יחד. לעולם אל תשאל שדה אחד בודד בכל פעם כאשר ישנם מספר שדות חסרים.
+   - אם כל השדות הושלמו, הודע שהפרטים מוכנים, ובקש להעלות תמונות או ללחוץ על "פרסם עכשיו" כדי להתחיל בפרסום ביד2 ובפייסבוק.
+4. השאר את התשובות ממוקדות ונעימות בווצאפ - ללא טקסטים ארוכים מדי.
+
+========================
+כללי OUTPUT
+===========
+
+החזר אובייקט JSON אחד בלבד במבנה הבא:
+{
+  "intent": "update_details" | "republish_last" | "greeting_or_help" | "cancel" | "chat",
+  "extracted_fields": {
+     // שדות שחולצו מההודעה בלבד
+  },
+  "assistant_reply": "הודעת מענה לווצאפ בעברית"
+}
+
+כללים נוספים לחילוץ:
+- החזר ב-extracted_fields רק שדות שהמידע שלהם ניתן להסיק באופן סביר מההודעה הנוכחית.
+- אל תחזיר שדות שלא הופיעו בהודעה הנוכחית, גם אם הם מופיעים ב-current_verified_fields או בהיסטוריה.
+- אל תעתיק ערכים קיימים רק משום שהם קיימים בהקשר.
+- אל תנחש.
+- אל תשלים ערכים חסרים באמצעות ברירת מחדל.
+- אם המשתמש מתקן ערך קודם, החזר את הערך החדש ב-extracted_fields.
+- אם אין מידע חדש שניתן לשייך בביטחון לאחד השדות המותרים, החזר extracted_fields ריק: {}.
+- אם המשתמש מסר מספר פרטים באותה הודעה, החזר את כולם באותו JSON.
+- לעולם אל תחזיר license_plate או license בתוך extracted_fields. זיהוי לוחית הרישוי מתבצע מחוץ למודל.
+
+========================
+השדות המותרים
+=============
+
+km
+price
+hand
+maker
+model
+year
+color
+month
+test_month
+test_year
+current_ownership
+previous_ownership
+vehicle_condition
+gear_type
+description
+fuel_type
+
+אין להחזיר שום מפתח אחר.
+`;
+
+const DEFAULT_ALLOWED_COLORS = [
+  'אדום', 'כחול', 'צהוב', 'אפור', 'לבן', 'שחור', 'סגול', 'ורוד', 'חום', 'ירוק', 'כתום'
+];
+
+function normalizeHebrewDigits(text) {
+  if (!text) return '';
+  let s = text.trim();
+  const wordToDigit = {
+    'אפס': '0', 'אחת': '1', 'אחד': '1', 'שתיים': '2', 'שניים': '2', 'שתים': '2', 'שנים': '2',
+    'שלוש': '3', 'שלושה': '3', 'ארבע': '4', 'ארבעה': '4', 'חמש': '5', 'חמישה': '5',
+    'שש': '6', 'שישה': '6', 'שבע': '7', 'שבעה': '7', 'שמונה': '8', 'שמונה עשרה': '18',
+    'תשע': '9', 'תשעה': '9', 'עשר': '10', 'עשרה': '10', 'עשרים': '20', 'שלושים': '30',
+    'ארבעים': '40', 'חמישים': '50', 'שישים': '60', 'שבעים': '70', 'שמונים': '80',
+    'תשעים': '90', 'מאה': '100'
+  };
+  for (const [k, v] of Object.entries(wordToDigit)) {
+    s = s.replace(new RegExp(`(?<=^|[\\s,.\\-!?])${k}(?=$|[\\s,.\\-!?])`, 'gi'), v);
+  }
+  return s;
+}
+
+function normalizeHand(h) {
+  if (h === 'ראשונה' || h === '1') return '1';
+  if (h === 'שנייה' || h === 'שניה' || h === '2') return '2';
+  if (h === 'שלישית' || h === '3') return '3';
+  if (h === 'רביעית' || h === '4') return '4';
+  if (h === 'חמישית' || h === '5') return '5';
+  return h;
+}
+
+function sanitizeFields(rawFields) {
+  const result = {};
+  if (!rawFields || typeof rawFields !== 'object') return result;
+
+  for (let [rawKey, rawVal] of Object.entries(rawFields)) {
+    let key = rawKey.trim();
+    if (key === 'vehicleCondition') key = 'vehicle_condition';
+    if (key === 'ownership') key = 'current_ownership';
+    if (key === 'gear') key = 'gear_type';
+    if (rawVal == null) continue;
+
+    let val = String(rawVal).trim();
+    if (!val || val.toLowerCase() === 'null') continue;
+
+    if (key === 'km' || key === 'price') {
+      const digits = val.replace(/\D/g, '');
+      if (parseInt(digits, 10) > 0) result[key] = digits;
+    } else if (key === 'hand') {
+      result[key] = normalizeHand(val);
+    } else {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
+function getMissingFields(state) {
+  const missing = [];
+  if (!state.license_plate) missing.push('license_plate');
+  if (!state.km) missing.push('km');
+  if (!state.price) missing.push('price');
+  if (!state.hand) missing.push('hand');
+  if (!state.color) missing.push('color');
+  return missing;
+}
+
+function validateValues(state) {
+  const errors = [];
+  if (state.km) {
+    const km = parseInt(state.km, 10);
+    if (isNaN(km) || km < 0 || km > 1500000) errors.push('קילומטראז לא תקין');
+  }
+  if (state.price) {
+    const price = parseInt(state.price, 10);
+    if (isNaN(price) || price <= 0) errors.push('מחיר לא תקין');
+  }
+  return errors;
+}
+
+function composeFallbackHebrewReply(state, missingKeys, validationErrors, isFirstTurn, imageCount) {
+  const plate = state.license_plate || '';
+  if (!plate) {
+    return 'שלום! 👋 אני הבוט של פירסומוטו לפרסום רכב.\nכדי להתחיל, שלח מספר רישוי ישראלי (7 או 8 ספרות), או הקלט הודעה קולית עם פרטי הרכב.';
+  }
+
+  const lines = [];
+  if (isFirstTurn) {
+    if (state.maker) {
+      lines.push(`🚗 זיהיתי את הרכב: ${state.maker} ${state.model || ''} שנת ${state.year || ''} (רישוי ${plate}).`);
+    } else {
+      lines.push(`🚗 מספר רישוי נקלט: ${plate}.`);
+    }
+  }
+
+  if (validationErrors.length > 0) {
+    lines.push('\n⚠️ שים לב:');
+    for (const err of validationErrors) {
+      lines.push(`• ${err}`);
+    }
+  }
+
+  if (missingKeys.length > 0) {
+    lines.push('\nכדי להשלים את הפרסום, אנא ציין:');
+    for (const key of missingKeys) {
+      if (key === 'km') lines.push('• קילומטראז\' (ק"מ)');
+      else if (key === 'price') lines.push('• מחיר מבוקש בש"ח');
+      else if (key === 'hand') lines.push('• יד (למשל: יד 1, יד 2)');
+      else if (key === 'color') lines.push('• צבע הרכב');
+    }
+  } else {
+    lines.push('\n✅ כל פרטי הרכב מלאים ומאומתים!');
+    if (imageCount === 0) {
+      lines.push('📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
+    } else {
+      lines.push(`📷 צורפו ${imageCount} תמונות. לחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function fetchGovIlData(plate) {
+  try {
+    const url = `https://data.gov.il/api/3/action/datastore_search?resource_id=053cea08-09bc-40ec-8f7a-156f0677aff3&q=${encodeURIComponent(plate)}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const records = json?.result?.records;
+    if (records && records.length > 0) {
+      const rec = records[0];
+      return {
+        maker: rec.tozeret_nm || rec.tozeret_cd || '',
+        model: rec.kinuy_mishari || rec.degem_nm || '',
+        year: rec.shnat_yitzur ? String(rec.shnat_yitzur) : '',
+        color: rec.tzeva_rechev || '',
+        fuelType: rec.sug_delek_nm || 'בנזין',
+        ownership: rec.baalut || 'פרטית',
+        registrationMonth: rec.moed_aliya_lakvish ? String(rec.moed_aliya_lakvish) : '',
+        gear_type: (rec.gear_type || '').includes('ידני') ? 'ידני' : 'הילוכים אוטומטיים',
+        testExpiry: rec.tokef_dt || ''
+      };
+    }
+  } catch (e) {
+    console.error('Gov.il lookup error:', e);
+  }
+  return null;
+}
+
+async function handleRemoteValidation(req, res) {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).send('');
+  }
+
+  try {
+    const body = requestJsonBody(req);
+    const action = body.action || 'process_turn';
+
+    // 1. Audio Transcription (Whisper)
+    if (action === 'transcribe_audio') {
+      const audioBase64 = body.audioBase64;
+      if (!audioBase64) {
+        return res.status(400).json({ ok: false, error: 'missing_audioBase64' });
+      }
+      const audioBuffer = Buffer.from(audioBase64, 'base64');
+      const text = await transcribeAudioBuffer(
+        audioBuffer,
+        body.mimeType || 'audio/m4a',
+        body.fileName || 'audio.m4a'
+      );
+      const normalized = normalizeHebrewDigits(text);
+      return res.status(200).json({ ok: true, text: normalized });
+    }
+
+    // 2. License Plate Extraction
+    if (action === 'extract_license_plate') {
+      const historyText = body.chatHistoryText || '';
+      const prompt = `You are an AI assistant. Find the 7 or 8 digit Israeli license plate number mentioned in this chat history.\nOutput ONLY the 7 or 8 digits, or exactly "NONE".\n\nChat history:\n${historyText}`;
+
+      const openAiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      const data = await openAiRes.json();
+      const content = data?.choices?.[0]?.message?.content?.trim() || '';
+      if (content && content !== 'NONE') {
+        const digits = content.replace(/\D/g, '');
+        if (digits.length === 7 || digits.length === 8) {
+          return res.status(200).json({ ok: true, licensePlate: digits });
+        }
+      }
+      return res.status(200).json({ ok: true, licensePlate: null });
+    }
+
+    // 3. Process Chat Turn
+    if (action === 'process_turn') {
+      const incomingText = (body.incomingText || '').toString().trim();
+      const currentVehicleData = body.currentVehicleData || {};
+      const chatHistory = body.chatHistory || [];
+      const imageCount = parseInt(body.currentImageCount || '0', 10);
+
+      // Fetch dynamic system prompt & rules from Firestore (Server Admin SDK)
+      let systemPrompt = body.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+      let allowedColors = DEFAULT_ALLOWED_COLORS;
+      let valDoc = null;
+      try {
+        valDoc = await db.collection('agent_config').doc('whatsapp_validation').get();
+        if (valDoc.exists) {
+          const valData = valDoc.data() || {};
+          const basePrompt = valData.systemPrompt || (body.systemPrompt ? body.systemPrompt : DEFAULT_SYSTEM_PROMPT);
+          const rulesMd = valData.rules_md ||
+            valData.rulesMd ||
+            (typeof valData.rules === 'string' ? valData.rules : (valData.rules && valData.rules.rules_md));
+          const generalRules = valData.generalRules || (valData.rules && valData.rules.generalRules);
+
+          let combined = basePrompt;
+          if (rulesMd && typeof rulesMd === 'string' && rulesMd.trim()) {
+            combined += `\n\n========================\nהוראות סוכן וכללים (AGENT RULES)\n================================\n<agent_rules>\n${rulesMd.trim()}\n</agent_rules>`;
+          }
+          if (generalRules) {
+            let list = [];
+            if (Array.isArray(generalRules)) {
+              list = generalRules.map(r => String(r).trim()).filter(Boolean);
+            } else if (typeof generalRules === 'string') {
+              list = generalRules.split('\n').map(r => r.trim()).filter(Boolean);
+            }
+            if (list.length > 0) {
+              combined += `\n\n========================\nכללים כלליים נוספים (GENERAL RULES)\n==================================\n` + list.map(r => `- ${r}`).join('\n');
+            }
+          }
+          systemPrompt = combined;
+
+          if (valData.allowedColors && Array.isArray(valData.allowedColors) && valData.allowedColors.length > 0) {
+            allowedColors = valData.allowedColors;
+          }
+        }
+      } catch (e) {
+        console.warn('Could not read agent_config from Firestore, using default system prompt:', e);
+      }
+
+      // Enforce batching on systemPrompt to eliminate any cached 1-by-1 phrasing
+      systemPrompt = systemPrompt.replace(
+        /והנחה את המשתמש לספק את השדה הבא שחסר מתוך missing_fields_in_requested_order/g,
+        'והצג את כל השדות החסרים יחד מתוך missing_fields_in_requested_order ברשימה מרוכזת אחת (מופרדים בנקודות או שורות) כדי שהמשתמש יוכל לספק את כולם יחד'
+      );
+
+      systemPrompt += `\n\n========================\nכלל מחייב להצגת שדות חסרים (BATCHING MISSING FIELDS)\n===================================================\nכאשר חסרים פרטים ברכב (missing_fields_in_requested_order מכיל יותר משדה אחד):\nחובה תמיד להציג למשתמש את כל השדות החסרים יחד ברשימה מרוכזת אחת מופרדת בשורות או בנקודות (למשל: קילומטראז', מחיר, יד, צבע), כדי שהמשתמש יוכל למלא ולספק את כולם יחד בהודעה אחת.\nלעולם אל תבקש רק שדה בודד אחד בכל פעם!`;
+
+      const state = { ...currentVehicleData };
+      const plateMatch = incomingText.match(/\b\d{7,8}\b/);
+      const rawPlate = plateMatch ? plateMatch[0] : null;
+      let isFirstTurn = false;
+
+      if (rawPlate && !state.license_plate) {
+        state.license_plate = rawPlate;
+        state.license = rawPlate;
+        isFirstTurn = true;
+        const govData = await fetchGovIlData(rawPlate);
+        if (govData) {
+          state.maker = govData.maker || '';
+          state.model = govData.model || '';
+          state.year = govData.year || '';
+          state.color = govData.color || '';
+          state.fuel_type = govData.fuelType || '';
+          state.current_ownership = govData.ownership || 'פרטית';
+          state.previous_ownership = govData.ownership || 'פרטית';
+          state.month = govData.registrationMonth || '';
+          state.test_month = govData.registrationMonth || '';
+          state.gear_type = govData.gear_type || 'הילוכים אוטומטיים';
+        }
+      }
+
+      const hasActiveSession = Boolean(state.license_plate);
+      if (hasActiveSession && !state.vehicle_condition) {
+        state.vehicle_condition = 'טוב';
+      }
+
+      const missingBeforeTurn = hasActiveSession ? getMissingFields(state) : ['license_plate'];
+      const errorsBeforeTurn = hasActiveSession ? validateValues(state) : [];
+
+      // Call OpenAI securely on server
+      const requestData = {
+        current_message: incomingText,
+        has_active_session: hasActiveSession,
+        current_verified_fields: state,
+        missing_fields_in_requested_order: missingBeforeTurn,
+        field_errors: errorsBeforeTurn,
+        last_saved_vehicle: {},
+        recent_session_history: chatHistory.slice(-10),
+        allowed_yad2_colors: allowedColors
+      };
+
+      // Model selection (defaulting to gpt-5.6-luna with fallback)
+      // Model selection & API key (with Firestore override support)
+      const activeApiKey = (valDoc && valDoc.exists ? (valDoc.data()?.openAiApiKey || valDoc.data()?.apiKey) : null) || OPENAI_API_KEY;
+      const targetModel = body.aiModel || (valDoc && valDoc.exists ? valDoc.data()?.aiModel : null) || 'gpt-5.6-luna';
+
+      let aiReply = null;
+      let extractedFields = {};
+
+      try {
+        const payload = {
+          model: targetModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: JSON.stringify(requestData) }
+          ]
+        };
+        if (targetModel === 'gpt-5.6-luna') {
+          payload.max_completion_tokens = 350;
+          payload.reasoning_effort = 'low';
+          payload.temperature = 0.2;
+        }
+
+        let llmRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${activeApiKey}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        // Fallback to gpt-4o-mini if primary model returns an error
+        if (!llmRes.ok && targetModel !== 'gpt-4o-mini') {
+          console.warn(`Primary model ${targetModel} returned ${llmRes.status}, falling back to gpt-4o-mini`);
+          llmRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${activeApiKey}`
+            },
+            body: JSON.stringify({
+              model: 'gpt-4o-mini',
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: JSON.stringify(requestData) }
+              ]
+            })
+          });
+        }
+
+        if (llmRes.ok) {
+          const llmData = await llmRes.json();
+          const cachedTokens = llmData.usage?.prompt_tokens_details?.cached_tokens || 0;
+          const totalPromptTokens = llmData.usage?.prompt_tokens || 0;
+          console.log(`[LLM CACHE STATS] Prompt tokens: ${totalPromptTokens}, Cached prefix tokens: ${cachedTokens} (${cachedTokens > 0 ? 'CACHE HIT' : 'CACHE MISS'})`);
+
+          const content = llmData?.choices?.[0]?.message?.content?.trim() || '';
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            aiReply = parsed.assistant_reply || null;
+            if (parsed.extracted_fields) {
+              extractedFields = sanitizeFields(parsed.extracted_fields);
+            }
+          }
+        }
+      } catch (llmErr) {
+        console.error('Server LLM call error:', llmErr);
+      }
+
+      // Merge extracted fields
+      for (const [k, v] of Object.entries(extractedFields)) {
+        if (v) state[k] = v;
+      }
+
+      // Fallback heuristics for numbers & positional sequential inputs (as per rules_md)
+      if (hasActiveSession) {
+        // 1. Check positional multi-line / comma input if multiple missing fields exist
+        if (missingBeforeTurn.length > 0) {
+          const parts = incomingText
+            .split(/[\n,;/]+/)
+            .map(p => p.trim())
+            .filter(p => p.length > 0);
+
+          if (parts.length > 1 || (parts.length === 1 && missingBeforeTurn.length === 1)) {
+            for (let i = 0; i < parts.length && i < missingBeforeTurn.length; i++) {
+              const field = missingBeforeTurn[i];
+              const val = parts[i];
+              if (!state[field]) {
+                if (field === 'km' || field === 'price') {
+                  const digits = val.replace(/\D/g, '');
+                  if (parseInt(digits, 10) > 0) {
+                    let num = digits;
+                    if (val.includes('אלף') && parseInt(num, 10) < 1000) {
+                      num = String(parseInt(num, 10) * 1000);
+                    }
+                    state[field] = num;
+                  }
+                } else if (field === 'hand') {
+                  state[field] = normalizeHand(val);
+                } else if (field === 'color') {
+                  state[field] = val;
+                } else if (field === 'vehicle_condition') {
+                  state[field] = val;
+                }
+              }
+            }
+          }
+        }
+
+        // 2. Individual regex patterns for explicit labels
+        if (!state.km) {
+          const kmMatch = incomingText.match(/\b(\d{1,3}(?:,\d{3})+|\d{4,6})\s*(?:ק"?מ|קילומטר)?\b/);
+          if (kmMatch && kmMatch[1] !== state.license_plate) {
+            state.km = kmMatch[1].replace(/,/g, '');
+          }
+        }
+        if (!state.price) {
+          const priceMatch = incomingText.match(/\b(?:מחיר|ב-?|סך)\s*(\d{2,6})\b|\b(\d{2,6})\s*(?:ש"ח|שח|שקל|אלף)\b/);
+          if (priceMatch) {
+            let p = priceMatch[1] || priceMatch[2];
+            if (incomingText.includes('אלף') && parseInt(p, 10) < 1000) {
+              p = String(parseInt(p, 10) * 1000);
+            }
+            state.price = p;
+          }
+        }
+        if (!state.hand) {
+          const handMatch = incomingText.match(/\bיד\s*(\d+|ראשונה|שנייה|שניה|שלישית|רביעית)\b/);
+          if (handMatch) {
+            state.hand = normalizeHand(handMatch[1]);
+          }
+        }
+      }
+
+      const missing = hasActiveSession ? getMissingFields(state) : ['license_plate'];
+      const errors = hasActiveSession ? validateValues(state) : [];
+      const allFilled = hasActiveSession && missing.length === 0 && errors.length === 0;
+      const isReady = allFilled && imageCount > 0;
+
+      const finalReply = (aiReply && aiReply.trim())
+        ? aiReply.trim()
+        : composeFallbackHebrewReply(state, missing, errors, isFirstTurn, imageCount);
+
+      return res.status(200).json({
+        ok: true,
+        vehicleData: state,
+        botReply: finalReply,
+        isReadyToPublish: isReady,
+        allDataFilled: allFilled,
+        isAllFieldsFilled: allFilled,
+        missingFields: missing,
+        validationErrors: errors
+      });
+    }
+
+    return res.status(400).json({ ok: false, error: 'unknown_action' });
+  } catch (err) {
+    console.error('remoteValidation endpoint error:', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+}
+
+// Export for Firebase Functions V2 (me-west1 region)
+exports.whatsappGatekeeper = onRequest({ region: 'me-west1', cors: true, timeoutSeconds: 60, memory: '512MiB' }, handleWhatsappGatekeeper);
+exports.remoteValidation = onRequest({ region: 'me-west1', cors: true, timeoutSeconds: 60, memory: '512MiB' }, handleRemoteValidation);
+
+// Also register with @google-cloud/functions-framework if started directly
+if (typeof functions.http === 'function') {
+  try {
+    functions.http('whatsappGatekeeper', handleWhatsappGatekeeper);
+    functions.http('remoteValidation', handleRemoteValidation);
+  } catch (_) { }
+}
+

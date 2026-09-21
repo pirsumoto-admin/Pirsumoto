@@ -5,9 +5,11 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
-import '../../services/whatsapp_text_validation_service.dart';
+// [WHATSAPP-DISABLED] WhatsApp text validation import disabled in facebook_screen.
+// import '../../services/whatsapp_text_validation_service.dart';
 import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
+import '../../remote_control/firebase_chat_receiver.dart';
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Create Vehicle Listing Screen
@@ -40,14 +42,15 @@ const _kDesktopUserAgent =
 // ---------------------------------------------------------------------------
 class FacebookScreen extends StatefulWidget {
   final VehiclePublishData? publishData;
-  final bool startedFromWhatsApp;
-  final String? whatsAppSenderKey;
+  // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey disabled.
+  // final bool startedFromWhatsApp;
+  // final String? whatsAppSenderKey;
 
   const FacebookScreen({
     super.key,
     this.publishData,
-    this.startedFromWhatsApp = false,
-    this.whatsAppSenderKey,
+    // this.startedFromWhatsApp = false,
+    // this.whatsAppSenderKey,
   });
 
   @override
@@ -158,6 +161,10 @@ class _FacebookScreenState extends State<FacebookScreen> {
         });
       },
       onPhaseError: (phase, error) {
+        FirebaseChatReceiver.reportAutomationStatus(
+          statusType: 'stuck',
+          text: '⚠️ האוטומציה בפייסבוק נתקעה בשלב "${phase.descriptionHe}": $error',
+        );
         if (!mounted) return;
         setState(() {
           _isPaused = true;
@@ -165,31 +172,23 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _statusMessage = 'שגיאה: $error';
         });
 
-        if (widget.whatsAppSenderKey != null &&
-            widget.whatsAppSenderKey!.trim().isNotEmpty) {
-          final senderKey = widget.whatsAppSenderKey!.trim();
-          final bool isP2p = senderKey.startsWith('p2p_');
-          final String remoteNotice = isP2p
-              ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
-              : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
-
-          unawaited(
-            WhatsAppTextValidationService.dispatchReplyToSender(
-              senderKey: senderKey,
-              message:
-                  '⚠️ אוטומציית פייסבוק נעצרה בשלב: ${phase.descriptionHe}\n'
-                  'שגיאה: $error\n\n'
-                  '$remoteNotice',
-            ),
-          );
-        }
-
         // After 5s collapse the error text and show controls
         Future.delayed(const Duration(seconds: 5), () {
           if (mounted) setState(() => _statusMessage = '');
         });
       },
       onAutomationComplete: (success) {
+        if (success) {
+          FirebaseChatReceiver.reportAutomationStatus(
+            statusType: 'finished',
+            text: '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!',
+          );
+        } else {
+          FirebaseChatReceiver.reportAutomationStatus(
+            statusType: 'stuck',
+            text: '⚠️ האוטומציה בפייסבוק נכשלה',
+          );
+        }
         if (!mounted) return;
         setState(() {
           _isComplete = true;
@@ -206,43 +205,14 @@ class _FacebookScreenState extends State<FacebookScreen> {
             ),
           );
         }
-
-        if (widget.whatsAppSenderKey != null &&
-            widget.whatsAppSenderKey!.trim().isNotEmpty) {
-          final senderKey = widget.whatsAppSenderKey!.trim();
-          if (success) {
-            unawaited(
-              WhatsAppTextValidationService.dispatchReplyToSender(
-                senderKey: senderKey,
-                message:
-                    'פרסום המודעה בפייסבוק מרקטפלייס הושלם בהצלחה! 🚗💨\n'
-                    'המודעה פורסמה בהצלחה גם ביד2 וגם בפייסבוק.',
-              ),
-            );
-            unawaited(
-              WhatsAppTextValidationService.instance.clearSenderState(
-                senderKey,
-              ),
-            );
-          } else {
-            final bool isP2p = senderKey.startsWith('p2p_');
-            final String remoteNotice = isP2p
-                ? 'נא לבדוק את מסך השליטה מרחוק (Remote Control) להשלמת הפעולה.'
-                : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) לבדיקת המצב.';
-            unawaited(
-              WhatsAppTextValidationService.dispatchReplyToSender(
-                senderKey: senderKey,
-                message:
-                    '⚠️ פרסום המודעה בפייסבוק מרקטפלייס נכשל.\n'
-                    '$remoteNotice',
-              ),
-            );
-          }
-        }
       },
     );
 
     setState(() => _statusMessage = 'מתחיל אוטומציה...');
+    FirebaseChatReceiver.reportAutomationStatus(
+      statusType: 'step',
+      text: '🚀 מתחיל פרסום בפייסבוק מרקטפלייס...',
+    );
     _service!.startAutomation();
   }
 
@@ -371,12 +341,20 @@ class _FacebookScreenState extends State<FacebookScreen> {
                       _isPaused = false;
                       _statusMessage = 'ממשיך אוטומציה...';
                     });
+                    FirebaseChatReceiver.reportAutomationStatus(
+                      statusType: 'step',
+                      text: '▶️ ממשיך אוטומציה בפייסבוק...',
+                    );
                   } else {
                     _service?.pauseAutomation();
                     setState(() {
                       _isPaused = true;
                       _statusMessage = 'אוטומציה מושהית — לחץ המשך';
                     });
+                    FirebaseChatReceiver.reportAutomationStatus(
+                      statusType: 'stopped',
+                      text: '🛑 האוטומציה בפייסבוק הופסקה (הושהתה) על ידי המשתמש',
+                    );
                   }
                 },
                 child: Row(

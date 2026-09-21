@@ -6,12 +6,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import '../services/p2p_auto_publish_launcher.dart';
 import '../services/whatsapp_text_validation_service.dart';
 
 class FirebaseChatReceiver {
-  static const String _whisperApiKey =
-      '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';
-
   final FirebaseFirestore _firestore;
   final String deviceId;
 
@@ -19,10 +17,48 @@ class FirebaseChatReceiver {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _messagesSub;
   final Set<String> _processingMessageIds = {};
 
+  /// Concurrency guard on worker side: only 1 publication at a time
+  static bool isPublishingActive = false;
+
+  static String? currentSessionId;
+  static String? currentDeviceId;
+
+  static Future<void> reportAutomationStatus({
+    required String statusType,
+    required String text,
+    String? sessionId,
+    String? deviceId,
+  }) async {
+    final targetSessionId = sessionId ?? currentSessionId;
+    final targetDeviceId = deviceId ?? currentDeviceId ?? 'mdm_device_01';
+    try {
+      final docId = 'status_${DateTime.now().millisecondsSinceEpoch}';
+      await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(targetDeviceId)
+          .collection('messages')
+          .doc(docId)
+          .set({
+        'id': docId,
+        'sessionId': targetSessionId,
+        'sender': 'bot',
+        'type': 'status',
+        'statusType': statusType,
+        'text': text,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      debugPrint('[FirebaseChatReceiver] Automation status sent: $text (session: $targetSessionId)');
+    } catch (e) {
+      debugPrint('[FirebaseChatReceiver] Error reporting automation status: $e');
+    }
+  }
+
   FirebaseChatReceiver({
     FirebaseFirestore? firestore,
     required this.deviceId,
   }) : _firestore = firestore ?? FirebaseFirestore.instance {
+    currentDeviceId = deviceId;
     p2pSenderKey = 'p2p_$deviceId';
     _registerReplyHandlers();
   }
@@ -96,67 +132,42 @@ class FirebaseChatReceiver {
       final text = data['text'] as String? ?? '';
       final mediaType = data['mediaType'] as String?;
       final fileName = data['fileName'] as String? ?? 'media_file';
-      final caption = data['caption'] as String?;
-      final senderName = data['senderName'] as String? ?? 'Remote User';
-      final timestamp = data['timestamp'] as int? ?? DateTime.now().millisecondsSinceEpoch;
+      final sessionId = data['sessionId'] as String?;
+      final type = data['type'] as String? ?? 'message';
+
+      final sessionKey = sessionId != null && sessionId.isNotEmpty 
+          ? '${p2pSenderKey}_$sessionId' 
+          : p2pSenderKey;
 
       debugPrint(
-        '[FirebaseChatReceiver] Processing message $messageId: type=$mediaType, text="$text"',
+        '[FirebaseChatReceiver] Processing message $messageId: type=$type, mediaType=$mediaType, text="$text"',
       );
 
-      if (mediaType == 'audio') {
-        await _sendStatusMessage(
-          statusType: 'transcribing',
-          text: 'מפענח הודעה קולית (Whisper)...',
-        );
-
+      // 1. Direct publish command from Remote Control ("The Brain")
+      if (type == 'publish_vehicle') {
+        currentSessionId = sessionId;
+        currentDeviceId = deviceId;
+        await _handleDirectPublishVehicle(doc, sessionId);
+      } else if (mediaType == 'audio') {
+        // Save media file if present without triggering legacy validation greetings
         final bytes = await _resolveMediaBytes(doc);
-        if (bytes == null || bytes.isEmpty) {
-          await _sendStatusMessage(
-            statusType: 'error',
-            text: 'שגיאה בקריאת קובץ השמע',
+        if (bytes != null && bytes.isNotEmpty) {
+          await _saveBytesToMediaFile(
+            bytes: bytes,
+            fileName: fileName,
+            ext: 'm4a',
           );
-          return;
         }
-
-        final file = await _saveBytesToMediaFile(
-          bytes: bytes,
-          fileName: fileName,
-          ext: 'm4a',
-        );
-
-        await _processIncomingAudio(
-          file: file,
-          timestamp: timestamp,
-          senderName: senderName,
-        );
       } else if (mediaType == 'image') {
-        await _sendStatusMessage(
-          statusType: 'validating',
-          text: 'רושם תמונה במערכת...',
-        );
-
+        // Save image locally so it is ready for publication without triggering validation greeting loops
         final bytes = await _resolveMediaBytes(doc);
-        if (bytes == null || bytes.isEmpty) {
-          await _sendStatusMessage(
-            statusType: 'error',
-            text: 'שגיאה בשמירת התמונה',
+        if (bytes != null && bytes.isNotEmpty) {
+          await _saveBytesToMediaFile(
+            bytes: bytes,
+            fileName: fileName,
+            ext: 'jpg',
           );
-          return;
         }
-
-        final file = await _saveBytesToMediaFile(
-          bytes: bytes,
-          fileName: fileName,
-          ext: 'jpg',
-        );
-
-        await _processIncomingImage(
-          file: file,
-          caption: caption,
-          timestamp: timestamp,
-          senderName: senderName,
-        );
       } else if (mediaType == 'video') {
         final bytes = await _resolveMediaBytes(doc);
         if (bytes != null && bytes.isNotEmpty) {
@@ -165,34 +176,22 @@ class FirebaseChatReceiver {
             fileName: fileName,
             ext: 'mp4',
           );
-          await _sendStatusMessage(
-            statusType: 'done',
-            text: 'סרטון וידאו התקבל ונשמר בהצלחה ($fileName)',
-          );
         }
       } else {
         // Plain text message or reset command
         final trimmed = text.trim();
-        final type = data['type'] as String? ?? 'message';
-        if (type == 'reset' || trimmed == 'ביטול' || trimmed == 'לבטל') {
-          debugPrint('[FirebaseChatReceiver] Resetting sender state for $p2pSenderKey');
+        if (type == 'delete_session') {
+          debugPrint('[FirebaseChatReceiver] Deleting session state for $sessionKey');
+          isPublishingActive = false;
+          WhatsAppTextValidationService.instance.stopAutomation();
+          await WhatsAppTextValidationService.instance.clearSenderState(sessionKey);
+          await WhatsAppTextValidationService.instance.clearLastVehicle(sessionKey);
+        } else if (type == 'reset' || trimmed == 'ביטול' || trimmed == 'לבטל') {
+          debugPrint('[FirebaseChatReceiver] Resetting sender state for $sessionKey');
+          isPublishingActive = false;
+          WhatsAppTextValidationService.instance.stopAutomation();
+          await WhatsAppTextValidationService.instance.clearSenderState(sessionKey);
           await WhatsAppTextValidationService.instance.clearSenderState(p2pSenderKey);
-          await WhatsAppTextValidationService.instance.clearSenderState('p2p_$deviceId');
-          await _sendStatusMessage(
-            statusType: 'idle',
-            text: 'הסשן אופס בהצלחה. שלח מספר רישוי להתחלת פרסום חדש.',
-          );
-        } else if (trimmed.isNotEmpty) {
-          final updatedState = await WhatsAppTextValidationService.instance
-              .handleIncomingTextMessage(
-            text: trimmed,
-            senderKey: p2pSenderKey,
-            senderName: senderName,
-            timestamp: timestamp,
-          );
-          debugPrint(
-            '[FirebaseChatReceiver] Handled text for $messageId, session_status: ${updatedState?['session_status']}',
-          );
         }
       }
 
@@ -213,6 +212,91 @@ class FirebaseChatReceiver {
       } catch (_) {}
     } finally {
       _processingMessageIds.remove(messageId);
+    }
+  }
+
+  Future<void> _handleDirectPublishVehicle(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+    String? sessionId,
+  ) async {
+    final data = doc.data();
+    if (data == null) return;
+
+    if (isPublishingActive) {
+      debugPrint('[FirebaseChatReceiver] Rejecting publish: worker already busy');
+      await _sendStatusMessage(
+        statusType: 'busy',
+        text: 'המכשיר כרגע מבצע פרסום אחר ביד2. הבקשה נדחתה כדי למנוע התנגשות.',
+        sessionId: sessionId,
+      );
+      return;
+    }
+
+    isPublishingActive = true;
+    try {
+      final rawVehicleData = data['vehicleData'] as Map<String, dynamic>? ?? {};
+      final vehicleData = rawVehicleData.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
+      final imageDocIds = (data['imageDocIds'] as List?)?.map((e) => e.toString()).toList() ?? [];
+
+      final plate = vehicleData['license_plate'] ?? vehicleData['license'] ?? 'ללא לוחית';
+      final carTitle = [vehicleData['maker'] ?? '', vehicleData['model'] ?? '', vehicleData['year'] ?? '']
+          .where((s) => s.isNotEmpty)
+          .join(' ');
+
+      await _sendStatusMessage(
+        statusType: 'publishing',
+        text: 'מתחיל פרסום ביד2 עבור $carTitle (רישוי $plate)...',
+        sessionId: sessionId,
+      );
+
+      // Download / fetch uploaded images from Firestore if doc IDs are provided
+      final localImagePaths = <String>[];
+      for (final docId in imageDocIds) {
+        try {
+          final imgDoc = await _messagesCollection.doc(docId).get();
+          if (imgDoc.exists) {
+            final bytes = await _resolveMediaBytes(imgDoc);
+            if (bytes != null && bytes.isNotEmpty) {
+              final fileName = imgDoc.data()?['fileName'] as String? ?? 'img_$docId.jpg';
+              final file = await _saveBytesToMediaFile(bytes: bytes, fileName: fileName, ext: 'jpg');
+              localImagePaths.add(file.path);
+            }
+          }
+        } catch (e) {
+          debugPrint('[FirebaseChatReceiver] Error resolving publication image doc $docId: $e');
+        }
+      }
+
+      if (localImagePaths.isNotEmpty) {
+        vehicleData['image_paths'] = jsonEncode(localImagePaths);
+        vehicleData['KEY_IMAGE_PATHS'] = jsonEncode(localImagePaths);
+      }
+
+      debugPrint('[FirebaseChatReceiver] Launching Yad2 publication with ${localImagePaths.length} images for $plate');
+      final launched = await P2PAutoPublishLauncher.launch(vehicleData);
+
+      if (launched) {
+        await _sendStatusMessage(
+          statusType: 'step',
+          text: 'אוטומציית יד2 נפתחה בהצלחה וממלאת את הטופס...',
+          sessionId: sessionId,
+        );
+      } else {
+        await _sendStatusMessage(
+          statusType: 'error',
+          text: 'שגיאה בפתיחת מסך הפרסום של יד2.',
+          sessionId: sessionId,
+        );
+        isPublishingActive = false;
+      }
+    } catch (e, st) {
+      debugPrint('[FirebaseChatReceiver] Exception during direct publish: $e\n$st');
+      await _sendStatusMessage(
+        statusType: 'error',
+        text: 'שגיאה לא צפויה בעת הרצת הפרסום: $e',
+        sessionId: sessionId,
+      );
+      isPublishingActive = false;
     }
   }
 
@@ -300,105 +384,22 @@ class FirebaseChatReceiver {
     return file;
   }
 
-  Future<void> _processIncomingAudio({
-    required File file,
-    required int timestamp,
-    required String senderName,
-  }) async {
-    String? transcript;
-    try {
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse('https://api.openai.com/v1/audio/transcriptions'),
-      );
-      request.headers['Authorization'] = 'Bearer $_whisperApiKey';
-      request.fields['model'] = 'whisper-1';
-      request.fields['language'] = 'he';
-      request.fields['prompt'] =
-          'מספר רכב בישראל (7 או 8 ספרות): 51-116-39, 12-345-67, 123-45-678. שלושים ותשע = 39 (ולא 309), חמישים ואחת = 51 (ולא 501). מאזדה, טויוטה, יונדאי, שנת, יד, קילומטראז, מחיר, צבע, פרסום ביד2 ללא נקודות.';
-      request.files.add(await http.MultipartFile.fromPath('file', file.path));
 
-      final response = await request.send().timeout(const Duration(seconds: 30));
-      final respStr = await response.stream.bytesToString();
-
-      if (response.statusCode == 200) {
-        final resData = jsonDecode(respStr) as Map<String, dynamic>;
-        transcript = resData['text'] as String?;
-      } else {
-        debugPrint(
-          '[FirebaseChatReceiver] Whisper failed with code ${response.statusCode}: $respStr',
-        );
-      }
-    } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Whisper transcription error: $e');
-    }
-
-    final rawTranscript = transcript?.trim() ?? '';
-    final cleanText = WhatsAppTextValidationService.instance
-        .normalizeTranscribedPlateText(rawTranscript);
-    final hasLetters = RegExp(r'[\p{L}\p{N}]', unicode: true).hasMatch(cleanText);
-
-    if (cleanText.isNotEmpty && hasLetters) {
-      debugPrint('[FirebaseChatReceiver] Audio transcribed: "$cleanText" (raw: "$rawTranscript")');
-
-      await _sendStatusMessage(
-        statusType: 'validating',
-        text: 'פוענח קולית: "$cleanText"',
-      );
-
-      await WhatsAppTextValidationService.instance.handleIncomingTextMessage(
-        text: cleanText,
-        senderKey: p2pSenderKey,
-        senderName: '$senderName (Voice)',
-        timestamp: timestamp,
-      );
-    } else {
-      await _sendStatusMessage(
-        statusType: 'error',
-        text: 'לא נקלט דיבור ברור בהקלטה. אנא נסו להקליט שוב או לשלוח כטקסט.',
-      );
-    }
-  }
-
-  Future<void> _processIncomingImage({
-    required File file,
-    String? caption,
-    required int timestamp,
-    required String senderName,
-  }) async {
-    try {
-      await WhatsAppTextValidationService.instance.handleIncomingImage(
-        imageFilePath: file.path,
-        senderKey: p2pSenderKey,
-        senderName: senderName,
-        timestamp: timestamp,
-      );
-
-      if (caption != null && caption.trim().isNotEmpty) {
-        await WhatsAppTextValidationService.instance.handleIncomingTextMessage(
-          text: caption.trim(),
-          senderKey: p2pSenderKey,
-          senderName: senderName,
-          timestamp: timestamp,
-        );
-      }
-    } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Error handling image: $e');
-      await _sendStatusMessage(
-        statusType: 'error',
-        text: 'שגיאה ברישום התמונה: $e',
-      );
-    }
-  }
 
   Future<bool> _handleValidationReply({
     required String senderKey,
     required String message,
   }) async {
     try {
+      String? sessionId;
+      if (senderKey.startsWith('${p2pSenderKey}_')) {
+        sessionId = senderKey.substring(p2pSenderKey.length + 1);
+      }
+
       final docId = 'reply_${DateTime.now().millisecondsSinceEpoch}';
       await _messagesCollection.doc(docId).set({
         'id': docId,
+        'sessionId': sessionId,
         'sender': 'bot',
         'type': 'reply',
         'text': message,
@@ -421,7 +422,7 @@ class FirebaseChatReceiver {
         statusType: 'publishing',
         text: 'הפרסום האוטומטי מתחיל כעת! פותח את יד2...',
       );
-      return true;
+      return false;
     } catch (e) {
       debugPrint('[FirebaseChatReceiver] Error sending auto-publish status: $e');
       return false;
@@ -431,11 +432,13 @@ class FirebaseChatReceiver {
   Future<void> _sendStatusMessage({
     required String statusType,
     required String text,
+    String? sessionId,
   }) async {
     try {
       final docId = 'status_${DateTime.now().millisecondsSinceEpoch}';
       await _messagesCollection.doc(docId).set({
         'id': docId,
+        'sessionId': sessionId,
         'sender': 'bot',
         'type': 'status',
         'statusType': statusType,

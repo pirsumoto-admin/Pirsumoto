@@ -1,3 +1,13 @@
+// =============================================================================
+// [WHATSAPP-DISABLED] WhatsApp Message Bridge Service
+// =============================================================================
+// This file implements the Dart-side interface to the Android WhatsApp bridge
+// (MethodChannel + EventChannel). It is NO LONGER USED by the main Pirsumoto
+// app. All call sites in main.dart and home_screen.dart have been commented out.
+//
+// The file is preserved for reference and potential re-activation.
+// The companion Kotlin class is WhatsAppBridge.kt (WhatsAppBridgeController).
+// =============================================================================
 import 'dart:async';
 import 'dart:io';
 

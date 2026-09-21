@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_chat_receiver.dart';
 import 'remote_session_manager.dart';
@@ -62,6 +64,17 @@ class RemoteControlReceiverService {
       await _manager!.startListening();
       _isInitialized = true;
       debugPrint('[RemoteControlReceiver] Initialized receiver and Firebase chat listener for device: $_deviceId');
+
+      // Start persistent Android Foreground Daemon so the process stays alive 24/7
+      if (Platform.isAndroid) {
+        try {
+          const MethodChannel('com.pirsumoto/accessibility')
+              .invokeMethod('startDaemonService');
+          debugPrint('[RemoteControlReceiver] Started persistent Android foreground daemon');
+        } catch (e) {
+          debugPrint('[RemoteControlReceiver] Error starting daemon service: $e');
+        }
+      }
     } catch (e) {
       debugPrint('[RemoteControlReceiver] Failed to initialize: $e');
     }

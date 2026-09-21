@@ -1,5 +1,21 @@
 package com.pirsumoto.app
 
+// =============================================================================
+// [WHATSAPP-DISABLED] WhatsApp Bridge (Kotlin)
+// =============================================================================
+// This file contains the Android-side WhatsApp integration:
+//   - WhatsAppBridgeController  : MethodChannel handler (called from Dart)
+//   - WhatsAppBridgeEvents       : EventChannel sink (pushes events to Dart)
+//   - WhatsAppDaemonService      : Foreground service watching WhatsApp media files
+//   - WhatsAppNotificationListenerService : Intercepts WhatsApp notifications
+//   - WhatsAppBootReceiver        : Restarts the daemon on boot
+//   - WhatsAppAutoPublishStore    : Persists auto-publish vehicle data
+//
+// The entire bridge is NO LONGER ACTIVATED by the main app.
+// MainActivity.kt no longer registers the MethodChannel or EventChannel.
+// The file is preserved for reference and potential re-activation.
+// =============================================================================
+
 import android.app.Activity
 import android.app.AppOpsManager
 import android.app.Notification

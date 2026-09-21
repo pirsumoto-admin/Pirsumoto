@@ -18,6 +18,7 @@ import 'chat_sessions_list_screen.dart';
 import 'chat_session_manager.dart';
 import '../database/sqlite_database_helper.dart';
 import '../services/remote_llm_service.dart';
+import '../services/remote_validation_service.dart';
 
 enum ChatSender { user, bot }
 
@@ -155,18 +156,51 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   
   late final String _sessionId;
   String _currentLicensePlate = '';
+  bool _allDataFilled = false;
+  bool _isPublicationActive = false;
 
   @override
   void initState() {
     super.initState();
+    final isNewSession = widget.sessionId == null;
     _sessionId = widget.sessionId ?? DateTime.now().millisecondsSinceEpoch.toString();
     WhatsAppChatScreen.currentActiveDeviceId = widget.deviceId;
     _deviceStatusStream = FirebaseFirestore.instance
         .collection('remote_control_devices')
         .doc(widget.deviceId)
         .snapshots(includeMetadataChanges: true);
-    _listenToSessionEvents();
+        
+    if (isNewSession) {
+      _initNewSession();
+    } else {
+      _initExistingSession();
+    }
     _initAudioPlayerListeners();
+  }
+
+  Future<void> _initExistingSession() async {
+    await _loadMessagesFromPrefs();
+    
+    // Only listen to live Firestore events if this session is running.
+    // Otherwise, we'd pull the currently active session's messages into an old/waiting session.
+    final session = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+    if (session != null) {
+      final v = session.vehicleData;
+      if (session.isReadyToPublish || (v['license_plate']?.isNotEmpty == true && v['km']?.isNotEmpty == true && v['price']?.isNotEmpty == true && v['hand']?.isNotEmpty == true)) {
+        if (mounted) {
+          setState(() {
+            _allDataFilled = true;
+          });
+        }
+      }
+    }
+    if (session == null || session.status == ChatSessionStatus.running) {
+      _listenToSessionEvents();
+    }
+  }
+
+  Future<void> _initNewSession() async {
+    _listenToSessionEvents();
     _loadMessagesFromPrefs();
   }
 
@@ -308,6 +342,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             .doc(messageId)
             .set({
               'id': messageId,
+              'sessionId': _sessionId,
               'sender': 'user',
               'type': 'reset',
               'text': '',
@@ -365,12 +400,26 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           final sender = data['sender'] as String? ?? '';
           final type = data['type'] as String? ?? 'message';
 
-          if (type == 'status' || type == 'reset') continue;
+          final msgSessionId = data['sessionId'] as String?;
+          if (msgSessionId != null && msgSessionId.isNotEmpty && msgSessionId != _sessionId) {
+            continue;
+          }
+
+          if (type == 'reset' || type == 'delete_session' || type == 'publish_vehicle') continue;
 
           final text = (data['text'] as String? ?? '').trim();
-          if (text.contains('תהליך הפרסום בוטל והסשן נסגר')) continue;
+          if (text.isEmpty || text.contains('תהליך הפרסום בוטל והסשן נסגר')) continue;
+          
+          if (type == 'status') {
+            final statusType = data['statusType'] as String?;
+            if (statusType == 'started') {
+              _isPublicationActive = true;
+            } else if (statusType == 'finished' || statusType == 'stopped' || statusType == 'stuck') {
+              _isPublicationActive = false;
+            }
+          }
 
-          if (sender == 'bot' || sender == 'user') {
+          if (sender == 'bot' || sender == 'user' || type == 'status' || type == 'reply') {
             final ts =
                 data['timestamp'] as int? ??
                 DateTime.now().millisecondsSinceEpoch;
@@ -379,7 +428,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 _messages.clear();
               }
               _messages.add(
-                ChatMessageItem.fromJson({...data, 'id': id, 'timestamp': ts}),
+                ChatMessageItem.fromJson({
+                  ...data,
+                  'id': id,
+                  'timestamp': ts,
+                  'sender': sender.isNotEmpty ? sender : 'bot',
+                }),
               );
               hasChanges = true;
             }
@@ -444,14 +498,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         currentSession.status = ChatSessionStatus.done;
         await ChatSessionManager.saveSession(currentSession);
         
-        // Find next waiting session
-        final nextSession = await ChatSessionManager.getNextWaitingSession(widget.deviceId);
+        // Find next waiting session and start its publication
+        final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
+          widget.deviceId,
+          session: widget.session,
+        );
         if (nextSession != null && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('פרסום הושלם! עובר לרכב הבא בתור...'),
+            SnackBar(
+              content: Text('פרסום הושלם! עובר לרכב הבא בתור (${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id})...'),
               backgroundColor: AppColors.success,
-              duration: Duration(seconds: 2),
+              duration: const Duration(seconds: 2),
             ),
           );
           
@@ -472,6 +529,76 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         }
       }
     }
+  }
+
+  /// Called when user taps "פרסם עכשיו".
+  /// If another session is already running, queues this session and shows a notice;
+  /// otherwise sends the complete vehicle payload directly to start publication on the worker.
+  Future<void> _onPublishTapped() async {
+    final existing = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+    final vehicleData = existing?.vehicleData ?? {};
+    final plate = _currentLicensePlate.isNotEmpty
+        ? _currentLicensePlate
+        : (existing?.licensePlate ?? '');
+
+    // 1. Check for an active running session that is not this one
+    final allSessions = await ChatSessionManager.getSessions(widget.deviceId);
+    final otherRunning = allSessions.where(
+      (s) => s.id != _sessionId && s.status == ChatSessionStatus.running,
+    ).toList();
+
+    if (otherRunning.isNotEmpty) {
+      // Queue this session – mark as waiting so _checkAndHandleSessionCompletion picks it up
+      await ChatSessionManager.saveSession(ChatSession(
+        id: _sessionId,
+        deviceId: widget.deviceId,
+        licensePlate: plate,
+        startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
+        status: ChatSessionStatus.waiting,
+        lastMessage: 'ממתין בתור לפרסום',
+        vehicleData: vehicleData,
+        imagePaths: existing?.imagePaths ?? [],
+        isReadyToPublish: existing?.isReadyToPublish ?? false,
+      ));
+
+      // Show an in-chat notice bubble so the user understands what happened
+      final noticeId = 'queue_notice_${DateTime.now().millisecondsSinceEpoch}';
+      final noticeMsg = ChatMessageItem(
+        id: noticeId,
+        sender: ChatSender.bot,
+        text: '⏳ יש כרגע פרסום פעיל לרכב אחר במכשיר העובד.\n'
+            'הפרסום שלך נוסף לתור ויתחיל אוטומטית כשהסשן הנוכחי יסתיים.\n'
+            'אין צורך לעשות דבר נוסף.',
+        timestamp: DateTime.now(),
+      );
+      if (mounted) {
+        setState(() => _messages.add(noticeMsg));
+        _scrollToBottom();
+      }
+      _saveMessagesToPrefs();
+      return;
+    }
+
+    // 2. Start publication directly on worker - worker will send real status back
+    final targetSession = existing ?? ChatSession(
+      id: _sessionId,
+      deviceId: widget.deviceId,
+      licensePlate: plate,
+      startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
+      status: ChatSessionStatus.running,
+      lastMessage: 'בתהליך פרסום',
+      vehicleData: vehicleData,
+      imagePaths: existing?.imagePaths ?? [],
+      isReadyToPublish: existing?.isReadyToPublish ?? true,
+    );
+    targetSession.status = ChatSessionStatus.running;
+    await ChatSessionManager.saveSession(targetSession);
+
+    await ChatSessionManager.startPublication(
+      widget.deviceId,
+      targetSession,
+      session: widget.session,
+    );
   }
 
   void _initAudioPlayerListeners() {
@@ -531,120 +658,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   // --- Sending Actions ---
 
-  Future<void> _sendMediaFileToFirebase({
-    required File file,
-    required String mediaType,
-    required ChatMessageItem msgItem,
-    String? caption,
-  }) async {
-    try {
-      final bytes = await file.readAsBytes();
-      final msgRef = FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(widget.deviceId)
-          .collection('messages')
-          .doc(msgItem.id);
-
-      const int maxSingleDocSize =
-          750 * 1024; // 750 KB safe limit for single doc
-      const int chunkSize = 400 * 1024; // 400 KB per chunk document
-
-      if (bytes.length <= maxSingleDocSize) {
-        // --- Path 1: Single document with native Blob (0% overhead, raw bytes) ---
-        if (mounted) {
-          setState(() => msgItem.uploadProgress = 0.6);
-        }
-
-        await msgRef.set({
-          'id': msgItem.id,
-          'sender': 'user',
-          'senderName': 'Remote User',
-          'text': caption ?? '',
-          'mediaType': mediaType,
-          'mediaBlob': Blob(bytes),
-          'fileName': file.uri.pathSegments.last,
-          'caption': caption,
-          'type': 'media',
-          'status': 'pending',
-          'totalChunks': 1,
-          'fileSize': bytes.length,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      } else {
-        // --- Path 2: File > 750KB: Use Subcollection Chunks with native Blob ---
-        final totalChunks = (bytes.length / chunkSize).ceil();
-        debugPrint(
-          '[WhatsAppChat] File size ${bytes.length} bytes exceeds 750KB. Uploading in $totalChunks chunks...',
-        );
-
-        // Write parent message first with status: uploading_chunks
-        await msgRef.set({
-          'id': msgItem.id,
-          'sender': 'user',
-          'senderName': 'Remote User',
-          'text': caption ?? '',
-          'mediaType': mediaType,
-          'fileName': file.uri.pathSegments.last,
-          'caption': caption,
-          'type': 'media',
-          'status': 'uploading_chunks',
-          'totalChunks': totalChunks,
-          'fileSize': bytes.length,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-
-        // Write each chunk with its own Blob
-        for (int i = 0; i < totalChunks; i++) {
-          final start = i * chunkSize;
-          final end =
-              (start + chunkSize < bytes.length)
-                  ? start + chunkSize
-                  : bytes.length;
-          final chunkBytes = bytes.sublist(start, end);
-
-          await msgRef.collection('chunks').doc('$i').set({
-            'chunkIndex': i,
-            'totalChunks': totalChunks,
-            'blob': Blob(chunkBytes),
-            'createdAt': FieldValue.serverTimestamp(),
-          });
-
-          if (mounted) {
-            setState(() {
-              msgItem.uploadProgress = (i + 1) / (totalChunks + 1);
-            });
-          }
-        }
-
-        // Mark parent message as pending now that all chunks are uploaded
-        await msgRef.update({'status': 'pending'});
-      }
-
-      if (mounted) {
-        setState(() {
-          msgItem.uploadProgress = 1.0;
-          msgItem.isUploading = false;
-        });
-        _saveMessagesToPrefs();
-      }
-    } catch (e) {
-      debugPrint('[WhatsAppChat] Error sending media: $e');
-      if (mounted) {
-        setState(() {
-          msgItem.isUploading = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('שגיאה בשליחת קובץ: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
-  }
-
   void _sendTextMessage([String? presetText]) async {
     final text = (presetText ?? _textController.text).trim();
     if (text.isEmpty) return;
@@ -653,9 +666,73 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _textController.clear();
     }
 
-    final messageId = 'msg_${DateTime.now().millisecondsSinceEpoch}';
+    // 1. If user typed 'ביטול' or 'לבטל'
+    if (text == 'ביטול' || text == 'לבטל') {
+      final userMessage = ChatMessageItem(
+        id: 'msg_${DateTime.now().millisecondsSinceEpoch}',
+        sender: ChatSender.user,
+        text: text,
+        timestamp: DateTime.now(),
+      );
+      final botMessage = ChatMessageItem(
+        id: 'bot_${DateTime.now().millisecondsSinceEpoch}',
+        sender: ChatSender.bot,
+        text: 'תהליך הפרסום בוטל והסשן נסגר.',
+        timestamp: DateTime.now(),
+      );
+      setState(() {
+        _messages.add(userMessage);
+        _messages.add(botMessage);
+      });
+      _scrollToBottom();
+      _saveMessagesToPrefs();
+
+      final currentSession = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+      if (currentSession != null) {
+        currentSession.status = ChatSessionStatus.done;
+        currentSession.lastMessage = 'הפרסום בוטל';
+        await ChatSessionManager.saveSession(currentSession);
+      }
+      
+      final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
+        widget.deviceId,
+        session: widget.session,
+      );
+      if (nextSession != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('הפרסום בוטל! עובר לרכב הבא בתור (${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id})...'),
+            backgroundColor: AppColors.primary,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        Future.delayed(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => WhatsAppChatScreen(
+                deviceId: widget.deviceId,
+                deviceName: widget.deviceName,
+                session: widget.session,
+                sessionId: nextSession.id,
+              ),
+            ),
+          );
+        });
+      }
+      return;
+    }
+
+    // 2. If user requested publish directly
+    if (text == '0' || text == 'פרסם' || text == 'פרסום' || text == 'פרסם עכשיו') {
+      await _onPublishTapped();
+      return;
+    }
+
+    // 3. Regular chat message - process locally with RemoteValidationService ("The Brain")!
     final userMessage = ChatMessageItem(
-      id: messageId,
+      id: 'msg_${DateTime.now().millisecondsSinceEpoch}',
       sender: ChatSender.user,
       text: text,
       timestamp: DateTime.now(),
@@ -666,50 +743,85 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     });
     _scrollToBottom();
     _saveMessagesToPrefs();
-    
-    // Save session if a license plate is detected
-    if (_currentLicensePlate.isEmpty) {
-      final plateMatch = RegExp(r'\b\d{7,8}\b').firstMatch(text);
-      if (plateMatch != null) {
-        _currentLicensePlate = plateMatch.group(0)!;
-      }
+
+    final session = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+    final currentVehicleData = session?.vehicleData ?? {};
+    final currentImagePaths = session?.imagePaths ?? [];
+
+    final historyList = _messages
+        .where((m) => m.id != userMessage.id && m.text.trim().isNotEmpty)
+        .map((m) => {
+          'role': m.sender == ChatSender.user ? 'user' : 'assistant',
+          'text': m.text,
+        })
+        .toList();
+
+    // Run conversational validation & Gov.il lookup locally on controller
+    final result = await RemoteValidationService.processTurn(
+      incomingText: text,
+      currentVehicleData: currentVehicleData,
+      chatHistory: historyList,
+      currentImagePaths: currentImagePaths,
+    );
+
+    if (_currentLicensePlate.isEmpty && result.vehicleData['license_plate'] != null) {
+      _currentLicensePlate = result.vehicleData['license_plate']!;
     }
-    
-    if (_currentLicensePlate.isNotEmpty) {
-      ChatSessionManager.saveSession(ChatSession(
+
+    if (result.allDataFilled || result.isReadyToPublish) {
+      _allDataFilled = true;
+    } else {
+      _allDataFilled = false;
+    }
+
+    final botReplyMsg = ChatMessageItem(
+      id: 'bot_${DateTime.now().millisecondsSinceEpoch}',
+      sender: ChatSender.bot,
+      text: result.botReply,
+      timestamp: DateTime.now(),
+    );
+
+    if (mounted) {
+      setState(() {
+        _messages.add(botReplyMsg);
+      });
+      _scrollToBottom();
+    }
+    _saveMessagesToPrefs();
+
+    // Update SQLite session state
+    final updatedSession = ChatSession(
+      id: _sessionId,
+      deviceId: widget.deviceId,
+      licensePlate: _currentLicensePlate.isNotEmpty ? _currentLicensePlate : (session?.licensePlate ?? ''),
+      startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
+      status: session?.status ?? ChatSessionStatus.draft,
+      lastMessage: result.botReply.split('\n').first,
+      vehicleData: result.vehicleData,
+      imagePaths: currentImagePaths,
+      isReadyToPublish: result.isReadyToPublish || _allDataFilled,
+    );
+    await ChatSessionManager.saveSession(updatedSession);
+  }
+
+  Future<void> _persistSessionUpdate(String lastMessage) async {
+    try {
+      final existing = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+      final status = existing?.status ?? ChatSessionStatus.draft;
+      final plate = _currentLicensePlate.isNotEmpty ? _currentLicensePlate : (existing?.licensePlate ?? '');
+      await ChatSessionManager.saveSession(ChatSession(
         id: _sessionId,
         deviceId: widget.deviceId,
-        licensePlate: _currentLicensePlate,
+        licensePlate: plate,
         startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
-        status: ChatSessionStatus.running,
-        lastMessage: text,
+        status: status,
+        lastMessage: lastMessage,
+        vehicleData: existing?.vehicleData ?? {},
+        imagePaths: existing?.imagePaths ?? [],
+        isReadyToPublish: existing?.isReadyToPublish ?? false,
       ));
-    }
-
-    try {
-      await FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(widget.deviceId)
-          .collection('messages')
-          .doc(messageId)
-          .set({
-            'id': messageId,
-            'sender': 'user',
-            'senderName': 'Remote User',
-            'text': text,
-            'type': 'message',
-            'status': 'pending',
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'createdAt': FieldValue.serverTimestamp(),
-          });
     } catch (e) {
-      debugPrint('[WhatsAppChat] Error sending text to Firestore: $e');
-    }
-
-    if (widget.session?.isConnected == true) {
-      try {
-        widget.session!.sendChatMessage(text, senderName: 'Remote User');
-      } catch (_) {}
+      debugPrint('[WhatsAppChat] Error persisting session update: $e');
     }
   }
 
@@ -723,8 +835,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       mediaType: 'image',
       localFilePath: file.path,
       timestamp: DateTime.now(),
-      isUploading: true,
-      uploadProgress: 0.05,
+      isUploading: false,
+      uploadProgress: 1.0,
     );
 
     setState(() {
@@ -733,11 +845,65 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     _scrollToBottom();
     _saveMessagesToPrefs();
 
-    await _sendMediaFileToFirebase(
-      file: file,
-      mediaType: 'image',
-      msgItem: msgItem,
+    final session = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+    final imgs = List<String>.from(session?.imagePaths ?? []);
+    if (!imgs.contains(file.path)) {
+      imgs.add(file.path);
+    }
+    
+    final vehicleData = session?.vehicleData ?? {};
+    final hasPlate = (vehicleData['license_plate'] ?? '').isNotEmpty || _currentLicensePlate.isNotEmpty;
+    final missing = RemoteValidationService.getMissingFields(vehicleData);
+    final errors = RemoteValidationService.validateValues(vehicleData);
+    final isNowReady = hasPlate && missing.isEmpty && errors.isEmpty && imgs.isNotEmpty;
+    
+    if (isNowReady) {
+      _allDataFilled = true;
+    }
+
+    final updatedSession = ChatSession(
+      id: _sessionId,
+      deviceId: widget.deviceId,
+      licensePlate: _currentLicensePlate.isNotEmpty ? _currentLicensePlate : (session?.licensePlate ?? ''),
+      startTimestamp: int.tryParse(_sessionId) ?? DateTime.now().millisecondsSinceEpoch,
+      status: session?.status ?? ChatSessionStatus.draft,
+      lastMessage: isNowReady ? 'מוכן לפרסום' : '📷 תמונה (${imgs.length})',
+      vehicleData: vehicleData,
+      imagePaths: imgs,
+      isReadyToPublish: isNowReady,
     );
+    await ChatSessionManager.saveSession(updatedSession);
+
+    if (isNowReady) {
+      final confirmId = 'bot_${DateTime.now().millisecondsSinceEpoch}';
+      final confirmMsg = ChatMessageItem(
+        id: confirmId,
+        sender: ChatSender.bot,
+        text: '📷 נקלטה תמונה בהצלחה (${imgs.length})!\n✅ כל פרטי הרכב מלאים ומאומתים.\nלחץ על "פרסם עכשיו" כדי להתחיל בפרסום ביד2.',
+        timestamp: DateTime.now(),
+      );
+      setState(() {
+        _messages.add(confirmMsg);
+      });
+      _scrollToBottom();
+      _saveMessagesToPrefs();
+    }
+  }
+
+  Future<File> _saveToPermanentStorage(File file) async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final mediaDir = Directory('${appDir.path}/p2p_chat_media_local');
+      if (!await mediaDir.exists()) {
+        await mediaDir.create(recursive: true);
+      }
+      final fileName = file.uri.pathSegments.last;
+      final targetPath = '${mediaDir.path}/${DateTime.now().millisecondsSinceEpoch}_$fileName';
+      return await file.copy(targetPath);
+    } catch (e) {
+      debugPrint('[WhatsAppChat] Error saving to permanent storage: $e');
+      return file; // Fallback to original
+    }
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -748,7 +914,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         maxWidth: 1920,
       );
       if (picked == null) return;
-      await _sendSingleImageFile(File(picked.path));
+      final permFile = await _saveToPermanentStorage(File(picked.path));
+      await _sendSingleImageFile(permFile);
     } catch (e) {
       debugPrint('[WhatsAppChat] Pick image failed: $e');
     }
@@ -763,7 +930,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       if (pickedList.isEmpty) return;
 
       for (final picked in pickedList) {
-        await _sendSingleImageFile(File(picked.path));
+        final permFile = await _saveToPermanentStorage(File(picked.path));
+        await _sendSingleImageFile(permFile);
         await Future.delayed(const Duration(milliseconds: 120));
       }
     } catch (e) {
@@ -779,7 +947,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       );
       if (picked == null) return;
 
-      final file = File(picked.path);
+      final file = await _saveToPermanentStorage(File(picked.path));
       final messageId = 'vid_${DateTime.now().millisecondsSinceEpoch}';
 
       final msgItem = ChatMessageItem(
@@ -788,8 +956,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         mediaType: 'video',
         localFilePath: file.path,
         timestamp: DateTime.now(),
-        isUploading: true,
-        uploadProgress: 0.05,
+        isUploading: false,
+        uploadProgress: 1.0,
       );
 
       setState(() {
@@ -797,12 +965,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       });
       _scrollToBottom();
       _saveMessagesToPrefs();
-
-      await _sendMediaFileToFirebase(
-        file: file,
-        mediaType: 'video',
-        msgItem: msgItem,
-      );
+      _persistSessionUpdate('🎥 וידאו');
     } catch (e) {
       debugPrint('[WhatsAppChat] Pick video failed: $e');
     }
@@ -858,6 +1021,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
       final file = File(path);
       if (!await file.exists() || await file.length() < 100) return;
+      
+      final permFile = await _saveToPermanentStorage(file);
 
       final messageId = 'audio_${DateTime.now().millisecondsSinceEpoch}';
       final recordedDur = Duration(seconds: _recordSeconds);
@@ -866,10 +1031,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         id: messageId,
         sender: ChatSender.user,
         mediaType: 'audio',
-        localFilePath: file.path,
+        localFilePath: permFile.path,
         timestamp: DateTime.now(),
-        isUploading: true,
-        uploadProgress: 0.05,
+        isUploading: false,
         audioDuration: recordedDur,
       );
 
@@ -879,11 +1043,23 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _scrollToBottom();
       _saveMessagesToPrefs();
 
-      await _sendMediaFileToFirebase(
-        file: file,
-        mediaType: 'audio',
-        msgItem: msgItem,
-      );
+      // Transcribe locally via Whisper on controller phone!
+      final transcribedText = await RemoteValidationService.transcribeAudio(permFile);
+      if (transcribedText != null && transcribedText.isNotEmpty) {
+        _sendTextMessage(transcribedText);
+      } else {
+        final errorMsg = ChatMessageItem(
+          id: 'bot_${DateTime.now().millisecondsSinceEpoch}',
+          sender: ChatSender.bot,
+          text: 'לא נקלט דיבור ברור בהקלטה. אנא נסה להקליט שוב או לשלוח כטקסט.',
+          timestamp: DateTime.now(),
+        );
+        setState(() {
+          _messages.add(errorMsg);
+        });
+        _scrollToBottom();
+        _saveMessagesToPrefs();
+      }
     } catch (e) {
       debugPrint('[WhatsAppChat] Stop recording error: $e');
       setState(() => _isRecording = false);
@@ -1084,10 +1260,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               itemCount: _messages.length,
               itemBuilder: (context, index) {
                 final message = _messages[index];
-                return _buildMessageBubble(message);
+                final isLast = index == _messages.length - 1;
+                return _buildMessageBubble(message, isLastMessage: isLast);
               },
             ),
           ),
+
+          // Global Action Chips (Publish, Pause, Quit)
+          _buildGlobalActionChips(),
 
           // Bottom Input Bar
           _buildInputBar(),
@@ -1169,14 +1349,44 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 const SizedBox(width: 4),
 
-                // 2. Avatar
-                CircleAvatar(
-                  radius: 19,
-                  backgroundColor: AppColors.android.withValues(alpha: 0.12),
-                  child: const Icon(
-                    Icons.android_rounded,
-                    color: AppColors.android,
-                    size: 26,
+                // 2. "שיחות" Button
+                InkWell(
+                  onTap: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => ChatSessionsListScreen(
+                          deviceId: widget.deviceId,
+                          deviceName: widget.deviceName,
+                          session: widget.session,
+                        ),
+                      ),
+                    );
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.queue_rounded,
+                          color: AppColors.android,
+                          size: 22,
+                        ),
+                        Text(
+                          'שיחות',
+                          style: GoogleFonts.heebo(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.android,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -1247,47 +1457,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
                 const SizedBox(width: 6),
 
-                // 4.5 "שיחות" Button (List icon)
-                InkWell(
-                  onTap: () {
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => ChatSessionsListScreen(
-                          deviceId: widget.deviceId,
-                          deviceName: widget.deviceName,
-                          session: widget.session,
-                        ),
-                      ),
-                    );
-                  },
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(
-                          Icons.queue_rounded,
-                          color: AppColors.onSurface,
-                          size: 22,
-                        ),
-                        Text(
-                          'שיחות',
-                          style: GoogleFonts.heebo(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.onSurface,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
+
 
                 // 5. "ניקוי" Button (Trash icon)
                 InkWell(
@@ -1326,7 +1496,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     );
   }
 
-  Widget _buildMessageBubble(ChatMessageItem message) {
+  Widget _buildMessageBubble(ChatMessageItem message, {bool isLastMessage = false}) {
     final isUser = message.sender == ChatSender.user;
     final timeStr = intl.DateFormat('HH:mm').format(message.timestamp);
     final isAdDraft =
@@ -1489,15 +1659,103 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     );
   }
 
+  Widget _buildGlobalActionChips() {
+    if (!_allDataFilled && !_isPublicationActive) return const SizedBox.shrink();
+
+    final List<Widget> chips = [];
+
+    if (_isPublicationActive) {
+      chips.add(
+        ActionChip(
+          backgroundColor: AppColors.warningSoft,
+          side: const BorderSide(color: AppColors.warning, width: 0.8),
+          avatar: const Icon(Icons.pause, size: 14, color: AppColors.warning),
+          label: Text(
+            'הפסק',
+            style: GoogleFonts.heebo(
+              color: AppColors.warning,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          onPressed: () {
+            _sendTextMessage('הפסק');
+          },
+        ),
+      );
+      chips.add(
+        ActionChip(
+          backgroundColor: AppColors.errorSoft,
+          side: const BorderSide(color: AppColors.error, width: 0.8),
+          avatar: const Icon(Icons.stop, size: 14, color: AppColors.error),
+          label: Text(
+            'סיום',
+            style: GoogleFonts.heebo(
+              color: AppColors.error,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          onPressed: () {
+            _sendTextMessage('ביטול');
+          },
+        ),
+      );
+    } else if (_allDataFilled) {
+      chips.add(
+        ActionChip(
+          backgroundColor: AppColors.successSoft,
+          side: const BorderSide(color: AppColors.success, width: 1.2),
+          avatar: const Icon(Icons.publish, size: 16, color: AppColors.success),
+          label: Text(
+            'פרסם עכשיו',
+            style: GoogleFonts.heebo(
+              color: AppColors.success,
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          onPressed: _onPublishTapped,
+        ),
+      );
+    }
+
+    if (chips.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(top: BorderSide(color: AppColors.border)),
+      ),
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 8,
+        alignment: WrapAlignment.center,
+        textDirection: TextDirection.rtl,
+        children: chips,
+      ),
+    );
+  }
+
   bool _hasActionOptions(String text) {
-    return text.contains('0 לפרסום') ||
-        text.contains('לפרסום שלח 0') ||
-        text.contains('לפרסום') ||
-        text.contains('פרסם עכשיו') ||
-        text.contains('מוכנים לפרסום') ||
-        text.contains('ביטול') ||
-        text.contains('המשך') ||
-        text.contains('שליטה מרחוק') ||
+    // Exclude basic greetings and requests for missing fields from showing the publish action chip
+    if (text.contains('כדי להתחיל') ||
+        text.contains('שלח מספר רישוי') ||
+        text.contains('הבוט של פירסומוטו') ||
+        text.contains('אנא ציין:')) {
+      final asksForImages = text.contains('תמונות') ||
+          text.contains('תמונה') ||
+          text.contains('להעלות') ||
+          text.contains('התקבלו') ||
+          text.contains('התקבלה') ||
+          text.contains('נקלטה תמונה');
+      return asksForImages;
+    }
+
+    return text.contains('שליטה מרחוק') ||
         text.contains('Remote Control') ||
         text.contains('התערבות') ||
         text.contains('נתקעה') ||
@@ -1506,7 +1764,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         text.contains('להעלות') ||
         text.contains('התקבלו') ||
         text.contains('התקבלה') ||
-        text.contains('נקלטה תמונה');
+        text.contains('נקלטה תמונה') ||
+        text.contains('המשך') ||
+        text.contains('ביטול');
   }
 
   Widget _buildQuickActionChips(String text) {
@@ -1588,27 +1848,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       );
     }
 
-    if (text.contains('0') ||
-        text.contains('לפרסום') ||
-        text.contains('מוכנים לפרסום') ||
-        text.contains('פרסם עכשיו')) {
-      chips.add(
-        ActionChip(
-          backgroundColor: AppColors.successSoft,
-          side: const BorderSide(color: AppColors.success, width: 0.8),
-          avatar: const Icon(Icons.publish, size: 14, color: AppColors.success),
-          label: Text(
-            'פרסם עכשיו (0)',
-            style: GoogleFonts.heebo(
-              color: AppColors.success,
-              fontSize: 11.5,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          onPressed: () => _sendTextMessage('0'),
-        ),
-      );
-    }
+    // Note: Publish, Pause, and Quit are now handled globally via _buildGlobalActionChips()
 
     if (text.contains('המשך')) {
       chips.add(

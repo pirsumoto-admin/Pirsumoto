@@ -14,7 +14,8 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'ocr_service.dart';
 import 'ui_context.dart';
-import 'whatsapp_text_validation_service.dart';
+// [WHATSAPP-DISABLED] WhatsApp text validation import disabled in yad2 optimized service.
+// import 'whatsapp_text_validation_service.dart';
 import 'yad2_automation_models.dart' show AutomationPhase, VehiclePublishData;
 
 typedef Yad2RecoveryPlanner =
@@ -317,8 +318,9 @@ class Yad2AccessibilityAutomationService {
   int? _ocrFrameId;
   final Map<String, TextLocation?> _ocrCache = {};
 
-  final bool startedFromWhatsApp;
-  final String? whatsAppSenderKey;
+  // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey disabled.
+  // final bool startedFromWhatsApp;
+  // final String? whatsAppSenderKey;
 
   final void Function(bool visible)? onToggleOverlayVisibility;
   final VoidCallback? onLoginRequired;
@@ -333,8 +335,9 @@ class Yad2AccessibilityAutomationService {
     this.recoveryPlanner,
     this.enableLlmRecovery = true,
     this.allowOcrFallback = true,
-    this.startedFromWhatsApp = false,
-    this.whatsAppSenderKey,
+    // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey disabled.
+    // this.startedFromWhatsApp = false,
+    // this.whatsAppSenderKey,
     this.onPhaseComplete,
     this.onPhaseError,
     this.onAutomationComplete,
@@ -384,7 +387,8 @@ class Yad2AccessibilityAutomationService {
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
-    unawaited(_updateWhatsAppPublishingFlag(false));
+    // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
+    // unawaited(_updateWhatsAppPublishingFlag(false));
   }
 
   void stop() {
@@ -393,7 +397,8 @@ class Yad2AccessibilityAutomationService {
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
-    unawaited(_updateWhatsAppPublishingFlag(false));
+    // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
+    // unawaited(_updateWhatsAppPublishingFlag(false));
     try {
       WakelockPlus.disable();
     } catch (_) {}
@@ -428,17 +433,19 @@ class Yad2AccessibilityAutomationService {
     _currentPhase = prev;
   }
 
-  bool _hasNotifiedCompletion = false;
+  // [WHATSAPP-DISABLED] _hasNotifiedCompletion field disabled.
+  // bool _hasNotifiedCompletion = false;
 
   void startAutomation() {
     debugPrint('[Yad2-A11y] Starting optimized Accessibility automation');
     _stopLoginGate();
     _isPaused = false;
     _pausedPhase = null;
-    _hasNotifiedCompletion = false;
+    // _hasNotifiedCompletion = false;
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
-    unawaited(_updateWhatsAppPublishingFlag(true));
+    // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
+    // unawaited(_updateWhatsAppPublishingFlag(true));
     _processPhase(AutomationPhase.phase1);
   }
 
@@ -460,7 +467,8 @@ class Yad2AccessibilityAutomationService {
       return;
     }
 
-    unawaited(_updateWhatsAppPublishingFlag(true));
+    // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
+    // unawaited(_updateWhatsAppPublishingFlag(true));
 
     debugPrint(
       '[Yad2-A11y] === ${phase.name} attempt '
@@ -469,9 +477,11 @@ class Yad2AccessibilityAutomationService {
 
     if (phase == AutomationPhase.complete) {
       WakelockPlus.disable();
-      unawaited(_notifyAutomationComplete());
+      // [WHATSAPP-DISABLED] _notifyAutomationComplete disabled.
+      // unawaited(_notifyAutomationComplete());
       _handlePhaseComplete(AutomationPhase.complete);
-      unawaited(_updateWhatsAppPublishingFlag(false));
+      // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
+      // unawaited(_updateWhatsAppPublishingFlag(false));
       return;
     }
 
@@ -833,7 +843,8 @@ class Yad2AccessibilityAutomationService {
     );
 
     if (loginDetected) {
-      await _notifyLoginRequired();
+      // [WHATSAPP-DISABLED] _notifyLoginRequired disabled.
+      // await _notifyLoginRequired();
       _startLoginGate();
       return const _StepActionResult.failure('Login required.');
     }
@@ -2180,7 +2191,8 @@ class Yad2AccessibilityAutomationService {
     if (await _dismissKnownPopups()) return true;
 
     if (await _checkIsLoginScreen()) {
-      await _notifyLoginRequired();
+      // [WHATSAPP-DISABLED] _notifyLoginRequired disabled.
+      // await _notifyLoginRequired();
       _startLoginGate();
       return true;
     }
@@ -2509,66 +2521,67 @@ class Yad2AccessibilityAutomationService {
     return false;
   }
 
-  DateTime? _lastDeadlockNotified;
+  // [WHATSAPP-DISABLED] _lastDeadlockNotified field disabled.
+  // DateTime? _lastDeadlockNotified;
 
-  Future<void> _notifyDeadlockInterventionRequired(String stepName, String details) async {
-    final senderKey = whatsAppSenderKey?.trim();
-    if (senderKey == null || senderKey.isEmpty) return;
+  // Future<void> _notifyDeadlockInterventionRequired(String stepName, String details) async {
+  //   final senderKey = whatsAppSenderKey?.trim();
+  //   if (senderKey == null || senderKey.isEmpty) return;
+  //
+  //   final now = DateTime.now();
+  //   if (_lastDeadlockNotified != null &&
+  //       now.difference(_lastDeadlockNotified!) < const Duration(seconds: 15)) {
+  //     return; // Debounce notifications
+  //   }
+  //   _lastDeadlockNotified = now;
+  //
+  //   try {
+  //     final bool isP2p = senderKey.startsWith('p2p_');
+  //     final String remoteNotice = isP2p
+  //         ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
+  //         : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
+  //
+  //     final message =
+  //         '⚠️ האוטומציה נתקעה ונדרשת התערבותך!\n'
+  //         'שלב: $stepName\n'
+  //         'פירוט: $details\n\n'
+  //         '$remoteNotice';
+  //
+  //     await WhatsAppTextValidationService.dispatchReplyToSender(
+  //       senderKey: senderKey,
+  //       message: message,
+  //     );
+  //     debugPrint('[Yad2-A11y] Dispatched deadlock notification to $senderKey');
+  //   } catch (e) {
+  //     debugPrint('[Yad2-A11y] Failed to dispatch deadlock notification: $e');
+  //   }
+  // }
 
-    final now = DateTime.now();
-    if (_lastDeadlockNotified != null &&
-        now.difference(_lastDeadlockNotified!) < const Duration(seconds: 15)) {
-      return; // Debounce notifications
-    }
-    _lastDeadlockNotified = now;
-
-    try {
-      final bool isP2p = senderKey.startsWith('p2p_');
-      final String remoteNotice = isP2p
-          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
-          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
-
-      final message =
-          '⚠️ האוטומציה נתקעה ונדרשת התערבותך!\n'
-          'שלב: $stepName\n'
-          'פירוט: $details\n\n'
-          '$remoteNotice';
-
-      await WhatsAppTextValidationService.dispatchReplyToSender(
-        senderKey: senderKey,
-        message: message,
-      );
-      debugPrint('[Yad2-A11y] Dispatched deadlock notification to $senderKey');
-    } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to dispatch deadlock notification: $e');
-    }
-  }
-
-  Future<void> _notifyLoginRequired() async {
-    final senderKey = whatsAppSenderKey?.trim();
-    if (senderKey == null || senderKey.isEmpty) {
-      return;
-    }
-    try {
-      final bool isP2p = senderKey.startsWith('p2p_');
-      final String remoteNotice = isP2p
-          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להזין את פרטי ההתחברות לחשבון יד2.'
-          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי להזין את פרטי ההתחברות לחשבון יד2.';
-
-      final message =
-          '⚠️ נדרשת התחברות לחשבון יד2!\n'
-          'האוטומציה הגיעה למסך כניסה וממתינה להתחברות שלך.\n\n'
-          '$remoteNotice';
-
-      final success = await WhatsAppTextValidationService.dispatchReplyToSender(
-        senderKey: senderKey,
-        message: message,
-      );
-      debugPrint('[Yad2-A11y] Sent login prompt: $success');
-    } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to send login prompt: $e');
-    }
-  }
+  // Future<void> _notifyLoginRequired() async {
+  //   final senderKey = whatsAppSenderKey?.trim();
+  //   if (senderKey == null || senderKey.isEmpty) {
+  //     return;
+  //   }
+  //   try {
+  //     final bool isP2p = senderKey.startsWith('p2p_');
+  //     final String remoteNotice = isP2p
+  //         ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להזין את פרטי ההתחברות לחשבון יד2.'
+  //         : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי להזין את פרטי ההתחברות לחשבון יד2.';
+  //
+  //     final message =
+  //         '⚠️ נדרשת התחברות לחשבון יד2!\n'
+  //         'האוטומציה הגיעה למסך כניסה וממתינה להתחברות שלך.\n\n'
+  //         '$remoteNotice';
+  //
+  //     final success = await WhatsAppTextValidationService.dispatchReplyToSender(
+  //       senderKey: senderKey,
+  //       message: message,
+  //     );
+  //     debugPrint('[Yad2-A11y] Sent login prompt: $success');
+  //   } catch (e) {
+  //     debugPrint('[Yad2-A11y] Failed to send login prompt: $e');
+  //   }
+  // }
 
   void _startLoginGate() {
     if (_loginSamplingTimer != null) return;
@@ -2577,7 +2590,8 @@ class Yad2AccessibilityAutomationService {
     _pausedPhase = AutomationPhase.phase1;
     onLoginRequired?.call();
     unawaited(_beepUser());
-    unawaited(_notifyLoginRequired());
+    // [WHATSAPP-DISABLED] _notifyLoginRequired disabled.
+    // unawaited(_notifyLoginRequired());
     _loginSamplingTimer = Timer.periodic(const Duration(seconds: 3), (
       timer,
     ) async {
@@ -2585,11 +2599,17 @@ class Yad2AccessibilityAutomationService {
       _loginGateTickBusy = true;
       try {
         await _dismissKnownPopups();
-        if (!await _checkIsLoginScreen() && await _isElementPresent('חיפוש')) {
+        // Once the login/third-party dialog has been closed and we are no longer
+        // on a login screen, resume from Phase 1. We do NOT require 'חיפוש' to
+        // be visible yet — after a Facebook/Google login the app may land on a
+        // different page first, and Phase 1's _actionDetectEntryForm will handle
+        // navigating back to the search form.
+        if (!await _checkIsLoginScreen()) {
           timer.cancel();
           _loginSamplingTimer = null;
           _isPaused = false;
           _pausedPhase = null;
+          debugPrint('[Yad2-A11y] Login screen gone — restarting from Phase 1.');
           _processPhase(AutomationPhase.phase1);
         }
       } finally {
@@ -2707,6 +2727,8 @@ class Yad2AccessibilityAutomationService {
     return result.toString().contains('ok');
   }
 
+  // [WHATSAPP-DISABLED] _notifyAutomationComplete sent WA message on completion. Disabled.
+  /*
   Future<void> _notifyAutomationComplete() async {
     if (_hasNotifiedCompletion) return;
     _hasNotifiedCompletion = true;
@@ -2725,25 +2747,10 @@ class Yad2AccessibilityAutomationService {
       debugPrint('[Yad2-A11y] Failed to send completion message: $e');
     }
   }
+  */
 
-  Future<void> _updateWhatsAppPublishingFlag(bool running) async {
-    if (whatsAppSenderKey == null || whatsAppSenderKey!.isEmpty) return;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'wa_state_$whatsAppSenderKey';
-      final jsonStr = prefs.getString(key);
-      if (jsonStr != null && jsonStr.isNotEmpty) {
-        final state = Map<String, String>.from(jsonDecode(jsonStr));
-        state['auto_publish_started'] = running ? 'true' : 'false';
-        state['KEY_AUTO_PUBLISH_STARTED'] = running ? 'true' : 'false';
-        state['auto_publish_running'] = running ? 'true' : 'false';
-        await prefs.setString(key, jsonEncode(state));
-        debugPrint('[Yad2-A11y] Updated WhatsApp publishing flags to $running');
-      }
-    } catch (e) {
-      debugPrint('[Yad2-A11y] Failed to update WhatsApp publishing flags: $e');
-    }
-  }
+  // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled — WA SharedPrefs update removed.
+  // Future<void> _updateWhatsAppPublishingFlag(bool running) async { ... }
 
   void _handlePhaseComplete(AutomationPhase phase) {
     debugPrint('[Yad2-A11y] Phase complete: ${phase.description}');
@@ -2752,9 +2759,8 @@ class Yad2AccessibilityAutomationService {
     final next = _nextPhaseAfter(phase);
     if (next == null) {
       stop();
-      _notifyAutomationComplete().then((_) {
-        onAutomationComplete?.call(true);
-      });
+      // [WHATSAPP-DISABLED] _notifyAutomationComplete disabled.
+      onAutomationComplete?.call(true);
       return;
     }
 
@@ -2855,7 +2861,8 @@ class Yad2AccessibilityAutomationService {
     try {
       await _beepUser();
     } catch (_) {}
-    unawaited(_notifyDeadlockInterventionRequired(phase.description, error));
+    // [WHATSAPP-DISABLED] _notifyDeadlockInterventionRequired disabled.
+    // unawaited(_notifyDeadlockInterventionRequired(phase.description, error));
     onPhaseError?.call(phase, error);
   }
 

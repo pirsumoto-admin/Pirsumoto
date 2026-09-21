@@ -16,8 +16,9 @@ import android.view.WindowManager
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.pirsumoto/accessibility"
-    private val WHATSAPP_CHANNEL = "com.pirsumoto/whatsapp_bridge"
-    private val WHATSAPP_EVENTS_CHANNEL = "com.pirsumoto/whatsapp_bridge/events"
+    // [WHATSAPP-DISABLED] WhatsApp bridge channels — disabled, app uses P2P chat instead.
+    // private val WHATSAPP_CHANNEL = "com.pirsumoto/whatsapp_bridge"
+    // private val WHATSAPP_EVENTS_CHANNEL = "com.pirsumoto/whatsapp_bridge/events"
 
     companion object {
         var isAppInForeground: Boolean = false
@@ -67,7 +68,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        prepareForAutoPublishIntent(intent)
+        // [WHATSAPP-DISABLED] prepareForAutoPublishIntent is part of WhatsApp auto-publish flow.
+        // prepareForAutoPublishIntent(intent)
         super.onCreate(savedInstanceState)
         currentActivity = this
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -106,7 +108,8 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        prepareForAutoPublishIntent(intent)
+        // [WHATSAPP-DISABLED] prepareForAutoPublishIntent is part of WhatsApp auto-publish flow.
+        // prepareForAutoPublishIntent(intent)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -138,22 +141,23 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        WhatsAppAutoPublishStore.captureIntent(intent)
-        val whatsappBridgeController = WhatsAppBridgeController(this)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_CHANNEL).setMethodCallHandler { call, result ->
-            whatsappBridgeController.handle(call, result)
-        }
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_EVENTS_CHANNEL).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                    WhatsAppBridgeEvents.attach(events)
-                }
-
-                override fun onCancel(arguments: Any?) {
-                    WhatsAppBridgeEvents.detach()
-                }
-            }
-        )
+        // [WHATSAPP-DISABLED] WhatsApp auto-publish intent capture disabled.
+        // WhatsAppAutoPublishStore.captureIntent(intent)
+        // [WHATSAPP-DISABLED] WhatsApp MethodChannel and EventChannel registration disabled.
+        // val whatsappBridgeController = WhatsAppBridgeController(this)
+        // MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_CHANNEL).setMethodCallHandler { call, result ->
+        //     whatsappBridgeController.handle(call, result)
+        // }
+        // EventChannel(flutterEngine.dartExecutor.binaryMessenger, WHATSAPP_EVENTS_CHANNEL).setStreamHandler(
+        //     object : EventChannel.StreamHandler {
+        //         override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+        //             WhatsAppBridgeEvents.attach(events)
+        //         }
+        //         override fun onCancel(arguments: Any?) {
+        //             WhatsAppBridgeEvents.detach()
+        //         }
+        //     }
+        // )
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             
@@ -229,13 +233,28 @@ class MainActivity : FlutterActivity() {
             }
 
             if (call.method == "bringAppToForeground") {
-                WhatsAppDaemonService.bringAppToForeground(context)
+                // [WHATSAPP-DISABLED] WhatsAppDaemonService.bringAppToForeground removed.
+                // WhatsAppDaemonService.bringAppToForeground(context)
                 MainActivity.bringToForeground(context)
                 result.success(true)
                 return@setMethodCallHandler
             }
             if (call.method == "isAppInForeground") {
                 result.success(isAppInForeground)
+                return@setMethodCallHandler
+            }
+            if (call.method == "startDaemonService") {
+                PirsumotoBackgroundService.start(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "stopDaemonService") {
+                PirsumotoBackgroundService.stop(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "isDaemonRunning") {
+                result.success(PirsumotoBackgroundService.isRunning)
                 return@setMethodCallHandler
             }
 
@@ -650,32 +669,34 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
-        WhatsAppBridgeEvents.detach()
+        // [WHATSAPP-DISABLED] WhatsAppBridgeEvents.detach() disabled.
+        // WhatsAppBridgeEvents.detach()
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
-    private fun prepareForAutoPublishIntent(intent: Intent?) {
-        if (!WhatsAppAutoPublishStore.captureIntent(intent)) return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-            try {
-                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
-                keyguardManager.requestDismissKeyguard(this, null)
-            } catch (e: Exception) {
-                Log.w("WA-AutoPublish", "Could not request keyguard dismiss", e)
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
-            )
-        }
-    }
+    // [WHATSAPP-DISABLED] prepareForAutoPublishIntent handled WhatsApp auto-publish wake-up.
+    // Disabled: app no longer receives auto-publish triggers from WhatsApp.
+    // private fun prepareForAutoPublishIntent(intent: Intent?) {
+    //     if (!WhatsAppAutoPublishStore.captureIntent(intent)) return
+    //     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+    //         setShowWhenLocked(true)
+    //         setTurnScreenOn(true)
+    //         try {
+    //             val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+    //             keyguardManager.requestDismissKeyguard(this, null)
+    //         } catch (e: Exception) {
+    //             Log.w("WA-AutoPublish", "Could not request keyguard dismiss", e)
+    //         }
+    //     } else {
+    //         @Suppress("DEPRECATION")
+    //         window.addFlags(
+    //             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+    //                 WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+    //                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+    //                 WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+    //         )
+    //     }
+    // }
 
     private fun findEditableChild(node: android.view.accessibility.AccessibilityNodeInfo): android.view.accessibility.AccessibilityNodeInfo? {
         if (node.isEditable) return node
