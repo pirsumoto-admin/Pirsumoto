@@ -1,3 +1,6 @@
+import 'automation_task_scheduler.dart';
+import 'automation_accessibility_channel.dart';
+import 'package:publication_protocol/publication_protocol.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -131,7 +134,50 @@ class FacebookAutomationService {
     activeInstance = this;
   }
 
+  final _scheduler = AutomationTaskScheduler();
+  late final _automationChannel = AutomationAccessibilityChannel((reason) {
+    if (_stopped || _isPaused) return;
+    pauseAutomation();
+    debugPrint('[Facebook] Interrupted at ${_currentPhase?.name}: $reason');
+    onPhaseError?.call(
+      _currentPhase ?? FacebookAutomationPhase.loginGate,
+      'האוטומציה הושהתה בשלב הנוכחי: $reason. החזר את מסך הפרסום ולחץ המשך.',
+    );
+  });
+  Future<bool> _ensureAutomationWindow() async {
+    try {
+      return await _automationChannel.invokeMethod<bool>(
+            'checkAutomationWindow',
+          ) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _stopped = false;
+  final Set<Future<void>> _inFlight = {};
+  Future<void> pauseAndWait() async {
+    pauseAutomation();
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(
+        _inFlight.toList(),
+      ).timeout(const Duration(seconds: 45));
+    }
+  }
+
+  Future<void> stopAndWait() async {
+    stop();
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(
+        _inFlight.toList(),
+      ).timeout(const Duration(seconds: 45));
+    }
+  }
+
   void stop() {
+    _scheduler.invalidate();
+    _stopped = true;
     debugPrint('[FB-A11y] 🛑 Stop requested');
     _stopLoginGate();
     _isPaused = true;
@@ -143,6 +189,8 @@ class FacebookAutomationService {
   }
 
   void dispose() {
+    _scheduler.invalidate();
+    _stopped = true;
     stop();
     if (activeInstance == this) {
       activeInstance = null;
@@ -150,6 +198,7 @@ class FacebookAutomationService {
   }
 
   void pauseAutomation() {
+    _scheduler.invalidate();
     debugPrint('[FB-A11y] ⏸️ Pause requested');
     _stopLoginGate();
     _isPaused = true;
@@ -157,15 +206,26 @@ class FacebookAutomationService {
   }
 
   void resumeAutomation() {
-    debugPrint('[FB-A11y] ▶️ Resume requested');
-    _stopLoginGate();
-    if (!_isPaused) return;
-    _isPaused = false;
-    final phaseToResume = _pausedPhase ?? _currentPhase;
-    if (phaseToResume != null) {
-      _pausedPhase = null;
-      _processPhase(phaseToResume);
+    if (_stopped || !_isPaused) return;
+    _scheduler.invalidate();
+    final generation = _scheduler.generation;
+    if (_inFlight.isNotEmpty) {
+      Future.wait(_inFlight.toList())
+          .then((_) {
+            if (!_stopped && generation == _scheduler.generation)
+              resumeAutomation();
+          })
+          .catchError((Object e) {
+            debugPrint('[Facebook] Cannot resume before phase drains: $e');
+          });
+      return;
     }
+    _stopLoginGate();
+    _isPaused = false;
+    final phase =
+        _pausedPhase ?? _currentPhase ?? FacebookAutomationPhase.loginGate;
+    _pausedPhase = null;
+    _processPhase(phase);
   }
 
   void stepBack() {
@@ -183,6 +243,8 @@ class FacebookAutomationService {
   }
 
   void startAutomation() {
+    if (_stopped) return;
+    _scheduler.invalidate();
     debugPrint('[FB-A11y] 🚀 Starting Facebook automation');
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     try {
@@ -194,6 +256,7 @@ class FacebookAutomationService {
   // ── Phase dispatcher ──────────────────────────────────────────────────────
 
   void _processPhase(FacebookAutomationPhase phase) {
+    if (_stopped) return;
     _currentPhase = phase;
     _phaseRetryCount = 0;
     if (_isPaused) {
@@ -205,6 +268,17 @@ class FacebookAutomationService {
   }
 
   Future<void> _executePhase(FacebookAutomationPhase phase) async {
+    if (_stopped) return;
+    final work = _scheduler.run(() => _executePhaseTracked(phase));
+    _inFlight.add(work);
+    try {
+      await work;
+    } finally {
+      _inFlight.remove(work);
+    }
+  }
+
+  Future<void> _executePhaseTracked(FacebookAutomationPhase phase) async {
     _currentPhase = phase;
     if (_isPaused) {
       _pausedPhase = phase;
@@ -215,6 +289,8 @@ class FacebookAutomationService {
       '[FB-A11y] ${phase.name.toUpperCase()}  attempt ${_phaseRetryCount + 1}/${_maxRetries + 1}',
     );
     debugPrint('[FB-A11y] ════════════════════════════════════════');
+
+    if (!await _ensureAutomationWindow() || _stopped || _isPaused) return;
 
     try {
       switch (phase) {
@@ -283,7 +359,7 @@ class FacebookAutomationService {
   }) async {
     Map<String, dynamic>? previous;
     for (int i = 0; i < maxReads; i++) {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+      final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         method,
         args,
       );
@@ -320,9 +396,10 @@ class FacebookAutomationService {
   }
 
   Future<void> toolTapScreen(double x, double y) async {
+    if (_stopped || _isPaused) return;
     debugPrint('[FB-A11y] 🖱️ toolTapScreen($x, $y)');
     try {
-      await _channel.invokeMethod('tapScreen', {'x': x, 'y': y});
+      await _automationChannel.invokeMethod('tapScreen', {'x': x, 'y': y});
     } catch (e) {
       debugPrint('[FB-A11y] TapScreen error: $e');
     }
@@ -335,6 +412,7 @@ class FacebookAutomationService {
     double threshold = 0.82,
     bool preferEditable = false,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint(
       '[FB-A11y] 🔍 toolFindElementAndTap("$targetText", instance=$targetInstance, preferEditable=$preferEditable)',
     );
@@ -364,6 +442,7 @@ class FacebookAutomationService {
     double deltaY = 0.0,
     int offset = 1,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] 🔍 toolTapNodeAfter("$targetText")');
     try {
       final bounds = await _getStableBounds('findNodeAfterAndGetBounds', {
@@ -389,6 +468,7 @@ class FacebookAutomationService {
     double deltaY = 0,
     double threshold = 0.82,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] 🔍 toolTapNodeBefore("$targetText")');
     try {
       final bounds = await _getStableBounds('findNodeBeforeAndGetBounds', {
@@ -410,11 +490,13 @@ class FacebookAutomationService {
   // ── Tool: text entry ──────────────────────────────────────────────────────
 
   Future<bool> toolEnterTextAtFocused(String text) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] ⌨️ toolEnterTextAtFocused ("$text")');
     try {
-      final success = await _channel.invokeMethod<bool>('enterTextAtFocused', {
-        'value': text,
-      });
+      final success = await _automationChannel.invokeMethod<bool>(
+        'enterTextAtFocused',
+        {'value': text},
+      );
       if (success == true) return true;
     } on PlatformException catch (e) {
       debugPrint('[FB-A11y] enterTextAtFocused native error: ${e.message}');
@@ -432,6 +514,7 @@ class FacebookAutomationService {
   }
 
   Future<void> toolEnterTextAtFocusedJs(String text) async {
+    if (_stopped || _isPaused) return;
     debugPrint('[FB-A11y] ⌨️ toolEnterTextAtFocusedJs("$text")');
     final encoded = jsonEncode(text);
     await controller.runJavaScript('''
@@ -474,6 +557,7 @@ class FacebookAutomationService {
   }
 
   Future<bool> toolEnterTextNear(String label, String value) async {
+    if (_stopped || _isPaused) return false;
     final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
     if (!tapped) return false;
     await Future.delayed(const Duration(milliseconds: 500));
@@ -484,6 +568,7 @@ class FacebookAutomationService {
   }
 
   Future<bool> toolEnterTextBefore(String targetText, String value) async {
+    if (_stopped || _isPaused) return false;
     try {
       final bounds = await _getStableBounds('findInputBeforeAndGetBounds', {
         'target': targetText,
@@ -507,6 +592,7 @@ class FacebookAutomationService {
     int targetInstance = 1,
     double threshold = 0.82,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] ⌨️ toolEnterText("$targetText", value="$value")');
     try {
       final bounds = await _getStableBounds('findAndGetBounds', {
@@ -537,6 +623,7 @@ class FacebookAutomationService {
   /// and fires touch + mouse + React-synthetic click events, matching how
   /// facebook_screen.dart dispatches clicks on [role="option"] elements.
   Future<bool> toolFindAndTapJs(String targetText) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] 🕸️ toolFindAndTapJs("$targetText")');
     final escaped = targetText.replaceAll("'", "\\'");
     final js = '''
@@ -673,6 +760,7 @@ class FacebookAutomationService {
   /// Finds an input/textarea by aria-label, placeholder, or data-testid
   /// and sets its value via React's native setter + Input event.
   Future<bool> toolFillInputByLabel(String label, String value) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] ⌨️ toolFillInputByLabel("$label", "$value")');
     final escapedLabel = label.replaceAll("'", "\\'");
     final escapedValue = value.replaceAll("'", "\\'");
@@ -717,9 +805,10 @@ class FacebookAutomationService {
   // ── Tool: scroll helpers ──────────────────────────────────────────────────
 
   Future<void> _scrollDown(double percent) async {
+    if (_stopped || _isPaused) return;
     debugPrint('[FB-A11y] ⬇️ scrollDown($percent)');
     try {
-      await _channel.invokeMethod('scrollNode', {
+      await _automationChannel.invokeMethod('scrollNode', {
         'direction': 'down',
         'percent': percent,
       });
@@ -762,7 +851,7 @@ class FacebookAutomationService {
     int targetInstance = 1,
   }) async {
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+      final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         'findAndGetBounds',
         {'target': target, 'targetInstance': targetInstance},
       );
@@ -803,6 +892,7 @@ class FacebookAutomationService {
     double deltaY = 0,
     bool allowJsFallback = true,
   }) async {
+    if (_stopped || _isPaused) return false;
     final alternatives = _splitAlternatives(targetText);
     for (final alt in alternatives) {
       if (await toolFindElementAndTap(
@@ -829,8 +919,9 @@ class FacebookAutomationService {
   // ── Tool: press back ─────────────────────────────────────────────────────
 
   Future<bool> toolPressBack() async {
+    if (_stopped || _isPaused) return false;
     try {
-      final pressed = await _channel.invokeMethod<bool>('pressBack');
+      final pressed = await _automationChannel.invokeMethod<bool>('pressBack');
       return pressed ?? false;
     } on PlatformException catch (e) {
       debugPrint('[FB-A11y] pressBack error: ${e.message}');
@@ -839,6 +930,7 @@ class FacebookAutomationService {
   }
 
   Future<void> toolBlurActiveElement() async {
+    if (_stopped || _isPaused) return;
     try {
       await controller.runJavaScript('''
         if (document.activeElement && typeof document.activeElement.blur === 'function') {
@@ -864,6 +956,7 @@ class FacebookAutomationService {
   }
 
   Future<void> toolDismissKeyboardAndBlur() async {
+    if (_stopped || _isPaused) return;
     await toolBlurActiveElement();
     try {
       await SystemChannels.textInput.invokeMethod('TextInput.hide');
@@ -940,18 +1033,25 @@ class FacebookAutomationService {
   /// until the form is detected and auto-resumes.
   void _startLoginGate() {
     if (_loginSamplingTimer != null) return;
+    _scheduler.invalidate();
     debugPrint('[FB-A11y] 🔐 Login gate active — waiting for user login');
     _isPaused = true;
     _pausedPhase = FacebookAutomationPhase.setViewport; // resume from viewport
     unawaited(_beepUser());
 
+    final generation = _scheduler.generation;
     _loginSamplingTimer = Timer.periodic(const Duration(seconds: 1), (
       timer,
     ) async {
       if (_loginGateTickBusy) return;
       _loginGateTickBusy = true;
       try {
+        if (!await _ensureAutomationWindow()) return;
         if (!await _isLoggedInAndOnForm()) return;
+        if (_stopped ||
+            generation != _scheduler.generation ||
+            _loginSamplingTimer != timer)
+          return;
         debugPrint('[FB-A11y] 🎉 Login complete — resuming');
         timer.cancel();
         _loginSamplingTimer = null;
@@ -1094,9 +1194,12 @@ class FacebookAutomationService {
   }
 
   Future<void> toolLogAccessibilityTree({String tag = 'FB-A11y-Tree'}) async {
+    if (!const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE')) return;
     debugPrint('[$tag] ════════ ACCESSIBILITY TREE DUMP ════════');
     try {
-      final String? treeStr = await _channel.invokeMethod<String>('logTree');
+      final String? treeStr = await _automationChannel.invokeMethod<String>(
+        'logTree',
+      );
       if (treeStr != null) {
         final lines = treeStr.split('\n');
         for (var line in lines) {
@@ -1115,6 +1218,7 @@ class FacebookAutomationService {
 
   /// Dumps all interactive form elements from the WebView DOM into debugPrint
   Future<void> toolLogDomFormElements({String tag = 'FB-DOM-Dump'}) async {
+    if (!const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE')) return;
     debugPrint('[$tag] ════════ DOM FORM ELEMENTS DUMP ════════');
     try {
       final raw = await controller.runJavaScriptReturningResult('''
@@ -1174,6 +1278,7 @@ class FacebookAutomationService {
 
   /// Scrolls an element into view using DOM inspection
   Future<bool> toolScrollElementIntoViewViaDom(List<String> keywords) async {
+    if (_stopped || _isPaused) return false;
     try {
       final jsonKw = jsonEncode(keywords);
       final raw = await controller.runJavaScriptReturningResult('''
@@ -1207,6 +1312,7 @@ class FacebookAutomationService {
     required List<String> selectors,
     required String text,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint('[FB-DOM] Trying to enter "$text" via selectors: $selectors');
     try {
       final jsonSelectors = jsonEncode(selectors);
@@ -1272,6 +1378,7 @@ class FacebookAutomationService {
   /// Enters price specifically into the DOM, checking direct inputs, label containers,
   /// and aria-labelledby references to avoid clicking static text labels.
   Future<bool> toolEnterPriceViaDom(String price) async {
+    if (_stopped || _isPaused) return false;
     try {
       final jsonPrice = jsonEncode(price);
       final raw = await controller.runJavaScriptReturningResult('''
@@ -1354,20 +1461,24 @@ class FacebookAutomationService {
     var imageList = formData.images ?? const <String>[];
     if (expectedCount != null && expectedCount == 0) {
       imageList = const <String>[];
-    } else if (expectedCount != null && expectedCount > 0 && imageList.length > expectedCount) {
+    } else if (expectedCount != null &&
+        expectedCount > 0 &&
+        imageList.length > expectedCount) {
       imageList = imageList.sublist(imageList.length - expectedCount);
     }
 
-    debugPrint('[FB-A11y] phaseUploadPhoto: count=${imageList.length} (expected: $expectedCount)');
+    debugPrint(
+      '[FB-A11y] phaseUploadPhoto: count=${imageList.length} (expected: $expectedCount)',
+    );
     if (imageList.isEmpty) {
-      debugPrint('[FB-A11y] No images to upload. Skipping upload photos phase.');
+      debugPrint(
+        '[FB-A11y] No images to upload. Skipping upload photos phase.',
+      );
       _handlePhaseComplete(FacebookAutomationPhase.uploadPhotos);
       return;
     }
 
-    debugPrint(
-      '[FB-A11y] Converting ${imageList.length} images to base64...',
-    );
+    debugPrint('[FB-A11y] Converting ${imageList.length} images to base64...');
     final List<Map<String, String>> base64Files = [];
     for (int i = 0; i < imageList.length; i++) {
       final path = imageList[i];
@@ -1453,7 +1564,9 @@ class FacebookAutomationService {
     await Future.delayed(const Duration(seconds: 5));
 
     // Log both trees right after upload completes
-    debugPrint('[FB-A11y] 📸 Photo upload complete. Logging state of the screen:');
+    debugPrint(
+      '[FB-A11y] 📸 Photo upload complete. Logging state of the screen:',
+    );
     await toolLogDomFormElements(tag: 'FB-PostUpload-DOM');
     await toolLogAccessibilityTree(tag: 'FB-PostUpload-A11y');
 
@@ -1480,7 +1593,10 @@ class FacebookAutomationService {
 
     // Try finding Year dropdown via A11y
     bool opened = await _retryUntil(() async {
-      if (await toolFindElementAndTap('שנה|שנת|שנת ייצור|שנת דגם|Year|Model year')) return true;
+      if (await toolFindElementAndTap(
+        'שנה|שנת|שנת ייצור|שנת דגם|Year|Model year',
+      ))
+        return true;
       if (await toolFindElementAndTap('שנה')) return true;
       if (await toolFindElementAndTap('Year')) return true;
       return false;
@@ -1488,7 +1604,9 @@ class FacebookAutomationService {
 
     // Fallback: If not opened via A11y, try clicking Year via DOM
     if (!opened) {
-      debugPrint('[FB-A11y] Year dropdown not opened via A11y, attempting DOM click...');
+      debugPrint(
+        '[FB-A11y] Year dropdown not opened via A11y, attempting DOM click...',
+      );
       final domClicked = await controller.runJavaScriptReturningResult('''
         (function() {
           var el = document.querySelector('[role="combobox"][aria-label*="Year" i], [role="combobox"][aria-label*="שנה" i], input[aria-label*="Year" i], input[aria-label*="שנה" i]');
@@ -1521,7 +1639,9 @@ class FacebookAutomationService {
     }, timeout: const Duration(seconds: 4));
 
     if (!selected) {
-      debugPrint('[FB-A11y] Year option $yearVal not tapped via A11y, attempting DOM option click...');
+      debugPrint(
+        '[FB-A11y] Year option $yearVal not tapped via A11y, attempting DOM option click...',
+      );
       final domSelected = await controller.runJavaScriptReturningResult('''
         (function() {
           var options = document.querySelectorAll('[role="option"], option, div[role="button"], span');
@@ -1597,7 +1717,8 @@ class FacebookAutomationService {
     // Optional: If an auto-complete suggestion popped up, tap it (up to 1.5s timeout)
     try {
       await _retryUntil(() async {
-        if (await toolFindElementAndTap(makerVal, targetInstance: 2)) return true;
+        if (await toolFindElementAndTap(makerVal, targetInstance: 2))
+          return true;
         return false;
       }, timeout: const Duration(milliseconds: 1500));
     } catch (_) {}
@@ -1611,7 +1732,9 @@ class FacebookAutomationService {
     final modelVal = formData.model;
     debugPrint('[FB-A11y] EnterModel value: "$modelVal"');
     if (modelVal.isEmpty) {
-      debugPrint('[FB-A11y] modelVal is empty in formData, skipping enterModel');
+      debugPrint(
+        '[FB-A11y] modelVal is empty in formData, skipping enterModel',
+      );
       _handlePhaseComplete(FacebookAutomationPhase.enterModel);
       return;
     }
@@ -1651,7 +1774,8 @@ class FacebookAutomationService {
     // Optional: If an auto-complete suggestion popped up, tap it (up to 1.5s timeout)
     try {
       await _retryUntil(() async {
-        if (await toolFindElementAndTap(modelVal, targetInstance: 2)) return true;
+        if (await toolFindElementAndTap(modelVal, targetInstance: 2))
+          return true;
         return false;
       }, timeout: const Duration(milliseconds: 1500));
     } catch (_) {}
@@ -1715,7 +1839,8 @@ class FacebookAutomationService {
         'מיילס|מיילים|מייל|Mileage|Miles|קילומטראז|ק"מ|ק״מ|קילומטרים|קמ',
       );
       if (!tappedA11y) {
-        tappedA11y = await toolTapNodeAfter('מיילס') ||
+        tappedA11y =
+            await toolTapNodeAfter('מיילס') ||
             await toolTapNodeAfter('מיילים') ||
             await toolTapNodeAfter('מייל') ||
             await toolTapNodeAfter('Miles') ||
@@ -1734,7 +1859,10 @@ class FacebookAutomationService {
     }
 
     if (!enteredViaDom && !tappedA11y) {
-      _handleRetry(FacebookAutomationPhase.enterMileage, 'Mileage field not found');
+      _handleRetry(
+        FacebookAutomationPhase.enterMileage,
+        'Mileage field not found',
+      );
       return;
     }
 
@@ -1775,7 +1903,9 @@ class FacebookAutomationService {
     // Specifically target the input / editable node or instance 2!
     bool enteredA11y = false;
     if (!enteredViaDom) {
-      debugPrint('[FB-A11y] DOM price entry not confirmed, attempting A11y input matching...');
+      debugPrint(
+        '[FB-A11y] DOM price entry not confirmed, attempting A11y input matching...',
+      );
 
       // Strategy A: Specifically prefer editable node (EditText) matching "מחיר" or "Price"
       bool tapped = await toolFindElementAndTap(
@@ -1786,26 +1916,20 @@ class FacebookAutomationService {
       // Strategy B: Target second instance of "מחיר" (instance 1 is label, instance 2 is input)
       if (!tapped) {
         debugPrint('[FB-A11y] Trying instance 2 of "מחיר" for input field...');
-        tapped = await toolFindElementAndTap(
-          'מחיר',
-          targetInstance: 2,
-        );
+        tapped = await toolFindElementAndTap('מחיר', targetInstance: 2);
       }
 
       // Strategy C: Target second instance of "Price"
       if (!tapped) {
         debugPrint('[FB-A11y] Trying instance 2 of "Price" for input field...');
-        tapped = await toolFindElementAndTap(
-          'Price',
-          targetInstance: 2,
-        );
+        tapped = await toolFindElementAndTap('Price', targetInstance: 2);
       }
 
       // Strategy D: Tap the input node immediately after label "מחיר"
       if (!tapped) {
         debugPrint('[FB-A11y] Trying node after label מחיר...');
-        tapped = await toolTapNodeAfter('מחיר') ||
-            await toolTapNodeAfter('Price');
+        tapped =
+            await toolTapNodeAfter('מחיר') || await toolTapNodeAfter('Price');
       }
 
       // Strategy E: Fallback to instance 1
@@ -2019,15 +2143,17 @@ class FacebookAutomationService {
 
   // Phase 15 — Enter description
   Future<void> _phaseEnterDescription() async {
-    final hasValidDesc = formData.description.trim().isNotEmpty &&
+    final hasValidDesc =
+        formData.description.trim().isNotEmpty &&
         Yad2AccessibilityAutomationService.isValidExtractedDescription(
           formData.description,
         );
-    final descriptionText = hasValidDesc
-        ? formData.description.trim()
-        : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\n'
-            'יד: ${formData.hand} | ק"מ: ${formData.kilometers}\n'
-            'סוג דלק: ${formData.fuelType}';
+    final descriptionText =
+        hasValidDesc
+            ? formData.description.trim()
+            : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\n'
+                'יד: ${formData.hand} | ק"מ: ${formData.kilometers}\n'
+                'סוג דלק: ${formData.fuelType}';
     debugPrint(
       '[FB-A11y] EnterDescription (length: ${descriptionText.length}, validCustom: $hasValidDesc):\n$descriptionText',
     );
@@ -2040,7 +2166,9 @@ class FacebookAutomationService {
     // 2. Fallback via A11y: Description is below Transmission, so scroll down if not entered
     bool enteredA11y = false;
     if (!enteredViaDom) {
-      debugPrint('[FB-A11y] DOM description injection failed or not found. Trying A11y fallback...');
+      debugPrint(
+        '[FB-A11y] DOM description injection failed or not found. Trying A11y fallback...',
+      );
       await _scrollDown(0.25);
       await Future.delayed(const Duration(milliseconds: 500));
 
@@ -2048,7 +2176,8 @@ class FacebookAutomationService {
       enteredViaDom = await _enterDescriptionViaDom(descriptionText);
 
       if (!enteredViaDom) {
-        bool tapped = await toolTapNodeAfter('תיאור', offset: 1) ||
+        bool tapped =
+            await toolTapNodeAfter('תיאור', offset: 1) ||
             await toolTapNodeAfter('Description', offset: 1) ||
             await toolFindElementAndTap(
               'תיאור|Description',
@@ -2068,7 +2197,9 @@ class FacebookAutomationService {
     if (!enteredViaDom && !enteredA11y) {
       debugPrint('[FB-A11y] Description field not found, continuing');
     } else {
-      debugPrint('[FB-A11y] Description successfully entered! (DOM: $enteredViaDom, A11y: $enteredA11y)');
+      debugPrint(
+        '[FB-A11y] Description successfully entered! (DOM: $enteredViaDom, A11y: $enteredA11y)',
+      );
     }
 
     await Future.delayed(const Duration(milliseconds: 500));
@@ -2167,28 +2298,40 @@ class FacebookAutomationService {
     }
   }
 
+  bool _publishAttempted = false;
+
   // Phase 16 — Publish
   Future<void> _phasePublish() async {
-    await _scrollDown(0.3);
-
-    // Click Next first if multi-page
-    bool tapped = await _retryUntil(
-      () => tapSmart('Next|Continue|הבא|המשך'),
-      timeout: const Duration(seconds: 6),
-    );
-
-    if (tapped) {
-      await Future.delayed(const Duration(seconds: 2));
+    if (!_publishAttempted) {
       await _scrollDown(0.3);
+      final tapped = await _retryUntil(
+        () => tapSmart('Next|Continue|הבא|המשך'),
+        timeout: const Duration(seconds: 6),
+      );
+      if (tapped) {
+        await Future.delayed(const Duration(seconds: 2));
+        await _scrollDown(0.3);
+      }
+      if (_stopped || _isPaused) return;
+      // Once the click is attempted its outcome may be ambiguous. Resume only
+      // checks confirmation; it must never submit this listing again.
+      _publishAttempted = true;
+      await tapSmart('Publish|Publish listing|פרסם|פרסם מודעה');
     }
-
-    final published = await _retryUntil(
-      () => tapSmart('Publish|Publish listing|פרסם|פרסם מודעה'),
-      timeout: const Duration(seconds: 8),
-    );
-
-    if (!published) {
-      _handleRetry(FacebookAutomationPhase.publish, 'Publish button not found');
+    final confirmed = await _retryUntil(() async {
+      if (_stopped || _isPaused) return false;
+      final url = await controller.currentUrl() ?? '';
+      final body =
+          (await controller.runJavaScriptReturningResult(
+            "Array.from(document.querySelectorAll('h1,h2,[role=status],[role=alert]')).map(e=>e.innerText).join(' ')",
+          )).toString();
+      return PublicationConfirmation.facebook(body, url);
+    }, timeout: const Duration(seconds: 20));
+    if (!confirmed) {
+      await _handleError(
+        FacebookAutomationPhase.publish,
+        'לא התקבל אישור פרסום. יש לבדוק את המודעה לפני ניסיון נוסף.',
+      );
       return;
     }
     _handlePhaseComplete(FacebookAutomationPhase.publish);
@@ -2198,6 +2341,7 @@ class FacebookAutomationService {
 
   void _handlePhaseComplete(FacebookAutomationPhase phase) {
     debugPrint('[FB-A11y] ✅ Phase complete: ${phase.descriptionHe}');
+    if (_stopped) return;
     onPhaseComplete?.call(phase);
 
     final next = _nextPhaseAfter(phase);
@@ -2207,7 +2351,9 @@ class FacebookAutomationService {
       return;
     }
 
-    Future.delayed(_delayAfter(phase), () {
+    _currentPhase = next;
+    _pausedPhase = next;
+    _scheduler.schedule(_delayAfter(phase), () {
       if (!_isPaused) {
         _processPhase(next);
       }
@@ -2286,7 +2432,7 @@ class FacebookAutomationService {
       debugPrint(
         '[FB-A11y] 🔄 Retry $_phaseRetryCount/$_maxRetries in ${backoffMs}ms — $reason',
       );
-      Future.delayed(Duration(milliseconds: backoffMs), () {
+      _scheduler.schedule(Duration(milliseconds: backoffMs), () {
         _executePhase(phase);
       });
     } else {
@@ -2296,7 +2442,7 @@ class FacebookAutomationService {
 
   Future<void> _handleError(FacebookAutomationPhase phase, String error) async {
     debugPrint('[FB-A11y] ❌ Error at ${phase.descriptionHe}: $error');
-    _isPaused = true;
+    pauseAutomation();
     _pausedPhase = phase;
     _phaseRetryCount = 0;
     try {

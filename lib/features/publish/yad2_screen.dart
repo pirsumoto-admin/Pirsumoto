@@ -158,9 +158,38 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   // Shadow AxTree — completed by the JS channel on each observe() call
   Completer<Map<String, dynamic>>? _axTreeCompleter;
 
+  bool _publicationStopped = false;
+  bool _publicationPaused = false;
+  bool _transitioning = false;
+
   @override
   void initState() {
     super.initState();
+    FirebaseChatReceiver.bindControls(
+      widget.publishData.publicationIdentity,
+      this,
+      pause: () async {
+        _publicationPaused = true;
+        await _automationService?.pauseAndWait();
+        if (mounted) setState(() => _isPaused = true);
+      },
+      resume: () {
+        _publicationPaused = false;
+        if (_publicationStopped) return;
+        _automationService?.resumeAutomation();
+        if (mounted) setState(() => _isPaused = false);
+      },
+      stop: () async {
+        _publicationStopped = true;
+        if (_automationService != null) await _automationService.stopAndWait();
+        await _controller.loadRequest(Uri.parse('about:blank'));
+        if (mounted)
+          setState(() {
+            _isPaused = true;
+            _statusMessage = 'הפרסום בוטל';
+          });
+      },
+    );
     // Hide status bar + Android soft navigation bar for a full-screen WebView.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _controller =
@@ -225,6 +254,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
   @override
   void dispose() {
+    FirebaseChatReceiver.unbindControls(this);
     _automationService?.dispose();
     WakelockPlus.disable(); // Ensure screen can sleep when leaving the automation screen
     // Maintain immersive full-screen mode when navigating away.
@@ -366,6 +396,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   // Future<void> _notifyWhatsAppAutomationStopped({required String stepName, required String error}) async { ... }
 
   Future<void> _handleYad2SuccessAndTransitionToFacebook() async {
+    if (_publicationStopped ||
+        _transitioning ||
+        !FirebaseChatReceiver.isCurrent(widget.publishData.publicationIdentity))
+      return;
+    _transitioning = true;
     _automationService?.stop();
     try {
       await _controller.loadRequest(Uri.parse('about:blank'));
@@ -389,8 +424,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     // }
 
     if (mounted) {
-      FirebaseChatReceiver.reportAutomationStatus(
-        statusType: 'finished',
+      await FirebaseChatReceiver.reportAutomationStatus(
+        identity: widget.publishData.publicationIdentity,
+        statusType: 'platform_completed',
+        platform: 'yad2',
         text: '🎉 הפרסום ביד2 הושלם בהצלחה!',
       );
       setState(() {
@@ -400,9 +437,21 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       });
 
       await Future.delayed(const Duration(milliseconds: 600));
-      if (!mounted) return;
+      if (!mounted ||
+          _publicationStopped ||
+          !FirebaseChatReceiver.isCurrent(
+            widget.publishData.publicationIdentity,
+          ))
+        return;
 
-      final desc = (_automationService?.extractedDescription as String?) ??
+      if (!await FirebaseChatReceiver.waitUntilPublishing(
+            widget.publishData.publicationIdentity,
+          ) ||
+          !mounted ||
+          _publicationStopped)
+        return;
+      final desc =
+          (_automationService?.extractedDescription as String?) ??
           Yad2AccessibilityAutomationService.lastExtractedDescription;
       final hasValidExtractedDesc =
           Yad2AccessibilityAutomationService.isValidExtractedDescription(desc);
@@ -430,12 +479,13 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
-          builder: (_) => FacebookScreen(
-            publishData: updatedPublishData,
-            // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey pass-through disabled.
-            // startedFromWhatsApp: widget.startedFromWhatsApp,
-            // whatsAppSenderKey: widget.whatsAppSenderKey,
-          ),
+          builder:
+              (_) => FacebookScreen(
+                publishData: updatedPublishData,
+                // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey pass-through disabled.
+                // startedFromWhatsApp: widget.startedFromWhatsApp,
+                // whatsAppSenderKey: widget.whatsAppSenderKey,
+              ),
         ),
       );
     }
@@ -476,6 +526,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   }
 
   void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
+    if (_publicationStopped ||
+        !FirebaseChatReceiver.isCurrent(widget.publishData.publicationIdentity))
+      return;
     _automationService?.stop();
     _automationService?.dispose();
     _automationService = null;
@@ -519,8 +572,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           },
           onPhaseError: (phase, error) {
             FirebaseChatReceiver.reportAutomationStatus(
+              identity: widget.publishData.publicationIdentity,
               statusType: 'stuck',
-              text: '⚠️ האוטומציה ביד2 נתקעה בשלב "${phase.description}": $error',
+              text:
+                  '⚠️ האוטומציה ביד2 נתקעה בשלב "${phase.description}": $error',
             );
             if (mounted) {
               setState(() {
@@ -541,6 +596,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           onAutomationComplete: (success) async {
             if (!success) {
               FirebaseChatReceiver.reportAutomationStatus(
+                identity: widget.publishData.publicationIdentity,
                 statusType: 'stuck',
                 text: '⚠️ האוטומציה ביד2 נכשלה',
               );
@@ -565,6 +621,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           },
           onLoginRequired: () {
             FirebaseChatReceiver.reportAutomationStatus(
+              identity: widget.publishData.publicationIdentity,
               statusType: 'stuck',
               text: '⚠️ האוטומציה נתקעה: נדרשת התחברות לחשבון יד2',
             );
@@ -594,102 +651,112 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           // startedFromWhatsApp: widget.startedFromWhatsApp,
           // whatsAppSenderKey: widget.whatsAppSenderKey,
           onTapPreview: _showTapMarker,
-        onAutomationFallback: (source, target) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).hideCurrentSnackBar();
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  source == 'OCR'
-                      ? '🔄 שים לב: המערכת משתמשת בזיהוי תמונה (OCR) עבור "$target"'
-                      : '🔄 שים לב: המערכת משתמשת ב-JavaScript עבור "$target"',
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    fontFamily: 'Inter',
-                    fontWeight: FontWeight.bold,
+          onAutomationFallback: (source, target) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    source == 'OCR'
+                        ? '🔄 שים לב: המערכת משתמשת בזיהוי תמונה (OCR) עבור "$target"'
+                        : '🔄 שים לב: המערכת משתמשת ב-JavaScript עבור "$target"',
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
+                  backgroundColor:
+                      source == 'OCR' ? Colors.orange : Colors.blueGrey,
+                  duration: const Duration(seconds: 2),
                 ),
-                backgroundColor:
-                    source == 'OCR' ? Colors.orange : Colors.blueGrey,
-                duration: const Duration(seconds: 2),
-              ),
+              );
+            }
+          },
+          onPhaseComplete: (phase) {
+            if (mounted) setState(() => _statusMessage = phase.description);
+          },
+          onPhaseError: (phase, error) {
+            FirebaseChatReceiver.reportAutomationStatus(
+              identity: widget.publishData.publicationIdentity,
+              statusType: 'stuck',
+              text: 'האוטומציה נתקעה: $error',
             );
-          }
-        },
-        onPhaseComplete: (phase) {
-          if (mounted) setState(() => _statusMessage = phase.description);
-        },
-        onPhaseError: (phase, error) {
-          unawaited(
-            // [WHATSAPP-DISABLED] _notifyWhatsAppAutomationStopped disabled.
-            // _notifyWhatsAppAutomationStopped(
-            //   stepName: phase.description,
-            //   error: error,
-            // ),
-            Future.value(),
-          );
-          if (mounted) {
-            setState(() {
-              _isPaused = true;
-              _showPauseButton = false;
-              _statusMessage = 'שגיאה: $error';
-            });
-            Future.delayed(const Duration(seconds: 5), () {
-              if (mounted) {
-                setState(() {
-                  _statusMessage = '';
-                  _showPauseButton = true;
-                });
-              }
-            });
-          }
-        },
-        onAutomationComplete: (success) async {
-          if (!success) {
             unawaited(
               // [WHATSAPP-DISABLED] _notifyWhatsAppAutomationStopped disabled.
               // _notifyWhatsAppAutomationStopped(
-              //   stepName: 'סיום האוטומציה',
-              //   error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
+              //   stepName: phase.description,
+              //   error: error,
               // ),
               Future.value(),
             );
             if (mounted) {
               setState(() {
-                _automationComplete = true;
-                _automationError = true;
-                _statusMessage = 'האוטומציה נכשלה';
+                _isPaused = true;
+                _showPauseButton = false;
+                _statusMessage = 'שגיאה: $error';
+              });
+              Future.delayed(const Duration(seconds: 5), () {
+                if (mounted) {
+                  setState(() {
+                    _statusMessage = '';
+                    _showPauseButton = true;
+                  });
+                }
               });
             }
-          } else {
-            await _handleYad2SuccessAndTransitionToFacebook();
-          }
-        },
-        onFirstStepDetected: () {
-          if (mounted) {
-            setState(() {
-              _isLoginRequired = false;
-              _showPauseButton = true;
-            });
-          }
-        },
-        onLoginRequired: () {
-          if (mounted && !_isReloading) {
-            setState(() {
-              _isLoginRequired = true;
-              _statusMessage = 'נדרשת התחברות לחשבון יד2';
-            });
-            _openPresetLoginDialog();
-          }
-        },
-        onToggleOverlayVisibility: (visible) {
-          if (mounted) {
-            setState(() {
-              _hideOverlayForStep = !visible;
-            });
-          }
-        },
-      );
+          },
+          onAutomationComplete: (success) async {
+            if (!success) {
+              unawaited(
+                // [WHATSAPP-DISABLED] _notifyWhatsAppAutomationStopped disabled.
+                // _notifyWhatsAppAutomationStopped(
+                //   stepName: 'סיום האוטומציה',
+                //   error: 'האוטומציה נכשלה ללא שגיאה מפורטת.',
+                // ),
+                Future.value(),
+              );
+              if (mounted) {
+                setState(() {
+                  _automationComplete = true;
+                  _automationError = true;
+                  _statusMessage = 'האוטומציה נכשלה';
+                });
+              }
+            } else {
+              await _handleYad2SuccessAndTransitionToFacebook();
+            }
+          },
+          onFirstStepDetected: () {
+            if (mounted) {
+              setState(() {
+                _isLoginRequired = false;
+                _showPauseButton = true;
+              });
+            }
+          },
+          onLoginRequired: () {
+            FirebaseChatReceiver.reportAutomationStatus(
+              identity: widget.publishData.publicationIdentity,
+              statusType: 'stuck',
+              text: 'נדרשת התחברות ליד2',
+            );
+            if (mounted && !_isReloading) {
+              setState(() {
+                _isLoginRequired = true;
+                _statusMessage = 'נדרשת התחברות לחשבון יד2';
+              });
+              _openPresetLoginDialog();
+            }
+          },
+          onToggleOverlayVisibility: (visible) {
+            if (mounted) {
+              setState(() {
+                _hideOverlayForStep = !visible;
+              });
+            }
+          },
+        );
       } // End of Platform.isMacOS else
     } else {
       _automationService = Yad2AutomationService(
@@ -729,6 +796,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onPhaseError: (phase, error) {
+          FirebaseChatReceiver.reportAutomationStatus(
+            identity: widget.publishData.publicationIdentity,
+            statusType: 'stuck',
+            text: 'האוטומציה נתקעה: $error',
+          );
           unawaited(
             // [WHATSAPP-DISABLED] _notifyWhatsAppAutomationStopped disabled.
             // _notifyWhatsAppAutomationStopped(
@@ -792,6 +864,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           }
         },
         onLoginRequired: () {
+          FirebaseChatReceiver.reportAutomationStatus(
+            identity: widget.publishData.publicationIdentity,
+            statusType: 'stuck',
+            text: 'נדרשת התחברות ליד2',
+          );
           if (mounted && !_isReloading) {
             setState(() {
               _isLoginRequired = true;
@@ -804,9 +881,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
     setState(() => _statusMessage = 'מתחיל אוטומציה...');
     FirebaseChatReceiver.reportAutomationStatus(
+      identity: widget.publishData.publicationIdentity,
       statusType: 'step',
       text: '🚀 התחלת פרסום ביד2...',
     );
+    if (_publicationPaused) _automationService!.pauseAutomation();
     _automationService!.startAutomation();
   }
 
@@ -817,6 +896,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     final hasPermission =
         await Yad2AccessibilityAutomationService.checkPermission();
     if (!hasPermission) {
+      FirebaseChatReceiver.reportAutomationStatus(
+        identity: widget.publishData.publicationIdentity,
+        statusType: 'stuck',
+        text: 'נדרשת הרשאת נגישות לפרסום',
+      );
       if (!mounted) return;
       showDialog(
         context: context,
@@ -926,7 +1010,15 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                   ),
                   elevation: 6,
                 ),
-                onPressed: () {
+                onPressed: () async {
+                  final identity = widget.publishData.publicationIdentity;
+                  if (identity != null) {
+                    await FirebaseChatReceiver.setLocalPaused(
+                      identity,
+                      !_isPaused,
+                    );
+                    return;
+                  }
                   if (_isPaused) {
                     _automationService?.resumeAutomation();
                     setState(() {
@@ -934,7 +1026,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                       _statusMessage = 'ממשיך אוטומציה...';
                     });
                     FirebaseChatReceiver.reportAutomationStatus(
-                      statusType: 'step',
+                      identity: widget.publishData.publicationIdentity,
+                      statusType: 'publishing',
                       text: '▶️ ממשיך אוטומציה ביד2...',
                     );
                   } else {
@@ -945,7 +1038,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                           'האוטומציה מושהית. לחץ על המשך כדי לחזור';
                     });
                     FirebaseChatReceiver.reportAutomationStatus(
-                      statusType: 'stopped',
+                      identity: widget.publishData.publicationIdentity,
+                      statusType: 'paused',
                       text: '🛑 האוטומציה ביד2 הופסקה (הושהתה) על ידי המשתמש',
                     );
                   }
@@ -1066,7 +1160,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                       borderRadius: BorderRadius.circular(30),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFFFF7A00).withValues(alpha: 0.45),
+                          color: const Color(
+                            0xFFFF7A00,
+                          ).withValues(alpha: 0.45),
                           blurRadius: 14,
                           offset: const Offset(0, 4),
                         ),

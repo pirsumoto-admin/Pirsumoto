@@ -1,453 +1,753 @@
+import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:publication_protocol/publication_protocol.dart';
 import '../services/p2p_auto_publish_launcher.dart';
-import '../services/whatsapp_text_validation_service.dart';
+import '../services/worker_backend.dart';
+
+/// The backend owns queue selection; this worker sees only its reserved request.
+/// Firestore transactions fence callbacks by request, attempt and worker process.
+class DownloadedAttachment {
+  final Uint8List bytes;
+  final String? generation;
+  DownloadedAttachment(this.bytes, this.generation);
+}
 
 class FirebaseChatReceiver {
   final FirebaseFirestore _firestore;
   final String deviceId;
-
-  late final String p2pSenderKey;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _messagesSub;
-  final Set<String> _processingMessageIds = {};
-
-  /// Concurrency guard on worker side: only 1 publication at a time
-  static bool isPublishingActive = false;
-
-  static String? currentSessionId;
-  static String? currentDeviceId;
-
-  static Future<void> reportAutomationStatus({
-    required String statusType,
-    required String text,
-    String? sessionId,
-    String? deviceId,
-  }) async {
-    final targetSessionId = sessionId ?? currentSessionId;
-    final targetDeviceId = deviceId ?? currentDeviceId ?? 'mdm_device_01';
-    try {
-      final docId = 'status_${DateTime.now().millisecondsSinceEpoch}';
-      await FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(targetDeviceId)
-          .collection('messages')
-          .doc(docId)
-          .set({
-        'id': docId,
-        'sessionId': targetSessionId,
-        'sender': 'bot',
-        'type': 'status',
-        'statusType': statusType,
-        'text': text,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      debugPrint('[FirebaseChatReceiver] Automation status sent: $text (session: $targetSessionId)');
-    } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Error reporting automation status: $e');
-    }
-  }
+  final Stream<String?>? ownerChanges;
+  final Future<DownloadedAttachment> Function(String)? downloadAttachment;
+  final Future<Directory> Function()? mediaDirectory;
+  final Future<bool> Function(Map<String, String>, PublicationIdentity)? launch;
+  final Future<Map<String, dynamic>?> Function(String workerRunId)? claimNext;
+  // Diagnostics used to verify that unrelated documents never wake the worker.
+  final void Function(String event)? onActivity;
+  String? _watchedRequestId;
+  bool _paused = false;
+  Map<String, String>? _preparedVehicle;
+  Future<void> poll() => _schedule(_tick);
+  late final String _runId;
+  static FirebaseChatReceiver? _instance;
+  StreamSubscription? _authSub, _requestsSub;
+  Timer? _timer;
+  Future<void> _serial = Future.value();
+  PublicationIdentity? _active, _takeoverPausedIdentity;
+  String? _uid, _activeOwnerUid;
+  bool _disposed = false;
+  bool _recovered = false;
+  DateTime? _leaseExpiry;
+  Future<void> Function()? _pause;
+  VoidCallback? _resume;
+  Future<void> Function()? _stop;
+  Object? _controlOwner;
+  final List<Future<void> Function()> _pendingReports = [];
 
   FirebaseChatReceiver({
     FirebaseFirestore? firestore,
     required this.deviceId,
+    this.ownerChanges,
+    this.downloadAttachment,
+    this.mediaDirectory,
+    this.launch,
+    this.claimNext,
+    this.onActivity,
   }) : _firestore = firestore ?? FirebaseFirestore.instance {
-    currentDeviceId = deviceId;
-    p2pSenderKey = 'p2p_$deviceId';
-    _registerReplyHandlers();
+    _runId = _firestore.collection('_ids').doc().id;
+    _instance = this;
+  }
+  DocumentReference<Map<String, dynamic>> get _device =>
+      _firestore.collection('remote_chats').doc(deviceId);
+  CollectionReference<Map<String, dynamic>> get _requests =>
+      _device.collection('requests');
+  static bool get isPublishingActive => _instance?._active != null;
+  static bool isCurrent(PublicationIdentity? id) =>
+      id == null ||
+      (_instance?._active?.matches(id) == true &&
+          _instance?._disposed == false &&
+          _instance?._uid != null &&
+          _instance?._uid == _instance?._activeOwnerUid);
+
+  static Future<bool> waitUntilPublishing(PublicationIdentity? id) async {
+    if (id == null) return true;
+    final self = _instance;
+    if (self == null || !isCurrent(id)) return false;
+    final snapshot = await self._requests
+        .doc(id.requestId)
+        .snapshots()
+        .firstWhere((snapshot) {
+          final data = snapshot.data();
+          return data == null ||
+              data['attemptId'] != id.attemptId ||
+              data['state'] == 'publishing' ||
+              data['state'] == 'canceling' ||
+              PublicationState.terminal.contains(data['state']);
+        });
+    return isCurrent(id) && snapshot.data()?['state'] == 'publishing';
   }
 
-  CollectionReference<Map<String, dynamic>> get _messagesCollection =>
-      _firestore.collection('remote_chats').doc(deviceId).collection('messages');
-
-  void _registerReplyHandlers() {
-    WhatsAppTextValidationService.registerReplySender(
-      p2pSenderKey,
-      _handleValidationReply,
-    );
-    WhatsAppTextValidationService.registerAutoPublishLauncher(
-      _handleAutoPublishTriggered,
-    );
-    debugPrint('[FirebaseChatReceiver] Registered reply handlers for $p2pSenderKey');
+  static void bindControls(
+    PublicationIdentity? id,
+    Object owner, {
+    required Future<void> Function() pause,
+    required VoidCallback resume,
+    required Future<void> Function() stop,
+  }) {
+    final self = _instance;
+    if (id == null || self == null || !isCurrent(id)) return;
+    self._controlOwner = owner;
+    self._pause = pause;
+    self._resume = resume;
+    self._stop = stop;
+    if (self._paused) self._pauseSafely();
   }
 
-  /// Start listening for incoming user messages in Firestore
+  static void unbindControls(Object owner) {
+    final self = _instance;
+    if (self?._controlOwner != owner) return;
+    self!._pause = null;
+    self._resume = null;
+    self._stop = null;
+    self._controlOwner = null;
+  }
+
+  static Future<void> pauseForTakeover() async {
+    final self = _instance;
+    final identity = self?._active;
+    if (self == null || identity == null) return;
+    await self._schedule(() async {
+      if (!isCurrent(identity)) return;
+      final state =
+          (await self._requests.doc(identity.requestId).get()).data()?['state'];
+      if (!['publishing', 'preparing'].contains(state)) return;
+      await self._pause?.call();
+      if (await self._report(
+        identity,
+        'paused',
+        'האוטומציה הושהתה לשליטה מרחוק',
+      )) {
+        self._takeoverPausedIdentity = identity;
+      } else if (isCurrent(identity)) {
+        throw StateError('Unable to acknowledge automation pause');
+      }
+    }, propagateErrors: true);
+  }
+
+  static Future<void> setLocalPaused(
+    PublicationIdentity id,
+    bool paused,
+  ) async {
+    final self = _instance;
+    if (self == null || !isCurrent(id)) return;
+    await self._schedule(() async {
+      final state =
+          (await self._requests.doc(id.requestId).get()).data()?['state'];
+      if (state == 'canceling' || PublicationState.terminal.contains(state))
+        return;
+      if (paused) {
+        self._takeoverPausedIdentity = null;
+        await self._pause?.call();
+        await self._report(id, 'paused', 'האוטומציה הושהתה');
+      } else if (!self._recovered) {
+        if (!await self._report(id, 'publishing', 'האוטומציה ממשיכה')) return;
+        if (await waitUntilPublishing(id)) await self._resumeExecution(id);
+      }
+    });
+  }
+
+  static void resumeAfterTakeover() {
+    final self = _instance;
+    if (self?._active == null || self!._recovered) return;
+    final identity = self._takeoverPausedIdentity;
+    self._takeoverPausedIdentity = null;
+    if (identity == null || !isCurrent(identity)) return;
+    unawaited(
+      self._schedule(() async {
+        if (self._active?.matches(identity) != true) return;
+        final data =
+            (await self._requests.doc(self._active!.requestId).get()).data();
+        if (data?['state'] != 'paused') return;
+        if (await self._report(identity, 'publishing', 'האוטומציה ממשיכה'))
+          await self._resumeExecution(identity);
+      }),
+    );
+  }
+
+  Future<void> _schedule(
+    Future<void> Function() operation, {
+    bool propagateErrors = false,
+  }) {
+    final next = _serial.then((_) async {
+      if (!_disposed) await operation();
+    });
+    _serial = next.catchError((Object error, StackTrace stack) {
+      debugPrint('[PublicationWorker] $error');
+    });
+    return propagateErrors ? next : _serial;
+  }
+
+  void _pauseSafely() {
+    _paused = true;
+    final pause = _pause;
+    if (pause != null)
+      unawaited(
+        pause().catchError((Object error) {
+          debugPrint("[PublicationWorker] Pause could not finish: $error");
+        }),
+      );
+  }
+
   void startListening() {
-    _messagesSub?.cancel();
-    debugPrint('[FirebaseChatReceiver] Starting Firestore listener for $deviceId messages');
+    _authSub = (ownerChanges ??
+            FirebaseAuth.instance.authStateChanges().map((user) => user?.uid))
+        .listen((uid) {
+          _watchActive(null);
+          _uid = uid;
+          if (_active != null && uid != _activeOwnerUid) _pauseSafely();
+          if (uid == null) {
+            _pauseSafely();
+            return;
+          }
+          if (uid == _activeOwnerUid) _watchActive(_active?.requestId);
+          unawaited(_schedule(_tick));
+        });
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_leaseExpiry != null && DateTime.now().isAfter(_leaseExpiry!)) {
+        _pauseSafely();
+        final id = _active;
+        if (id != null)
+          unawaited(
+            reportAutomationStatus(
+              identity: id,
+              statusType: 'stuck',
+              text: 'החיבור אבד; יש לבדוק את מצב הפרסום לפני המשך',
+            ),
+          );
+      }
+      unawaited(_schedule(_tick));
+    });
+  }
 
-    _messagesSub = _messagesCollection
-        .where('sender', isEqualTo: 'user')
-        .where('status', isEqualTo: 'pending')
+  void _watchActive(String? requestId) {
+    if (_watchedRequestId == requestId) return;
+    _requestsSub?.cancel();
+    _requestsSub = null;
+    _watchedRequestId = requestId;
+    if (requestId == null) return;
+    _requestsSub = _requests
+        .doc(requestId)
         .snapshots()
         .listen(
-      (snapshot) {
-        for (final change in snapshot.docChanges) {
-          if (change.type == DocumentChangeType.added ||
-              change.type == DocumentChangeType.modified) {
-            final doc = change.doc;
-            final messageId = doc.id;
-            if (!_processingMessageIds.contains(messageId)) {
-              _processIncomingMessageDoc(doc);
+          (snapshot) {
+            if (_disposed ||
+                _active?.requestId != requestId ||
+                _uid != _activeOwnerUid)
+              return;
+            onActivity?.call('active_snapshot');
+            final data = snapshot.data();
+            final control = data?['control'] as Map?;
+            // Own status writes need no reconciliation. Only active-car controls or
+            // invalidation wake the state machine; other request docs aren't listened to.
+            if (data == null ||
+                data['attemptId'] != _active?.attemptId ||
+                PublicationState.terminal.contains(data['state']) ||
+                (control != null &&
+                    control['attemptId'] == _active?.attemptId &&
+                    control['id'] != data['appliedControlId'])) {
+              unawaited(_schedule(_tick));
             }
-          }
-        }
-      },
-      onError: (err) {
-        debugPrint('[FirebaseChatReceiver] Firestore listener error: $err');
-      },
-    );
+          },
+          onError: (Object error) {
+            debugPrint('[PublicationWorker] Active listener: $error');
+          },
+        );
   }
 
   void dispose() {
-    _messagesSub?.cancel();
-    _messagesSub = null;
-    WhatsAppTextValidationService.unregisterReplySender(p2pSenderKey);
-    WhatsAppTextValidationService.unregisterAutoPublishLauncher(
-      _handleAutoPublishTriggered,
-    );
-    _processingMessageIds.clear();
-    debugPrint('[FirebaseChatReceiver] Disposed for device $deviceId');
+    _disposed = true;
+    _timer?.cancel();
+    _authSub?.cancel();
+    _requestsSub?.cancel();
+    _pauseSafely();
+    if (identical(_instance, this)) _instance = null;
   }
 
-  Future<void> _processIncomingMessageDoc(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) async {
-    final messageId = doc.id;
-    _processingMessageIds.add(messageId);
-
-    try {
-      final data = doc.data();
-      if (data == null) return;
-
-      // Mark as processing immediately so other listeners don't duplicate
-      await doc.reference.update({'status': 'processing'});
-
-      final text = data['text'] as String? ?? '';
-      final mediaType = data['mediaType'] as String?;
-      final fileName = data['fileName'] as String? ?? 'media_file';
-      final sessionId = data['sessionId'] as String?;
-      final type = data['type'] as String? ?? 'message';
-
-      final sessionKey = sessionId != null && sessionId.isNotEmpty 
-          ? '${p2pSenderKey}_$sessionId' 
-          : p2pSenderKey;
-
-      debugPrint(
-        '[FirebaseChatReceiver] Processing message $messageId: type=$type, mediaType=$mediaType, text="$text"',
-      );
-
-      // 1. Direct publish command from Remote Control ("The Brain")
-      if (type == 'publish_vehicle') {
-        currentSessionId = sessionId;
-        currentDeviceId = deviceId;
-        await _handleDirectPublishVehicle(doc, sessionId);
-      } else if (mediaType == 'audio') {
-        // Save media file if present without triggering legacy validation greetings
-        final bytes = await _resolveMediaBytes(doc);
-        if (bytes != null && bytes.isNotEmpty) {
-          await _saveBytesToMediaFile(
-            bytes: bytes,
-            fileName: fileName,
-            ext: 'm4a',
-          );
-        }
-      } else if (mediaType == 'image') {
-        // Save image locally so it is ready for publication without triggering validation greeting loops
-        final bytes = await _resolveMediaBytes(doc);
-        if (bytes != null && bytes.isNotEmpty) {
-          await _saveBytesToMediaFile(
-            bytes: bytes,
-            fileName: fileName,
-            ext: 'jpg',
-          );
-        }
-      } else if (mediaType == 'video') {
-        final bytes = await _resolveMediaBytes(doc);
-        if (bytes != null && bytes.isNotEmpty) {
-          await _saveBytesToMediaFile(
-            bytes: bytes,
-            fileName: fileName,
-            ext: 'mp4',
-          );
-        }
-      } else {
-        // Plain text message or reset command
-        final trimmed = text.trim();
-        if (type == 'delete_session') {
-          debugPrint('[FirebaseChatReceiver] Deleting session state for $sessionKey');
-          isPublishingActive = false;
-          WhatsAppTextValidationService.instance.stopAutomation();
-          await WhatsAppTextValidationService.instance.clearSenderState(sessionKey);
-          await WhatsAppTextValidationService.instance.clearLastVehicle(sessionKey);
-        } else if (type == 'reset' || trimmed == 'ביטול' || trimmed == 'לבטל') {
-          debugPrint('[FirebaseChatReceiver] Resetting sender state for $sessionKey');
-          isPublishingActive = false;
-          WhatsAppTextValidationService.instance.stopAutomation();
-          await WhatsAppTextValidationService.instance.clearSenderState(sessionKey);
-          await WhatsAppTextValidationService.instance.clearSenderState(p2pSenderKey);
-        }
-      }
-
-      // Mark as processed and delete blob/base64 payload to keep Firestore storage clean
-      await doc.reference.update({
-        'status': 'processed',
-        'processedAt': FieldValue.serverTimestamp(),
-        'mediaBlob': FieldValue.delete(),
-        'base64Data': FieldValue.delete(),
-      });
-    } catch (e, st) {
-      debugPrint('[FirebaseChatReceiver] Error processing message $messageId: $e\n$st');
-      try {
-        await doc.reference.update({
-          'status': 'error',
-          'errorMessage': e.toString(),
-        });
-      } catch (_) {}
-    } finally {
-      _processingMessageIds.remove(messageId);
-    }
-  }
-
-  Future<void> _handleDirectPublishVehicle(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-    String? sessionId,
-  ) async {
-    final data = doc.data();
-    if (data == null) return;
-
-    if (isPublishingActive) {
-      debugPrint('[FirebaseChatReceiver] Rejecting publish: worker already busy');
-      await _sendStatusMessage(
-        statusType: 'busy',
-        text: 'המכשיר כרגע מבצע פרסום אחר ביד2. הבקשה נדחתה כדי למנוע התנגשות.',
-        sessionId: sessionId,
-      );
+  Future<void> _tick() async {
+    onActivity?.call('tick');
+    if (_uid == null || (_active != null && _activeOwnerUid != _uid)) return;
+    final owner = await _firestore
+        .collection('remote_control_devices')
+        .doc(deviceId)
+        .get(const GetOptions(source: Source.server));
+    if (owner.data()?['ownerUid'] != _uid) {
+      _pauseSafely();
       return;
     }
-
-    isPublishingActive = true;
-    try {
-      final rawVehicleData = data['vehicleData'] as Map<String, dynamic>? ?? {};
-      final vehicleData = rawVehicleData.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
-      final imageDocIds = (data['imageDocIds'] as List?)?.map((e) => e.toString()).toList() ?? [];
-
-      final plate = vehicleData['license_plate'] ?? vehicleData['license'] ?? 'ללא לוחית';
-      final carTitle = [vehicleData['maker'] ?? '', vehicleData['model'] ?? '', vehicleData['year'] ?? '']
-          .where((s) => s.isNotEmpty)
-          .join(' ');
-
-      await _sendStatusMessage(
-        statusType: 'publishing',
-        text: 'מתחיל פרסום ביד2 עבור $carTitle (רישוי $plate)...',
-        sessionId: sessionId,
-      );
-
-      // Download / fetch uploaded images from Firestore if doc IDs are provided
-      final localImagePaths = <String>[];
-      for (final docId in imageDocIds) {
-        try {
-          final imgDoc = await _messagesCollection.doc(docId).get();
-          if (imgDoc.exists) {
-            final bytes = await _resolveMediaBytes(imgDoc);
-            if (bytes != null && bytes.isNotEmpty) {
-              final fileName = imgDoc.data()?['fileName'] as String? ?? 'img_$docId.jpg';
-              final file = await _saveBytesToMediaFile(bytes: bytes, fileName: fileName, ext: 'jpg');
-              localImagePaths.add(file.path);
-            }
-          }
-        } catch (e) {
-          debugPrint('[FirebaseChatReceiver] Error resolving publication image doc $docId: $e');
-        }
-      }
-
-      if (localImagePaths.isNotEmpty) {
-        vehicleData['image_paths'] = jsonEncode(localImagePaths);
-        vehicleData['KEY_IMAGE_PATHS'] = jsonEncode(localImagePaths);
-      }
-
-      debugPrint('[FirebaseChatReceiver] Launching Yad2 publication with ${localImagePaths.length} images for $plate');
-      final launched = await P2PAutoPublishLauncher.launch(vehicleData);
-
-      if (launched) {
-        await _sendStatusMessage(
-          statusType: 'step',
-          text: 'אוטומציית יד2 נפתחה בהצלחה וממלאת את הטופס...',
-          sessionId: sessionId,
-        );
+    while (_pendingReports.isNotEmpty) {
+      await _pendingReports.first();
+      _pendingReports.removeAt(0);
+    }
+    final deviceData =
+        (await _device.get(const GetOptions(source: Source.server))).data();
+    final activeId = deviceData?['activeRequestId'] as String?;
+    if (activeId != null) {
+      final snap = await _requests
+          .doc(activeId)
+          .get(const GetOptions(source: Source.server));
+      final data = snap.data();
+      if (data == null ||
+          PublicationState.terminal.contains(data['state']) ||
+          data['archived'] == true) {
+        // Never free a live foreign lease, or release our slot before the engine drains.
+        final lease = deviceData?['leaseUntil'] as Timestamp?;
+        if (deviceData?['workerRunId'] != _runId &&
+            lease != null &&
+            lease.toDate().isAfter(DateTime.now()))
+          return;
+        if (_active != null) await _stop?.call();
+        final released = await _firestore.runTransaction<bool>((tx) async {
+          final d = (await tx.get(_device)).data();
+          final r = (await tx.get(snap.reference)).data();
+          if (d?['activeRequestId'] != activeId ||
+              d?['workerRunId'] != deviceData?['workerRunId'] ||
+              (d?['workerRunId'] != _runId &&
+                  ((d?['leaseUntil'] as Timestamp?)?.toDate().isAfter(
+                        DateTime.now(),
+                      ) ??
+                      false)) ||
+              (r != null &&
+                  !PublicationState.terminal.contains(r['state']) &&
+                  r['archived'] != true))
+            return false;
+          tx.update(_device, {
+            'activeRequestId': FieldValue.delete(),
+            'workerRunId': FieldValue.delete(),
+            'leaseUntil': FieldValue.delete(),
+          });
+          return true;
+        });
+        if (!released) return;
+        _clearActive();
       } else {
-        await _sendStatusMessage(
-          statusType: 'error',
-          text: 'שגיאה בפתיחת מסך הפרסום של יד2.',
-          sessionId: sessionId,
-        );
-        isPublishingActive = false;
-      }
-    } catch (e, st) {
-      debugPrint('[FirebaseChatReceiver] Exception during direct publish: $e\n$st');
-      await _sendStatusMessage(
-        statusType: 'error',
-        text: 'שגיאה לא צפויה בעת הרצת הפרסום: $e',
-        sessionId: sessionId,
-      );
-      isPublishingActive = false;
-    }
-  }
-
-  Future<Uint8List?> _resolveMediaBytes(
-    DocumentSnapshot<Map<String, dynamic>> doc,
-  ) async {
-    final data = doc.data();
-    if (data == null) return null;
-
-    // 1. Check direct native Blob field (no Base64 inflation)
-    if (data['mediaBlob'] != null && data['mediaBlob'] is Blob) {
-      return (data['mediaBlob'] as Blob).bytes;
-    }
-
-    // 2. Check chunks in subcollection (for files > 750KB)
-    final totalChunks = data['totalChunks'] as int? ?? 1;
-    if (totalChunks > 1) {
-      debugPrint('[FirebaseChatReceiver] Fetching $totalChunks chunks for ${doc.id}...');
-      final chunksQuery = await doc.reference
-          .collection('chunks')
-          .orderBy('chunkIndex', descending: false)
-          .get();
-
-      if (chunksQuery.docs.length >= totalChunks) {
-        final builder = BytesBuilder();
-        for (final chunkDoc in chunksQuery.docs) {
-          final chunkData = chunkDoc.data();
-          if (chunkData['blob'] is Blob) {
-            builder.add((chunkData['blob'] as Blob).bytes);
-          } else if (chunkData['base64'] is String) {
-            builder.add(base64Decode(chunkData['base64'] as String));
-          }
+        if (_active != null &&
+            (_active!.requestId != activeId ||
+                _active!.attemptId != data['attemptId'])) {
+          _pauseSafely();
+          // An unexpected attempt change must never clear another reservation.
+          return;
         }
-
-        // Clean up chunks subcollection to keep Firestore completely clean
-        for (final chunkDoc in chunksQuery.docs) {
-          chunkDoc.reference.delete().ignore();
+        if (data['ownerUid'] != _uid) {
+          _pauseSafely();
+          return;
         }
-
-        return builder.toBytes();
-      } else {
-        debugPrint(
-          '[FirebaseChatReceiver] Chunks not all arrived yet: ${chunksQuery.docs.length}/$totalChunks',
-        );
-        return null;
+        if (deviceData?['workerRunId'] != _runId) {
+          final lease = deviceData?['leaseUntil'] as Timestamp?;
+          if (lease != null && lease.toDate().isAfter(DateTime.now())) return;
+          final recovered = await _firestore.runTransaction<bool>((tx) async {
+            final d = (await tx.get(_device)).data();
+            final r = (await tx.get(snap.reference)).data();
+            if (d?['activeRequestId'] != activeId ||
+                r == null ||
+                ((d?['leaseUntil'] as Timestamp?)?.toDate().isAfter(
+                      DateTime.now(),
+                    ) ??
+                    false))
+              return false;
+            tx.update(_device, {
+              'workerRunId': _runId,
+              'leaseUntil': Timestamp.fromDate(
+                DateTime.now().add(const Duration(seconds: 60)),
+              ),
+            });
+            tx.update(snap.reference, {
+              'workerRunId': _runId,
+              'state': r['state'] == 'canceling' ? 'canceling' : 'stuck',
+              'revision': (r['revision'] as int) + 1,
+              'lastMessage':
+                  'המכשיר הופעל מחדש. יש לבדוק אם פורסם לפני ביטול ויצירת בקשה חדשה.',
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
+            return true;
+          });
+          if (!recovered) return;
+          _active = PublicationIdentity(
+            deviceId,
+            activeId,
+            data['attemptId'] as String,
+          );
+          _activeOwnerUid = data['ownerUid'] as String;
+          _recovered = true;
+        } else if (_active == null) {
+          _active = PublicationIdentity(
+            deviceId,
+            activeId,
+            data['attemptId'] as String,
+          );
+          _activeOwnerUid = data['ownerUid'] as String;
+          _recovered = true;
+        }
+        _watchActive(activeId);
+        await _heartbeat();
+        await _handleControl();
+        return;
       }
     }
-
-    // 3. Fallback: Base64 string
-    final base64Data = data['base64Data'] as String?;
-    if (base64Data != null && base64Data.isNotEmpty) {
-      return base64Decode(base64Data);
+    if (_active != null) {
+      _pauseSafely();
+      return;
     }
-
-    // 4. Fallback: mediaUrl
-    final mediaUrl = data['mediaUrl'] as String?;
-    if (mediaUrl != null && mediaUrl.isNotEmpty) {
-      try {
-        final resp = await http.get(Uri.parse(mediaUrl)).timeout(const Duration(seconds: 30));
-        if (resp.statusCode == 200) {
-          return resp.bodyBytes;
-        }
-      } catch (_) {}
-    }
-
-    return null;
-  }
-
-  Future<File> _saveBytesToMediaFile({
-    required Uint8List bytes,
-    required String fileName,
-    required String ext,
-  }) async {
-    final appDir = await getApplicationDocumentsDirectory();
-    final mediaDir = Directory('${appDir.path}/p2p_chat_media');
-    if (!await mediaDir.exists()) {
-      await mediaDir.create(recursive: true);
-    }
-
-    final cleanName = fileName.contains('.') ? fileName : '$fileName.$ext';
-    final targetPath =
-        '${mediaDir.path}/${DateTime.now().millisecondsSinceEpoch}_$cleanName';
-    final file = File(targetPath);
-    await file.writeAsBytes(bytes);
-    return file;
-  }
-
-
-
-  Future<bool> _handleValidationReply({
-    required String senderKey,
-    required String message,
-  }) async {
-    try {
-      String? sessionId;
-      if (senderKey.startsWith('${p2pSenderKey}_')) {
-        sessionId = senderKey.substring(p2pSenderKey.length + 1);
-      }
-
-      final docId = 'reply_${DateTime.now().millisecondsSinceEpoch}';
-      await _messagesCollection.doc(docId).set({
-        'id': docId,
-        'sessionId': sessionId,
-        'sender': 'bot',
-        'type': 'reply',
-        'text': message,
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'createdAt': FieldValue.serverTimestamp(),
+    onActivity?.call('claim');
+    final Map<String, dynamic>? selected;
+    if (claimNext != null) {
+      selected = await claimNext!(_runId);
+    } else {
+      final result = await WorkerBackend.post({
+        'action': 'claim_publication',
+        'workerRunId': _runId,
       });
-      debugPrint('[FirebaseChatReceiver] Bot reply written to Firestore: "$message"');
+      selected =
+          result['request'] == null
+              ? null
+              : Map<String, dynamic>.from(result['request'] as Map);
+    }
+    if (selected == null || _disposed) return;
+    _active = PublicationIdentity(
+      deviceId,
+      selected['requestId'] as String,
+      selected['attemptId'] as String,
+    );
+    _leaseExpiry = DateTime.now().add(const Duration(seconds: 60));
+    _recovered = false;
+    _activeOwnerUid = selected['ownerUid'] as String;
+    if (_activeOwnerUid != _uid) {
+      _pauseSafely();
+      return;
+    }
+    _paused = false;
+    _watchActive(_active!.requestId);
+    await _prepare(selected);
+  }
+
+  void _clearActive() {
+    _watchActive(null);
+    _active = null;
+    _activeOwnerUid = null;
+    _takeoverPausedIdentity = null;
+    _preparedVehicle = null;
+    _leaseExpiry = null;
+    _pause = null;
+    _resume = null;
+    _stop = null;
+    _controlOwner = null;
+    _paused = false;
+  }
+
+  Future<void> _heartbeat() async {
+    final expiry = DateTime.now().add(const Duration(seconds: 60));
+    final held = await _firestore.runTransaction<bool>((tx) async {
+      final d = (await tx.get(_device)).data();
+      if (d?['workerRunId'] != _runId ||
+          d?['activeRequestId'] != _active?.requestId)
+        return false;
+      tx.update(_device, {'leaseUntil': Timestamp.fromDate(expiry)});
       return true;
-    } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Error writing reply to Firestore: $e');
-      return false;
+    });
+    if (!held) {
+      _pauseSafely();
+      throw StateError('Worker reservation was lost');
     }
+    _leaseExpiry = expiry;
   }
 
-  Future<bool> _handleAutoPublishTriggered(
-    Map<String, String> vehicleData,
-  ) async {
+  Future<void> _prepare(Map<String, dynamic> data) async {
+    final id = _active!;
     try {
-      await _sendStatusMessage(
-        statusType: 'publishing',
-        text: 'הפרסום האוטומטי מתחיל כעת! פותח את יד2...',
+      if (!isCurrent(id)) return;
+      if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id.attemptId))
+        throw StateError('Invalid attempt');
+      final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
+      if (!VehicleSchema.isComplete(vehicle))
+        throw StateError('פרטי הרכב אינם תקינים');
+      final attachments = List<Map<String, dynamic>>.from(
+        (data['attachments'] as List).map(
+          (a) => Map<String, dynamic>.from(a as Map),
+        ),
       );
-      return false;
+      if (attachments.isEmpty || attachments.length > 20)
+        throw StateError('חסרות תמונות');
+      final root =
+          await (mediaDirectory?.call() ?? getApplicationDocumentsDirectory());
+      final dir = Directory('${root.path}/publication_media/${id.attemptId}');
+      await dir.create(recursive: true);
+      final paths = <String>[];
+      for (var i = 0; i < attachments.length; i++) {
+        await _heartbeat();
+        if (!isCurrent(id)) return;
+        final current = (await _requests.doc(id.requestId).get()).data();
+        if (current?['state'] == 'canceling') {
+          await _handleControl();
+          return;
+        }
+        final a = attachments[i];
+        final prefix =
+            'publication_media/${data['ownerUid']}/$deviceId/${id.requestId}/${id.attemptId}/';
+        if (!(a['path'] as String).startsWith(prefix) ||
+            (a['size'] as int) > 15 * 1024 * 1024)
+          throw StateError('תמונה לא מורשית');
+        final DownloadedAttachment downloaded;
+        if (downloadAttachment != null) {
+          downloaded = await downloadAttachment!(a['path'] as String);
+        } else {
+          final ref = FirebaseStorage.instance.ref(a['path'] as String);
+          final metadata = await ref.getMetadata().timeout(
+            const Duration(seconds: 20),
+          );
+          final bytes = await ref
+              .getData(15 * 1024 * 1024)
+              .timeout(const Duration(seconds: 30));
+          if (bytes == null) throw StateError('התמונה חסרה');
+          downloaded = DownloadedAttachment(bytes, metadata.generation);
+        }
+        final bytes = downloaded.bytes;
+        if ((downloaded.generation != null &&
+                a['generation'] != null &&
+                downloaded.generation!.isNotEmpty &&
+                a['generation']!.toString().isNotEmpty &&
+                downloaded.generation != a['generation']) ||
+            bytes.length != a['size'] ||
+            sha256.convert(bytes).toString() != a['sha256'])
+          throw StateError('התמונה לא התקבלה בשלמותה או השתנתה');
+        final file = File('${dir.path}/$i.jpg');
+        await file.writeAsBytes(bytes, flush: true);
+        paths.add(file.path);
+      }
+      final current = (await _requests.doc(id.requestId).get()).data();
+      if (current?['state'] == 'canceling') {
+        await _handleControl();
+        return;
+      }
+      vehicle['image_paths'] = jsonEncode(paths);
+      vehicle['image_expected_count'] = '${paths.length}';
+      _preparedVehicle = vehicle;
+      // A pause requested during download is acknowledged before opening a site.
+      await _handleControl();
+      if (!isCurrent(id) || _paused) return;
+      if (!await _report(id, 'publishing', 'מתחיל פרסום ביד2')) {
+        await _handleControl();
+        return;
+      }
+      await _launchPrepared(id);
+      await _handleControl();
     } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Error sending auto-publish status: $e');
-      return false;
+      await _report(id, 'failed', 'הכנת הפרסום נכשלה: $e');
     }
   }
 
-  Future<void> _sendStatusMessage({
+  Future<void> _resumeExecution(PublicationIdentity id) async {
+    if (_preparedVehicle != null) {
+      await _launchPrepared(id);
+    } else {
+      _resume?.call();
+    }
+  }
+
+  Future<void> _launchPrepared(PublicationIdentity id) async {
+    final vehicle = _preparedVehicle;
+    if (vehicle == null || !isCurrent(id)) return;
+    try {
+      if (!await (launch?.call(vehicle, id) ??
+          P2PAutoPublishLauncher.launch(vehicle, identity: id))) {
+        throw StateError('לא ניתן לפתוח את מסך הפרסום');
+      }
+      _preparedVehicle = null;
+    } catch (e) {
+      await _report(id, 'failed', 'פתיחת הפרסום נכשלה: $e');
+    }
+  }
+
+  Future<void> _handleControl() async {
+    final id = _active;
+    if (id == null) return;
+    final data = (await _requests.doc(id.requestId).get()).data();
+    final control = data?['control'] as Map?;
+    if (control == null ||
+        control['id'] == data?['appliedControlId'] ||
+        control['attemptId'] != id.attemptId)
+      return;
+    final command = control['command'];
+    if (command == 'cancel') {
+      _takeoverPausedIdentity = null;
+      // Stop drains in-flight automation before the terminal acknowledgement releases the queue.
+      await _stop?.call();
+      await _report(
+        id,
+        'canceled',
+        'הפרסום בוטל',
+        controlId: control['id'] as String,
+      );
+    } else if (command == 'pause') {
+      _takeoverPausedIdentity = null;
+      await _pause?.call();
+      await _report(
+        id,
+        'paused',
+        'הפרסום הושהה',
+        controlId: control['id'] as String,
+      );
+    } else if (command == 'resume') {
+      if (!_recovered && _preparedVehicle != null) {
+        if (await _report(
+          id,
+          'publishing',
+          'מתחיל פרסום ביד2',
+          controlId: control['id'] as String,
+        ))
+          await _launchPrepared(id);
+      } else if (_recovered || _resume == null) {
+        await _report(
+          id,
+          'stuck',
+          'לא ניתן להמשיך אוטומטית לאחר הפעלה מחדש. בדוק את האתרים, בטל וצור בקשה חדשה.',
+          controlId: control['id'] as String,
+        );
+      } else {
+        if (await _report(
+          id,
+          'publishing',
+          'ממשיך פרסום',
+          controlId: control['id'] as String,
+        ))
+          _resume!.call();
+      }
+    }
+  }
+
+  static Future<void> reportAutomationStatus({
     required String statusType,
     required String text,
-    String? sessionId,
+    PublicationIdentity? identity,
+    String? platform,
   }) async {
+    final self = _instance;
+    if (self == null || identity == null || !isCurrent(identity)) return;
+    await self._schedule(() async {
+      Future<void> report() async {
+        await self._report(identity, statusType, text, platform: platform);
+      }
+
+      try {
+        await report();
+      } catch (_) {
+        self._pendingReports.add(report);
+      }
+    });
+  }
+
+  Future<void> _cleanupMedia(PublicationIdentity id) async {
     try {
-      final docId = 'status_${DateTime.now().millisecondsSinceEpoch}';
-      await _messagesCollection.doc(docId).set({
-        'id': docId,
-        'sessionId': sessionId,
+      if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id.attemptId)) return;
+      final root =
+          await (mediaDirectory?.call() ?? getApplicationDocumentsDirectory());
+      final directory = Directory(
+        '${root.path}/publication_media/${id.attemptId}',
+      );
+      if (await directory.exists()) await directory.delete(recursive: true);
+    } catch (e) {
+      debugPrint('[PublicationWorker] Media cleanup: $e');
+    }
+  }
+
+  Future<bool> _report(
+    PublicationIdentity id,
+    String status,
+    String text, {
+    String? platform,
+    String? controlId,
+  }) async {
+    if (_active?.matches(id) != true) return false;
+    final ref = _requests.doc(id.requestId);
+    final accepted = await _firestore.runTransaction<String?>((tx) async {
+      final d = (await tx.get(_device)).data();
+      final r = (await tx.get(ref)).data();
+      if (d?['activeRequestId'] != id.requestId ||
+          d?['workerRunId'] != _runId ||
+          r?['attemptId'] != id.attemptId ||
+          r?['ownerUid'] != _uid)
+        return null;
+      final state = r!['state'] as String;
+      if (controlId != null && (r['control'] as Map?)?['id'] != controlId)
+        return null;
+      if (state == 'canceling' && status != 'canceled') return null;
+      if (state == 'publishing' && status == 'publishing') return null;
+      final complete = List<String>.from(
+        r['completedPlatforms'] as List? ?? [],
+      );
+      var next = status;
+      if (status == 'platform_completed') {
+        if (platform == null ||
+            !['publishing', 'paused', 'stuck'].contains(state) ||
+            !(r['platforms'] as List).contains(platform))
+          return null;
+        if (complete.contains(platform)) return null;
+        complete.add(platform);
+        next =
+            (r['platforms'] as List).every(complete.contains)
+                ? 'completed'
+                : state;
+      } else if (status == 'step') {
+        next = state;
+      }
+      if (next != state && !PublicationState.canTransition(state, next))
+        return null;
+      if (PublicationState.terminal.contains(state)) return null;
+      final revision = (r['revision'] as int) + 1;
+      tx.update(ref, {
+        'state': next,
+        'revision': revision,
+        'lastMessage': text,
+        'completedPlatforms': complete,
+        if (controlId != null) 'appliedControlId': controlId,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      final message = _device
+          .collection('messages')
+          .doc('${id.attemptId}_$revision');
+      tx.set(message, {
+        'id': message.id,
+        'sessionId': id.requestId,
+        'requestId': id.requestId,
+        'attemptId': id.attemptId,
         'sender': 'bot',
         'type': 'status',
-        'statusType': statusType,
+        'statusType': next,
         'text': text,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
         'createdAt': FieldValue.serverTimestamp(),
       });
-    } catch (e) {
-      debugPrint('[FirebaseChatReceiver] Error writing status to Firestore: $e');
+      if (PublicationState.terminal.contains(next))
+        tx.update(_device, {
+          'activeRequestId': FieldValue.delete(),
+          'workerRunId': FieldValue.delete(),
+          'leaseUntil': FieldValue.delete(),
+        });
+      return next;
+    });
+    if (accepted == null) return false;
+    if (status == 'paused' || status == 'stuck') _paused = true;
+    if (status == 'publishing') _paused = false;
+    if (PublicationState.terminal.contains(accepted)) {
+      _paused = false;
+      unawaited(_cleanupMedia(id));
+      _clearActive();
+      // The next idle poll asks the backend to reserve one next request.
     }
+    return true;
   }
 }

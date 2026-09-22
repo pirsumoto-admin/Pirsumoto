@@ -28,6 +28,9 @@ environment:
 # the latest version available on pub.dev. To see which dependencies have newer
 # versions available, run `flutter pub outdated`.
 dependencies:
+  crypto: ^3.0.6
+  publication_protocol:
+    path: packages/publication_protocol
 
   flutter_skill: ^0.9.36
   flutter:
@@ -92,6 +95,7 @@ dev_dependencies:
   freezed: ^3.1.0
   json_serializable: ^6.9.0
   flutter_launcher_icons: ^0.14.4
+  fake_cloud_firestore: ^4.3.0
 
 flutter_launcher_icons:
   android: "launcher_icon"

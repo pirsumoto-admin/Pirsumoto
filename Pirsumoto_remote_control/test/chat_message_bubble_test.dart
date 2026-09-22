@@ -120,4 +120,44 @@ void main() {
     expect(publishMsg.contains('0'), isTrue);
     expect(publishMsg.contains('מוכנים לפרסום'), isTrue);
   });
+
+  testWidgets('MissingFieldsInlineForm renders field labels on right and inputs on left', (tester) async {
+    Map<String, String>? savedValues;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Scaffold(
+            body: SingleChildScrollView(
+              child: MissingFieldsInlineForm(
+                missingFields: const ['price', 'gear_type'],
+                currentData: const {'maker': 'מאזדה'},
+                onSave: (val) async {
+                  savedValues = val;
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('להשלמת פרטי הרכב:'), findsOneWidget);
+    expect(find.text('מחיר מבוקש'), findsOneWidget);
+    expect(find.text('תיבת הילוכים'), findsOneWidget);
+    expect(find.text('שמור פרטים'), findsOneWidget);
+
+    // Enter a price in the text field
+    final priceField = find.byType(TextField);
+    expect(priceField, findsOneWidget);
+    await tester.enterText(priceField, '45000');
+
+    // Tap save button
+    await tester.tap(find.text('שמור פרטים'));
+    await tester.pumpAndSettle();
+
+    expect(savedValues, isNotNull);
+    expect(savedValues!['price'], '45000');
+  });
 }
+

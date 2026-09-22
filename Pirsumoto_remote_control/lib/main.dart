@@ -17,7 +17,9 @@ void main() async {
     );
     await ChatNotificationService.instance.initialize();
   } catch (e) {
-    debugPrint('[RemoteControlApp] Firebase/Notification initialization note: $e');
+    debugPrint(
+      '[RemoteControlApp] Firebase/Notification initialization note: $e',
+    );
   }
 
   runApp(const PirsumotoRemoteControlApp());
@@ -37,6 +39,9 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => ChatNotificationService.instance.navigatePending(),
+    );
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
@@ -90,4 +95,3 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
     );
   }
 }
-

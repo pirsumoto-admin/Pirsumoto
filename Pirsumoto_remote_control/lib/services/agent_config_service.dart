@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -16,12 +15,14 @@ class AgentConfigService {
   static const String _prefKeySystemPrompt = 'agent_config_system_prompt';
   static const String _prefKeyColorPrompt = 'agent_config_color_prompt';
   static const String _prefKeyRulesJson = 'agent_config_rules_json';
-  static const String _prefKeyGeneralRulesJson = 'agent_config_general_rules_json';
+  static const String _prefKeyGeneralRulesJson =
+      'agent_config_general_rules_json';
   static const String _prefKeyRulesMd = 'agent_config_rules_md';
   static const String _prefKeyVersion = 'agent_config_version';
 
   // In-memory cached state
   DateTime? _lastUpdated;
+  DateTime? get lastUpdated => _lastUpdated;
   String? _systemPrompt;
   String? _colorMatchingPrompt;
   String? _version;
@@ -31,8 +32,6 @@ class AgentConfigService {
   bool _isInitialized = false;
 
   // Track the last time a Firestore check was made to throttle duplicate checks within seconds
-  DateTime? _lastCheckTime;
-  static const Duration _checkThrottleDuration = Duration(seconds: 15);
 
   /// Default fallback allowed colors for Yad2
   static const List<String> defaultAllowedColors = [
@@ -182,9 +181,11 @@ fuel_type
       if (lastUpdatedMs != null && lastUpdatedMs > 0) {
         _lastUpdated = DateTime.fromMillisecondsSinceEpoch(lastUpdatedMs);
       }
-      _systemPrompt = prefs.getString(_prefKeySystemPrompt) ?? defaultSystemPrompt;
+      _systemPrompt =
+          prefs.getString(_prefKeySystemPrompt) ?? defaultSystemPrompt;
       _colorMatchingPrompt =
-          prefs.getString(_prefKeyColorPrompt) ?? defaultColorMatchingPromptTemplate;
+          prefs.getString(_prefKeyColorPrompt) ??
+          defaultColorMatchingPromptTemplate;
       _version = prefs.getString(_prefKeyVersion) ?? '1.0.0';
 
       final rulesJson = prefs.getString(_prefKeyRulesJson);
@@ -220,110 +221,7 @@ fuel_type
   /// If [force] is false, throttles calls that happen within [_checkThrottleDuration].
   Future<bool> checkAndUpdateConfigIfNeeded({bool force = false}) async {
     await _ensureInitialized();
-
-    final now = DateTime.now();
-    if (!force && _lastCheckTime != null) {
-      if (now.difference(_lastCheckTime!) < _checkThrottleDuration) {
-        return false;
-      }
-    }
-    _lastCheckTime = now;
-
-    try {
-      debugPrint('[AgentConfigService] Checking Firestore for updated prompt & rules ($collectionName/$documentId)...');
-      final docRef = FirebaseFirestore.instance.collection(collectionName).doc(documentId);
-      final snapshot = await docRef.get(const GetOptions(source: Source.serverAndCache)).timeout(
-        const Duration(seconds: 6),
-      );
-
-      if (!snapshot.exists || snapshot.data() == null) {
-        debugPrint('[AgentConfigService] Config document $collectionName/$documentId not found in Firestore. Using defaults.');
-        return false;
-      }
-
-      final data = snapshot.data()!;
-      DateTime? remoteLastUpdated;
-
-      final lastUpdatedRaw = data['lastUpdated'];
-      if (lastUpdatedRaw is Timestamp) {
-        remoteLastUpdated = lastUpdatedRaw.toDate();
-      } else if (lastUpdatedRaw is String) {
-        remoteLastUpdated = DateTime.tryParse(lastUpdatedRaw);
-      } else if (lastUpdatedRaw is int) {
-        remoteLastUpdated = DateTime.fromMillisecondsSinceEpoch(lastUpdatedRaw);
-      }
-
-      debugPrint('[AgentConfigService] Updating config from Firestore (remote timestamp: $remoteLastUpdated)...');
-
-      final remotePrompt = data['systemPrompt']?.toString();
-      if (remotePrompt != null && remotePrompt.trim().isNotEmpty) {
-        _systemPrompt = remotePrompt;
-      }
-
-      final remoteColorPrompt = data['colorMatchingPrompt']?.toString();
-      if (remoteColorPrompt != null && remoteColorPrompt.trim().isNotEmpty) {
-        _colorMatchingPrompt = remoteColorPrompt;
-      }
-
-      final remoteVersion = data['version']?.toString();
-      if (remoteVersion != null && remoteVersion.trim().isNotEmpty) {
-        _version = remoteVersion;
-      }
-
-      final remoteRules = data['rules'];
-      if (remoteRules is Map) {
-        _rules = Map<String, dynamic>.from(remoteRules);
-      } else if (remoteRules is String && remoteRules.trim().isNotEmpty) {
-        _rulesMd = remoteRules.trim();
-      } else if (remoteRules is List) {
-        _generalRulesRaw = remoteRules;
-      }
-
-      final remoteGeneralRules = data['generalRules'] ??
-          (remoteRules is Map ? remoteRules['generalRules'] : null);
-      if (remoteGeneralRules != null) {
-        _generalRulesRaw = remoteGeneralRules;
-      }
-
-      final remoteRulesMd = data['rules_md']?.toString() ??
-          data['rulesMd']?.toString() ??
-          (remoteRules is Map ? remoteRules['rules_md']?.toString() : null);
-      if (remoteRulesMd != null) {
-        _rulesMd = remoteRulesMd;
-      }
-
-      _lastUpdated = remoteLastUpdated ?? DateTime.now();
-
-      // Persist to SharedPreferences
-      final prefs = await SharedPreferences.getInstance();
-      if (_lastUpdated != null) {
-        await prefs.setInt(_prefKeyLastUpdated, _lastUpdated!.millisecondsSinceEpoch);
-      }
-      if (_systemPrompt != null) {
-        await prefs.setString(_prefKeySystemPrompt, _systemPrompt!);
-      }
-      if (_colorMatchingPrompt != null) {
-        await prefs.setString(_prefKeyColorPrompt, _colorMatchingPrompt!);
-      }
-      if (_version != null) {
-        await prefs.setString(_prefKeyVersion, _version!);
-      }
-      if (_rules != null) {
-        await prefs.setString(_prefKeyRulesJson, jsonEncode(_rules));
-      }
-      if (_generalRulesRaw != null) {
-        await prefs.setString(_prefKeyGeneralRulesJson, jsonEncode(_generalRulesRaw));
-      }
-      if (_rulesMd != null) {
-        await prefs.setString(_prefKeyRulesMd, _rulesMd!);
-      }
-
-      debugPrint('[AgentConfigService] Successfully updated system prompt and rules cache.');
-      return true;
-    } catch (e) {
-      debugPrint('[AgentConfigService] Error fetching agent config from Firestore (falling back to cache): $e');
-      return false;
-    }
+    return false; // The backend owns live prompts and validation rules.
   }
 
   /// Returns raw markdown rules from `rules_md` if present
@@ -334,7 +232,10 @@ fuel_type
   List<String> get generalRules {
     final raw = _generalRulesRaw ?? _rules?['generalRules'];
     if (raw is List) {
-      return raw.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return raw
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     if (raw is String && raw.trim().isNotEmpty) {
       return raw
@@ -384,8 +285,12 @@ fuel_type
     buffer.writeln('\n\n========================');
     buffer.writeln('כלל מחייב להצגת שדות חסרים (BATCHING MISSING FIELDS)');
     buffer.writeln('===================================================');
-    buffer.writeln('כאשר חסרים פרטים ברכב (missing_fields_in_requested_order מכיל יותר משדה אחד):');
-    buffer.writeln('חובה תמיד להציג למשתמש את כל השדות החסרים יחד ברשימה מרוכזת אחת מופרדת בשורות או בנקודות (למשל: קילומטראז\', מחיר, יד, צבע), כדי שהמשתמש יוכל למלא ולספק את כולם יחד בהודעה אחת.');
+    buffer.writeln(
+      'כאשר חסרים פרטים ברכב (missing_fields_in_requested_order מכיל יותר משדה אחד):',
+    );
+    buffer.writeln(
+      'חובה תמיד להציג למשתמש את כל השדות החסרים יחד ברשימה מרוכזת אחת מופרדת בשורות או בנקודות (למשל: קילומטראז\', מחיר, יד, צבע), כדי שהמשתמש יוכל למלא ולספק את כולם יחד בהודעה אחת.',
+    );
     buffer.writeln('לעולם אל תבקש רק שדה בודד אחד בכל פעם!');
 
     return buffer.toString();
@@ -395,7 +300,10 @@ fuel_type
   List<String> get allowedColors {
     final list = _rules?['allowedColors'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedColors;
   }
@@ -404,7 +312,10 @@ fuel_type
   List<String> get allowedOwnerships {
     final list = _rules?['allowedOwnerships'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedOwnerships;
   }
@@ -413,7 +324,10 @@ fuel_type
   List<String> get allowedConditions {
     final list = _rules?['allowedConditions'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedConditions;
   }
@@ -422,7 +336,10 @@ fuel_type
   List<String> get allowedFuelTypes {
     final list = _rules?['allowedFuelTypes'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedFuelTypes;
   }

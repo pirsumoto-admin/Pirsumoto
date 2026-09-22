@@ -1,3 +1,7 @@
+import 'automation_task_scheduler.dart';
+import 'automation_accessibility_channel.dart';
+import 'package:publication_protocol/publication_protocol.dart';
+import 'worker_backend.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -7,8 +11,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -383,6 +385,8 @@ class Yad2AccessibilityAutomationService {
   AutomationPhase? get pausedPhase => _pausedPhase;
 
   void dispose() {
+    _scheduler.invalidate();
+    _stopped = true;
     _stopLoginGate();
     _isPaused = true;
     _currentPhase = null;
@@ -391,7 +395,50 @@ class Yad2AccessibilityAutomationService {
     // unawaited(_updateWhatsAppPublishingFlag(false));
   }
 
+  final _scheduler = AutomationTaskScheduler();
+  late final _automationChannel = AutomationAccessibilityChannel((reason) {
+    if (_stopped || _isPaused) return;
+    pauseAutomation();
+    debugPrint('[Yad2] Interrupted at ${_currentPhase?.name}: $reason');
+    onPhaseError?.call(
+      _currentPhase ?? AutomationPhase.phase1,
+      'האוטומציה הושהתה בשלב הנוכחי: $reason. החזר את מסך הפרסום ולחץ המשך.',
+    );
+  });
+  Future<bool> _ensureAutomationWindow() async {
+    try {
+      return await _automationChannel.invokeMethod<bool>(
+            'checkAutomationWindow',
+          ) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _stopped = false;
+  final Set<Future<void>> _inFlight = {};
+  Future<void> pauseAndWait() async {
+    pauseAutomation();
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(
+        _inFlight.toList(),
+      ).timeout(const Duration(seconds: 45));
+    }
+  }
+
+  Future<void> stopAndWait() async {
+    stop();
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(
+        _inFlight.toList(),
+      ).timeout(const Duration(seconds: 45));
+    }
+  }
+
   void stop() {
+    _scheduler.invalidate();
+    _stopped = true;
     debugPrint('[Yad2-A11y] Stop requested');
     _stopLoginGate();
     _isPaused = true;
@@ -405,19 +452,32 @@ class Yad2AccessibilityAutomationService {
   }
 
   void pauseAutomation() {
+    _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Pause requested');
     _stopLoginGate();
     _isPaused = true;
   }
 
   void resumeAutomation() {
-    debugPrint('[Yad2-A11y] Resume requested');
+    if (_stopped || !_isPaused) return;
+    _scheduler.invalidate();
+    final generation = _scheduler.generation;
+    if (_inFlight.isNotEmpty) {
+      Future.wait(_inFlight.toList())
+          .then((_) {
+            if (!_stopped && generation == _scheduler.generation)
+              resumeAutomation();
+          })
+          .catchError((Object e) {
+            debugPrint('[Yad2] Cannot resume before phase drains: $e');
+          });
+      return;
+    }
     _stopLoginGate();
     _isPaused = false;
-
-    final phaseToResume = _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
+    final phase = _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
     _pausedPhase = null;
-    _processPhase(phaseToResume);
+    _processPhase(phase);
   }
 
   void stepBack() {
@@ -437,10 +497,10 @@ class Yad2AccessibilityAutomationService {
   // bool _hasNotifiedCompletion = false;
 
   void startAutomation() {
+    if (_stopped) return;
+    _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Starting optimized Accessibility automation');
     _stopLoginGate();
-    _isPaused = false;
-    _pausedPhase = null;
     // _hasNotifiedCompletion = false;
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
@@ -450,6 +510,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   void _processPhase(AutomationPhase phase) {
+    if (_stopped) return;
     _currentPhase = phase;
     _phaseRetryCount = 0;
     if (_isPaused) {
@@ -461,11 +522,24 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _executePhase(AutomationPhase phase) async {
+    if (_stopped) return;
+    final work = _scheduler.run(() => _executePhaseTracked(phase));
+    _inFlight.add(work);
+    try {
+      await work;
+    } finally {
+      _inFlight.remove(work);
+    }
+  }
+
+  Future<void> _executePhaseTracked(AutomationPhase phase) async {
     _currentPhase = phase;
     if (_isPaused) {
       _pausedPhase = phase;
       return;
     }
+
+    if (!await _ensureAutomationWindow() || _stopped || _isPaused) return;
 
     // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
     // unawaited(_updateWhatsAppPublishingFlag(true));
@@ -476,12 +550,28 @@ class Yad2AccessibilityAutomationService {
     );
 
     if (phase == AutomationPhase.complete) {
-      WakelockPlus.disable();
-      // [WHATSAPP-DISABLED] _notifyAutomationComplete disabled.
-      // unawaited(_notifyAutomationComplete());
-      _handlePhaseComplete(AutomationPhase.complete);
-      // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
-      // unawaited(_updateWhatsAppPublishingFlag(false));
+      try {
+        final confirmed = await _retryUntil(() async {
+          final text =
+              (await controller.runJavaScriptReturningResult(
+                "Array.from(document.querySelectorAll('h1,h2,[role=status],[role=alert]')).map(e=>e.innerText).join(' ')",
+              )).toString();
+          return PublicationConfirmation.yad2(text);
+        }, timeout: const Duration(seconds: 20));
+        if (_stopped || _isPaused) return;
+        if (!confirmed) {
+          await _handleError(
+            phase,
+            'לא התקבל אישור פרסום מיד2. יש לבדוק את האתר. המשך יבדוק אישור בלבד, ללא פרסום חוזר.',
+          );
+          return;
+        }
+        WakelockPlus.disable();
+        _handlePhaseComplete(AutomationPhase.complete);
+      } catch (_) {
+        if (!_stopped)
+          await _handleError(phase, 'לא ניתן לאמת את תוצאת הפרסום ביד2');
+      }
       return;
     }
 
@@ -493,7 +583,14 @@ class Yad2AccessibilityAutomationService {
 
     try {
       final result = await spec.action();
-      if (_isPaused) return;
+      if (_stopped) return;
+      if (_isPaused) {
+        if (result.success)
+          _pausedPhase =
+              _nextPhaseAfter(result.completeAs ?? phase) ??
+              AutomationPhase.complete;
+        return;
+      }
 
       if (!result.success) {
         await _failOrRecover(spec, result.reason);
@@ -1373,96 +1470,18 @@ class Yad2AccessibilityAutomationService {
     Uint8List? screenshot,
   }) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final apiKey =
-          (prefs.getString('anthropic_api_key') ??
-                      const String.fromEnvironment(
-                        'ANTHROPIC_API_KEY',
-                        defaultValue: '',
-                      ))
-                  .trim()
-                  .isNotEmpty
-              ? (prefs.getString('anthropic_api_key') ??
-                      const String.fromEnvironment('ANTHROPIC_API_KEY'))
-                  .trim()
-              : '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';
-
-      final systemPrompt =
-          'You are an expert AI assistant inspecting a vehicle listing form on Yad2. '
-          'Your task is to identify and extract ONLY the user-written vehicle description '
-          '(e.g. car condition, mechanical status, test validity, upgrades, accessories, care history). '
-          'Do NOT extract UI buttons (like עדכנתי בואו נמשיך, לשלב הבא, סגור), UI section titles '
-          '(like פרטים חשובים על הרכב, מה חשוב לך שידעו על הרכב), or placeholder instructions '
-          '(like זה המקום לתאר את הרכב). '
-          'If no user-written vehicle description is present, reply strictly with: NONE. '
-          'Do not include markdown or explanations. Return ONLY the exact vehicle description text or NONE.';
-
-      final messages = <Map<String, dynamic>>[
-        {'role': 'system', 'content': systemPrompt},
-      ];
-
-      if (ocrText != null && ocrText.isNotEmpty) {
-        messages.add({
-          'role': 'user',
-          'content':
-              'Here is the text extracted by Computer Vision OCR from the screen:\n---\n$ocrText\n---\n'
-              'Extract the user vehicle description, or return NONE if not found.',
-        });
-      } else if (screenshot != null && screenshot.isNotEmpty) {
-        final b64 = base64Encode(screenshot);
-        messages.add({
-          'role': 'user',
-          'content': [
-            {
-              'type': 'text',
-              'text':
-                  'Extract the user vehicle description from this Yad2 listing screen image. Return NONE if no user description is present.',
-            },
-            {
-              'type': 'image_url',
-              'image_url': {'url': 'data:image/png;base64,$b64'},
-            },
-          ],
-        });
-      } else {
-        return null;
-      }
-
-      final body = jsonEncode({
-        'model': 'gpt-5.6-luna',
-        'messages': messages,
-        'max_completion_tokens': 350,
+      final response = await WorkerBackend.post({
+        'action': 'extract_description',
+        'ocrText': ocrText,
+        if (screenshot != null && (ocrText == null || ocrText.isEmpty))
+          'imageBase64': base64Encode(screenshot),
       });
-
-      final res = await http
-          .post(
-            Uri.parse('https://api.openai.com/v1/chat/completions'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $apiKey',
-            },
-            body: body,
-          )
-          .timeout(const Duration(seconds: 15));
-
-      if (res.statusCode == 200) {
-        final decoded =
-            jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-        final content =
-            decoded['choices']?[0]?['message']?['content']?.toString().trim() ??
-            '';
-        if (content.isNotEmpty && !content.toUpperCase().contains('NONE')) {
-          return content;
-        }
-      } else {
-        debugPrint(
-          '[Yad2-A11y] LLM extraction error HTTP ${res.statusCode}: ${res.body}',
-        );
-      }
+      final text = response['text']?.toString().trim();
+      return text == null || text == 'NONE' ? null : text;
     } catch (e) {
-      debugPrint('[Yad2-A11y] LLM extraction call failed: $e');
+      debugPrint('[Yad2] Description extraction unavailable: $e');
+      return null;
     }
-    return null;
   }
 
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
@@ -1652,15 +1671,21 @@ class Yad2AccessibilityAutomationService {
     return true;
   }
 
+  bool _termsSubmitted = false;
+  bool _termsCheckboxAttempted = false;
   Future<_StepActionResult> _actionTermsAgreement() async {
+    if (_termsSubmitted) return const _StepActionResult.success();
     const termsText = 'קראתי ואישרתי את התקנון';
 
     // 1. Detect and tap checkbox (node before text "קראתי ואישרתי את התקנון" or text itself)
-    final tappedCheckbox = await _performWithPopupHandling(() async {
-      final nodeBefore = await toolTapNodeBefore(termsText);
-      if (nodeBefore) return true;
-      return tapSmart(termsText);
-    });
+    final tappedCheckbox =
+        !_termsCheckboxAttempted &&
+        await _performWithPopupHandling(() async {
+          _termsCheckboxAttempted = true;
+          final nodeBefore = await toolTapNodeBefore(termsText);
+          if (nodeBefore) return true;
+          return tapSmart(termsText);
+        });
 
     if (tappedCheckbox) {
       debugPrint('[Yad2-A11y] Tapped terms agreement checkbox.');
@@ -1672,9 +1697,9 @@ class Yad2AccessibilityAutomationService {
     }
 
     // 2. Click the button below it of "לשלב הבא"
-    final clickedNext = await _performWithPopupHandling(
-      () => tapSmart('לשלב הבא|שלב הבא|לשלב'),
-    );
+    if (_stopped || _isPaused) return const _StepActionResult.failure('Paused');
+    _termsSubmitted = true;
+    final clickedNext = await tapSmart('לשלב הבא|שלב הבא|לשלב');
 
     return clickedNext
         ? const _StepActionResult.success()
@@ -1721,6 +1746,7 @@ class Yad2AccessibilityAutomationService {
     bool allowJsFallback = true,
     bool allowOcrFallbackOverride = true,
   }) async {
+    if (_stopped || _isPaused) return false;
     if (await toolFindElementAndTap(
       targetText,
       targetInstance: targetInstance,
@@ -1760,6 +1786,7 @@ class Yad2AccessibilityAutomationService {
     double deltaY = 0,
     double threshold = 0.82,
   }) async {
+    if (_stopped || _isPaused) return false;
     debugPrint(
       '[Yad2-A11y] Tool tapElement("$targetText", instance=$targetInstance)',
     );
@@ -1789,6 +1816,7 @@ class Yad2AccessibilityAutomationService {
     int targetInstance = 1,
     double deltaY = 0,
   }) async {
+    if (_stopped || _isPaused) return false;
     try {
       final bounds = await _getStableBounds('findNodeBeforeAndGetBounds', {
         'target': targetText,
@@ -1810,12 +1838,13 @@ class Yad2AccessibilityAutomationService {
     int offset = 1,
   }) async {
     try {
-      return _channel.invokeMethod<String>('findNodeTextAfterTarget', {
-        'target': targetText,
-        'targetInstance': targetInstance,
-        'threshold': threshold,
-        'offset': offset,
-      });
+      return _automationChannel
+          .invokeMethod<String>('findNodeTextAfterTarget', {
+            'target': targetText,
+            'targetInstance': targetInstance,
+            'threshold': threshold,
+            'offset': offset,
+          });
     } catch (e) {
       debugPrint('[Yad2-A11y] getNodeTextAfter failed: $e');
       return null;
@@ -1830,6 +1859,7 @@ class Yad2AccessibilityAutomationService {
     double deltaY = 0,
     int offset = 1,
   }) async {
+    if (_stopped || _isPaused) return false;
     try {
       final bounds = await _getStableBounds('findNodeAfterAndGetBounds', {
         'target': targetText,
@@ -1847,6 +1877,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolEnterTextBefore(String targetText, String value) async {
+    if (_stopped || _isPaused) return false;
     try {
       final bounds = await _getStableBounds('findInputBeforeAndGetBounds', {
         'target': targetText,
@@ -1866,6 +1897,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolEnterTextNear(String label, String value) async {
+    if (_stopped || _isPaused) return false;
     final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
     if (!tapped) return false;
     await Future.delayed(const Duration(milliseconds: 500));
@@ -1877,16 +1909,18 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> toolTapScreen(double x, double y) async {
+    if (_stopped || _isPaused) return;
     try {
-      await _channel.invokeMethod('tapScreen', {'x': x, 'y': y});
+      await _automationChannel.invokeMethod('tapScreen', {'x': x, 'y': y});
     } catch (e) {
       debugPrint('[Yad2-A11y] tapScreen failed: $e');
     }
   }
 
   Future<bool> toolPressBack() async {
+    if (_stopped || _isPaused) return false;
     try {
-      final pressed = await _channel.invokeMethod<bool>('pressBack');
+      final pressed = await _automationChannel.invokeMethod<bool>('pressBack');
       return pressed ?? false;
     } catch (e) {
       debugPrint('[Yad2-A11y] pressBack failed: $e');
@@ -1895,10 +1929,12 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolEnterTextAtFocused(String text) async {
+    if (_stopped || _isPaused) return false;
     try {
-      final success = await _channel.invokeMethod<bool>('enterTextAtFocused', {
-        'value': text,
-      });
+      final success = await _automationChannel.invokeMethod<bool>(
+        'enterTextAtFocused',
+        {'value': text},
+      );
       return success ?? false;
     } catch (e) {
       debugPrint('[Yad2-A11y] enterTextAtFocused failed: $e');
@@ -1907,6 +1943,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> toolEnterTextAtFocusedJs(String text) async {
+    if (_stopped || _isPaused) return;
     final encoded = jsonEncode(text);
     await controller.runJavaScript('''
       (function(value) {
@@ -1938,6 +1975,7 @@ class Yad2AccessibilityAutomationService {
     String targetText, {
     int targetInstance = 1,
   }) async {
+    if (_stopped || _isPaused) return false;
     final encoded = jsonEncode(targetText);
     final result = await controller.runJavaScriptReturningResult('''
       (function(targetText, targetInstance) {
@@ -2011,6 +2049,7 @@ class Yad2AccessibilityAutomationService {
     int targetInstance = 1,
     double deltaY = 0,
   }) async {
+    if (_stopped || _isPaused) return false;
     if (ocrService == null || observeUI == null) return false;
     final ctx = await _observeUIFresh();
     if (ctx == null) return false;
@@ -2025,6 +2064,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> toolLogTree() async {
+    if (!const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE')) return;
     final tree = await _readTreeString();
     if (tree == null) return;
     for (final line in tree.split('\n')) {
@@ -2166,7 +2206,7 @@ class Yad2AccessibilityAutomationService {
       debugPrint(
         '[Yad2-A11y] Retry $_phaseRetryCount/$_maxRetries in ${backoffMs}ms: $reason',
       );
-      Future.delayed(Duration(milliseconds: backoffMs), () {
+      _scheduler.schedule(Duration(milliseconds: backoffMs), () {
         if (!_isPaused) unawaited(_executePhase(spec.phase));
       });
       return;
@@ -2175,7 +2215,11 @@ class Yad2AccessibilityAutomationService {
     final recovered = await _tryRecovery(spec, reason);
     if (recovered) {
       _phaseRetryCount = 0;
-      if (!_isPaused) unawaited(_executePhase(spec.phase));
+      if (!_isPaused)
+        _scheduler.schedule(
+          Duration.zero,
+          () => unawaited(_executePhase(spec.phase)),
+        );
       return;
     }
 
@@ -2332,7 +2376,7 @@ class Yad2AccessibilityAutomationService {
     int targetInstance = 1,
   }) async {
     try {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+      final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         'findAndGetBounds',
         {'target': target, 'targetInstance': targetInstance},
       );
@@ -2401,8 +2445,9 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _scrollDown(double percent) async {
+    if (_stopped || _isPaused) return;
     try {
-      await _channel.invokeMethod('scrollNode', {
+      await _automationChannel.invokeMethod('scrollNode', {
         'direction': 'down',
         'percent': percent,
       });
@@ -2450,7 +2495,7 @@ class Yad2AccessibilityAutomationService {
   }) async {
     Map<String, dynamic>? previous;
     for (var i = 0; i < maxReads; i++) {
-      final bounds = await _channel.invokeMapMethod<String, dynamic>(
+      final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         method,
         args,
       );
@@ -2482,7 +2527,7 @@ class Yad2AccessibilityAutomationService {
 
   Future<String?> _readTreeString() async {
     try {
-      return _channel.invokeMethod<String>('logTree');
+      return _automationChannel.invokeMethod<String>('logTree');
     } catch (_) {
       return null;
     }
@@ -2585,6 +2630,7 @@ class Yad2AccessibilityAutomationService {
 
   void _startLoginGate() {
     if (_loginSamplingTimer != null) return;
+    _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Login gate active.');
     _isPaused = true;
     _pausedPhase = AutomationPhase.phase1;
@@ -2592,24 +2638,37 @@ class Yad2AccessibilityAutomationService {
     unawaited(_beepUser());
     // [WHATSAPP-DISABLED] _notifyLoginRequired disabled.
     // unawaited(_notifyLoginRequired());
+    final generation = _scheduler.generation;
     _loginSamplingTimer = Timer.periodic(const Duration(seconds: 3), (
       timer,
     ) async {
       if (_loginGateTickBusy) return;
       _loginGateTickBusy = true;
       try {
+        if (!await _ensureAutomationWindow()) return;
         await _dismissKnownPopups();
         // Once the login/third-party dialog has been closed and we are no longer
         // on a login screen, resume from Phase 1. We do NOT require 'חיפוש' to
         // be visible yet — after a Facebook/Google login the app may land on a
         // different page first, and Phase 1's _actionDetectEntryForm will handle
         // navigating back to the search form.
-        if (!await _checkIsLoginScreen()) {
+        final stillLogin = await _checkIsLoginScreen();
+        if (_stopped ||
+            generation != _scheduler.generation ||
+            _loginSamplingTimer != timer)
+          return;
+        if (!stillLogin && await _isElementPresent('חיפוש')) {
+          if (_stopped ||
+              generation != _scheduler.generation ||
+              _loginSamplingTimer != timer)
+            return;
           timer.cancel();
           _loginSamplingTimer = null;
           _isPaused = false;
           _pausedPhase = null;
-          debugPrint('[Yad2-A11y] Login screen gone — restarting from Phase 1.');
+          debugPrint(
+            '[Yad2-A11y] Login screen gone — restarting from Phase 1.',
+          );
           _processPhase(AutomationPhase.phase1);
         }
       } finally {
@@ -2754,6 +2813,7 @@ class Yad2AccessibilityAutomationService {
 
   void _handlePhaseComplete(AutomationPhase phase) {
     debugPrint('[Yad2-A11y] Phase complete: ${phase.description}');
+    if (_stopped) return;
     onPhaseComplete?.call(phase);
 
     final next = _nextPhaseAfter(phase);
@@ -2764,7 +2824,9 @@ class Yad2AccessibilityAutomationService {
       return;
     }
 
-    Future.delayed(_delayAfter(phase), () {
+    _currentPhase = next;
+    _pausedPhase = next;
+    _scheduler.schedule(_delayAfter(phase), () {
       if (!_isPaused) _processPhase(next);
     });
   }
@@ -2855,7 +2917,7 @@ class Yad2AccessibilityAutomationService {
 
   Future<void> _handleError(AutomationPhase phase, String error) async {
     debugPrint('[Yad2-A11y] Phase error: ${phase.description} - $error');
-    _isPaused = true;
+    pauseAutomation();
     _pausedPhase = phase;
     _phaseRetryCount = 0;
     try {

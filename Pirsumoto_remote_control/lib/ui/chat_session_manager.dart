@@ -1,296 +1,387 @@
+import '../models/chat_session.dart';
+import '../models/publication_queue.dart';
+export '../models/chat_session.dart';
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:crypto/crypto.dart';
+import 'package:publication_protocol/publication_protocol.dart';
+import '../services/remote_api.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../database/sqlite_database_helper.dart';
 import '../webrtc/controller_webrtc_session.dart';
-import 'whatsapp_chat_screen.dart';
-
-enum ChatSessionStatus { draft, waiting, running, done, error }
-
-class ChatSession {
-  final String id;
-  final String deviceId;
-  String licensePlate;
-  final int startTimestamp;
-  ChatSessionStatus status;
-  String? lastMessage;
-  Map<String, String> vehicleData;
-  List<String> imagePaths;
-  int? expectedImageCount;
-  bool isReadyToPublish;
-
-  ChatSession({
-    required this.id,
-    required this.deviceId,
-    this.licensePlate = '',
-    required this.startTimestamp,
-    this.status = ChatSessionStatus.draft,
-    this.lastMessage,
-    Map<String, String>? vehicleData,
-    List<String>? imagePaths,
-    this.expectedImageCount,
-    this.isReadyToPublish = false,
-  })  : vehicleData = vehicleData ?? {},
-        imagePaths = imagePaths ?? [];
-
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'deviceId': deviceId,
-      'licensePlate': licensePlate,
-      'startTimestamp': startTimestamp,
-      'status': status.name,
-      'lastMessage': lastMessage,
-      'vehicleDataJson': jsonEncode(vehicleData),
-      'imagePathsJson': jsonEncode(imagePaths),
-      'expectedImageCount': expectedImageCount,
-      'isReadyToPublish': isReadyToPublish ? 1 : 0,
-    };
-  }
-
-  factory ChatSession.fromJson(Map<String, dynamic> json) {
-    Map<String, String> vData = {};
-    if (json['vehicleDataJson'] is String && (json['vehicleDataJson'] as String).isNotEmpty) {
-      try {
-        final decoded = jsonDecode(json['vehicleDataJson'] as String);
-        if (decoded is Map) {
-          vData = decoded.map((k, v) => MapEntry(k.toString(), v?.toString() ?? ''));
-        }
-      } catch (_) {}
-    }
-
-    List<String> imgs = [];
-    if (json['imagePathsJson'] is String && (json['imagePathsJson'] as String).isNotEmpty) {
-      try {
-        final decoded = jsonDecode(json['imagePathsJson'] as String);
-        if (decoded is List) {
-          imgs = decoded.map((e) => e.toString()).toList();
-        }
-      } catch (_) {}
-    }
-
-    return ChatSession(
-      id: json['id'] as String,
-      deviceId: json['deviceId'] as String,
-      licensePlate: json['licensePlate'] as String? ?? '',
-      startTimestamp: json['startTimestamp'] as int,
-      status: ChatSessionStatus.values.firstWhere(
-        (e) => e.name == (json['status'] as String? ?? 'draft'),
-        orElse: () => ChatSessionStatus.draft,
-      ),
-      lastMessage: json['lastMessage'] as String?,
-      vehicleData: vData,
-      imagePaths: imgs,
-      expectedImageCount: json['expectedImageCount'] as int?,
-      isReadyToPublish: json['isReadyToPublish'] == 1 || json['isReadyToPublish'] == true,
-    );
-  }
-}
 
 class ChatSessionManager {
+  static final _changes = StreamController<String>.broadcast();
+  static Stream<String> get changes => _changes.stream;
+  static final Map<String, StreamSubscription> _subscriptions = {};
+  static final Map<String, Map<String, Map<String, dynamic>>> _requests = {};
+  static final Map<String, Future<void>> _submissions = {};
+  static String? _owner;
+  static final Map<String, String?> _priorities = {};
+  static Future<void> _projection = Future.value();
+  static Map<String, dynamic>? request(String deviceId, String sessionId) {
+    if (_owner != FirebaseAuth.instance.currentUser?.uid) return null;
+    return _requests[deviceId]?[sessionId];
+  }
+
+  static PublicationQueue queue(String deviceId) => PublicationQueue(
+    _requests[deviceId] ?? {},
+    priority: _priorities[deviceId],
+  );
+
+  static String queueLabel(String deviceId, String id) =>
+      queue(deviceId).labelFor(id);
+
+  static bool occupiesWorker(ChatSessionStatus status) => {
+    ChatSessionStatus.running,
+    ChatSessionStatus.preparing,
+    ChatSessionStatus.paused,
+    ChatSessionStatus.error,
+    ChatSessionStatus.canceling,
+  }.contains(status);
+  static ChatSessionStatus statusFromRequest(String state) => switch (state) {
+    'queued' => ChatSessionStatus.waiting,
+    'preparing' => ChatSessionStatus.preparing,
+    'publishing' => ChatSessionStatus.running,
+    'paused' => ChatSessionStatus.paused,
+    'stuck' => ChatSessionStatus.error,
+    'canceling' => ChatSessionStatus.canceling,
+    'completed' => ChatSessionStatus.done,
+    'canceled' => ChatSessionStatus.canceled,
+    'failed' => ChatSessionStatus.failed,
+    _ => ChatSessionStatus.draft,
+  };
+  static Future<void> reset() async {
+    for (final sub in _subscriptions.values) {
+      await sub.cancel();
+    }
+    _subscriptions.clear();
+    _requests.clear();
+    _priorities.clear();
+    _owner = null;
+  }
+
+  static void watchDevice(String deviceId) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    if (_owner != uid) {
+      for (final s in _subscriptions.values) {
+        unawaited(s.cancel());
+      }
+      _subscriptions.clear();
+      _requests.clear();
+      _priorities.clear();
+      _owner = uid;
+    }
+    if (_subscriptions.containsKey(deviceId)) return;
+    _subscriptions['$deviceId:queue'] = FirebaseFirestore.instance
+        .collection('remote_publication_queues')
+        .doc(deviceId)
+        .snapshots()
+        .listen((doc) {
+          if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+          _priorities[deviceId] = doc.data()?['nextRequestId'] as String?;
+          _changes.add(deviceId);
+        });
+    _subscriptions[deviceId] = FirebaseFirestore.instance
+        .collection('remote_chats')
+        .doc(deviceId)
+        .collection('requests')
+        .where('ownerUid', isEqualTo: uid)
+        .snapshots()
+        .listen((snapshot) {
+          _projection = _projection
+              .then((_) async {
+                if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+                for (final change in snapshot.docChanges) {
+                  if (change.type == DocumentChangeType.removed) {
+                    _requests[deviceId]?.remove(change.doc.id);
+                    await SqliteDatabaseHelper.instance.deleteSession(
+                      change.doc.id,
+                    );
+                    continue;
+                  }
+                  final doc = change.doc;
+                  if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+                  final data = doc.data();
+                  if (data != null) await _project(deviceId, doc.id, data);
+                }
+                _changes.add(deviceId);
+              })
+              .catchError((Object e) {
+                /* next server snapshot retries the projection */
+              });
+        });
+  }
+
+  static Future<void> _project(
+    String deviceId,
+    String id,
+    Map<String, dynamic> data,
+  ) async {
+    if (data['ownerUid'] != FirebaseAuth.instance.currentUser?.uid) return;
+    final cache = _requests.putIfAbsent(deviceId, () => {});
+    if ((cache[id]?['revision'] as int? ?? -1) >
+        (data['revision'] as int? ?? 0))
+      return;
+    data = Map<String, dynamic>.from(data);
+    for (final key in ['enqueuedAt', 'updatedAt']) {
+      final value = data[key];
+      if (value is Map && value['_seconds'] is num)
+        data[key] = Timestamp(
+          (value['_seconds'] as num).toInt(),
+          (value['_nanoseconds'] as num? ?? 0).toInt(),
+        );
+      if (data[key] is! Timestamp && cache[id]?[key] is Timestamp)
+        data[key] = cache[id]![key];
+    }
+    cache[id] = data;
+    if (data['archived'] == true) {
+      cache.remove(id);
+      await SqliteDatabaseHelper.instance.deleteSession(id);
+      return;
+    }
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final old = await SqliteDatabaseHelper.instance.getSession(id);
+    if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+    final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
+    final updated = ChatSession(
+      id: id,
+      deviceId: deviceId,
+      licensePlate: vehicle['license_plate'] ?? '',
+      startTimestamp:
+          old?.startTimestamp ??
+          (data['enqueuedAt'] is Timestamp
+              ? (data['enqueuedAt'] as Timestamp).millisecondsSinceEpoch
+              : DateTime.now().millisecondsSinceEpoch),
+      status: statusFromRequest(data['state'] as String),
+      lastMessage: data['lastMessage'] as String?,
+      vehicleData: vehicle,
+      imagePaths: old?.imagePaths,
+      isReadyToPublish: true,
+    );
+    await SqliteDatabaseHelper.instance.insertSession(updated);
+  }
+
+  static Future<int> importLegacyDevice(String deviceId) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final device = await FirebaseFirestore.instance
+        .collection('remote_control_devices')
+        .doc(deviceId)
+        .get(const GetOptions(source: Source.server));
+    if (user == null || device.data()?['ownerUid'] != user.uid)
+      throw StateError('אין הרשאה למכשיר');
+    final result = await SqliteDatabaseHelper.instance.importLegacyDevice(
+      deviceId,
+    );
+    _changes.add(deviceId);
+    return result;
+  }
+
   static Future<List<ChatSession>> getSessions(String deviceId) async {
-    return await SqliteDatabaseHelper.instance.getSessions(deviceId);
+    watchDevice(deviceId);
+    return SqliteDatabaseHelper.instance.getSessions(deviceId);
   }
 
   static Future<void> saveSession(ChatSession session) async {
-    await SqliteDatabaseHelper.instance.insertSession(session);
+    // Draft updates cannot overwrite the worker's authoritative state or submitted data.
+    final r = request(session.deviceId, session.id);
+    if (r != null) {
+      await _project(session.deviceId, session.id, r);
+    } else {
+      await SqliteDatabaseHelper.instance.insertSession(session);
+    }
+    _changes.add(session.deviceId);
   }
 
   static Future<void> deleteSession(String deviceId, String sessionId) async {
-    await SqliteDatabaseHelper.instance.deleteSession(sessionId);
-  }
-  
-  static Future<ChatSession?> getNextWaitingSession(String deviceId) async {
-    final sessions = await getSessions(deviceId);
-    try {
-      return sessions.firstWhere((s) => s.status == ChatSessionStatus.waiting);
-    } catch (e) {
-      return null; // None found
+    var r = request(deviceId, sessionId);
+    if (r == null) {
+      // A failed lookup must not make an active remote request disappear locally.
+      final doc = await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(deviceId)
+          .collection('requests')
+          .doc(sessionId)
+          .get(const GetOptions(source: Source.server));
+      r = doc.data();
     }
+
+    // Cancellation acknowledgment must precede archival. Writing a terminal
+    // state here would strand the worker's lease while its engine is running.
+    if (r != null && !PublicationState.terminal.contains(r['state'])) {
+      await control(deviceId, sessionId, 'cancel');
+      r = request(deviceId, sessionId);
+      if (r == null || !PublicationState.terminal.contains(r['state'])) {
+        throw StateError('הביטול נשלח. ניתן למחוק לאחר אישור מהמכשיר.');
+      }
+    }
+    if (r != null && r['attemptId'] != null) {
+      await RemoteApi.post(deviceId, {
+        'action': 'archive_publication',
+        'requestId': sessionId,
+        'attemptId': r['attemptId'],
+      });
+    }
+
+    // Remove from in-memory cache
+    _requests[deviceId]?.remove(sessionId);
+
+    // Delete session and all related messages from SQLite
+    await SqliteDatabaseHelper.instance.deleteSession(sessionId);
+
+    // Notify listeners so UI updates immediately
+    _changes.add(deviceId);
   }
 
-  /// Checks if any session is currently running on the worker. If not, advances the queue to the
-  /// next waiting session, updates its status to running, and starts its publication.
-  static Future<ChatSession?> advanceQueueAndStartNext(
-    String deviceId, {
+  static Future<void> prioritize(String deviceId, String id) async {
+    final r = request(deviceId, id);
+    if (r == null) return;
+    await RemoteApi.post(deviceId, {
+      'action': 'prioritize_publication',
+      'requestId': id,
+      'attemptId': r['attemptId'],
+    });
+  }
+
+  static Future<void> control(
+    String deviceId,
+    String sessionId,
+    String command,
+  ) async {
+    var r = request(deviceId, sessionId);
+    r ??=
+        (await FirebaseFirestore.instance
+                .collection('remote_chats')
+                .doc(deviceId)
+                .collection('requests')
+                .doc(sessionId)
+                .get(const GetOptions(source: Source.server)))
+            .data();
+    if (r == null) {
+      if (command == 'cancel') {
+        final draft = await SqliteDatabaseHelper.instance.getSession(sessionId);
+        if (draft != null) {
+          draft.status = ChatSessionStatus.canceled;
+          await saveSession(draft);
+        }
+        return;
+      }
+      throw StateError('אין פרסום פעיל');
+    }
+    final result = await RemoteApi.post(deviceId, {
+      'action': 'control_publication',
+      'requestId': sessionId,
+      'attemptId': r['attemptId'],
+      'command': command,
+    });
+    await _project(
+      deviceId,
+      sessionId,
+      Map<String, dynamic>.from(result['request'] as Map),
+    );
+    _changes.add(deviceId);
+  }
+
+  static Future<void> startSession(
+    String deviceId,
+    String sessionId, {
     ControllerWebRtcSession? session,
   }) async {
-    final sessions = await getSessions(deviceId);
-    
-    // If there is already an active running session, do not start another concurrently.
-    final running = sessions.where((s) => s.status == ChatSessionStatus.running).toList();
-    if (running.isNotEmpty) {
-      debugPrint('[ChatSessionManager] Session ${running.first.id} is already running on worker. Not advancing queue yet.');
-      return null;
+    final r = request(deviceId, sessionId);
+    if (r != null) {
+      if (r['state'] == 'paused' || r['state'] == 'stuck')
+        await control(deviceId, sessionId, 'resume');
+      return;
     }
-
-    final nextSession = await getNextWaitingSession(deviceId);
-    if (nextSession == null) {
-      debugPrint('[ChatSessionManager] No waiting session in queue for $deviceId.');
-      return null;
-    }
-
-    debugPrint('[ChatSessionManager] Advancing queue: starting session ${nextSession.id} (${nextSession.licensePlate})');
-    nextSession.status = ChatSessionStatus.running;
-    nextSession.lastMessage = 'מתחיל פרסום אוטומטי...';
-    await saveSession(nextSession);
-
-    // Asynchronously start publication
-    unawaited(startPublication(deviceId, nextSession, session: session));
-
-    return nextSession;
+    final draft = await SqliteDatabaseHelper.instance.getSession(sessionId);
+    if (draft != null) await startPublication(deviceId, draft);
   }
 
-  /// Manually starts a specific session
-  static Future<void> startSession(String deviceId, String sessionId, {ControllerWebRtcSession? session}) async {
-    final s = await SqliteDatabaseHelper.instance.getSession(sessionId);
-    if (s != null) {
-      s.status = ChatSessionStatus.running;
-      s.lastMessage = 'מתחיל פרסום אוטומטי...';
-      await saveSession(s);
-      unawaited(startPublication(deviceId, s, session: session));
-    }
-  }
-
-  /// Starts publication for a session: uploads images, packages the complete vehicle metadata,
-  /// and sends the direct 'publish_vehicle' command to the worker phone.
   static Future<void> startPublication(
     String deviceId,
     ChatSession chatSession, {
     ControllerWebRtcSession? session,
-  }) async {
-    try {
-      debugPrint('[ChatSessionManager] Starting publication for session: ${chatSession.id}, plate: ${chatSession.licensePlate}');
-      
-      final messages = await SqliteDatabaseHelper.instance.getMessages(chatSession.id);
-      final userMessages = messages.where((m) => m.sender == ChatSender.user).toList();
+  }) {
+    final key =
+        '${FirebaseAuth.instance.currentUser?.uid}/$deviceId/${chatSession.id}';
+    if (_submissions.containsKey(key)) return _submissions[key]!;
+    final task = _submit(deviceId, chatSession);
+    _submissions[key] = task;
+    return task.whenComplete(() => _submissions.remove(key));
+  }
 
-      // Collect image file paths from both session object and SQLite messages
-      final imagePathsSet = <String>{};
-      imagePathsSet.addAll(chatSession.imagePaths);
-      for (final m in userMessages) {
-        if (m.mediaType == 'image' && m.localFilePath != null && m.localFilePath!.isNotEmpty) {
-          imagePathsSet.add(m.localFilePath!);
-        }
+  static Future<void> _submit(String deviceId, ChatSession draft) async {
+    watchDevice(deviceId);
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw StateError('יש להתחבר');
+    final requestRef = FirebaseFirestore.instance
+        .collection('remote_chats')
+        .doc(deviceId)
+        .collection('requests')
+        .doc(draft.id);
+    // Reconcile an earlier ambiguous HTTP result before uploading or enqueueing again.
+    final existing = await requestRef.get(
+      const GetOptions(source: Source.server),
+    );
+    if (existing.exists) {
+      final existingState = existing.data()?['state'];
+      if (!PublicationState.terminal.contains(existingState)) {
+        await _project(deviceId, draft.id, existing.data()!);
+        _changes.add(deviceId);
+        return;
       }
-
-      final uploadedImageIds = <String>[];
-
-      // 1. Upload images from local disk to Firestore
-      for (final imgPath in imagePathsSet) {
-        final file = File(imgPath);
-        if (file.existsSync()) {
-          try {
-            final bytes = await file.readAsBytes();
-            final imgDocId = 'pub_img_${DateTime.now().millisecondsSinceEpoch}_${file.hashCode.abs()}';
-            uploadedImageIds.add(imgDocId);
-            
-            const int maxSingleDocSize = 750 * 1024;
-            const int chunkSize = 400 * 1024;
-
-            final msgRef = FirebaseFirestore.instance
-                .collection('remote_chats')
-                .doc(deviceId)
-                .collection('messages')
-                .doc(imgDocId);
-
-            if (bytes.length <= maxSingleDocSize) {
-              await msgRef.set({
-                'id': imgDocId,
-                'sessionId': chatSession.id,
-                'sender': 'user',
-                'senderName': 'Remote User',
-                'mediaType': 'image',
-                'fileName': file.uri.pathSegments.isNotEmpty ? file.uri.pathSegments.last : 'image.jpg',
-                'type': 'media',
-                'status': 'pending',
-                'mediaBlob': Blob(bytes),
-                'totalChunks': 1,
-                'fileSize': bytes.length,
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-            } else {
-              final totalChunks = (bytes.length / chunkSize).ceil();
-              await msgRef.set({
-                'id': imgDocId,
-                'sessionId': chatSession.id,
-                'sender': 'user',
-                'senderName': 'Remote User',
-                'mediaType': 'image',
-                'fileName': file.uri.pathSegments.isNotEmpty ? file.uri.pathSegments.last : 'image.jpg',
-                'type': 'media',
-                'status': 'uploading_chunks',
-                'totalChunks': totalChunks,
-                'fileSize': bytes.length,
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-
-              for (int i = 0; i < totalChunks; i++) {
-                final start = i * chunkSize;
-                final end = (start + chunkSize < bytes.length) ? start + chunkSize : bytes.length;
-                final chunkBytes = bytes.sublist(start, end);
-                await msgRef.collection('chunks').doc('$i').set({
-                  'chunkIndex': i,
-                  'totalChunks': totalChunks,
-                  'blob': Blob(chunkBytes),
-                  'createdAt': FieldValue.serverTimestamp(),
-                });
-              }
-              await msgRef.update({'status': 'pending'});
-            }
-            await Future.delayed(const Duration(milliseconds: 300));
-          } catch (e) {
-            debugPrint('[ChatSessionManager] Error uploading publication image: $e');
-          }
-        }
-      }
-
-      // 2. Prepare full vehicle metadata map
-      final vehicleMap = Map<String, String>.from(chatSession.vehicleData);
-      if (chatSession.licensePlate.isNotEmpty) {
-        vehicleMap['license_plate'] = chatSession.licensePlate;
-        vehicleMap['license'] = chatSession.licensePlate;
-      }
-      vehicleMap['session_id'] = chatSession.id;
-      vehicleMap['image_expected_count'] = '${uploadedImageIds.length}';
-      vehicleMap['image_received_count'] = '${uploadedImageIds.length}';
-
-      // 3. Send direct publish_vehicle command to the worker
-      final pubCmdId = 'pub_cmd_${DateTime.now().millisecondsSinceEpoch}';
-      await FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(deviceId)
-          .collection('messages')
-          .doc(pubCmdId)
-          .set({
-            'id': pubCmdId,
-            'sessionId': chatSession.id,
-            'sender': 'user',
-            'senderName': 'Remote User',
-            'type': 'publish_vehicle',
-            'status': 'pending',
-            'vehicleData': vehicleMap,
-            'imageDocIds': uploadedImageIds,
-            'timestamp': DateTime.now().millisecondsSinceEpoch,
-            'createdAt': FieldValue.serverTimestamp(),
-          });
-
-      // Also send WebRTC action if active
-      if (session?.isConnected == true) {
-        try {
-          session?.sendChatMessage('publish_vehicle:${jsonEncode(vehicleMap)}', senderName: 'Remote User');
-        } catch (_) {}
-      }
-
-      chatSession.status = ChatSessionStatus.running;
-      chatSession.lastMessage = 'תהליך פרסום נשלח למכשיר העובד';
-      await saveSession(chatSession);
-    } catch (e) {
-      debugPrint('[ChatSessionManager] Error starting publication for session: $e');
     }
+    if (!VehicleSchema.isComplete(draft.vehicleData))
+      throw StateError('יש להשלים ולתקן את פרטי הרכב לפני פרסום');
+    final paths = draft.imagePaths.toSet().toList();
+    if (paths.isEmpty || paths.length > 20)
+      throw StateError('יש לצרף 1–20 תמונות');
+    final attemptId = requestRef.collection('attempts').doc().id;
+    final attachments = <Map<String, dynamic>>[];
+    for (var i = 0; i < paths.length; i++) {
+      if (FirebaseAuth.instance.currentUser?.uid != uid)
+        throw StateError('החשבון השתנה');
+      final file = File(paths[i]);
+      if (!await file.exists())
+        throw StateError('אחת התמונות חסרה; יש לצרף אותה שוב');
+      final size = await file.length();
+      if (size < 1 || size > 15 * 1024 * 1024)
+        throw StateError('כל תמונה חייבת להיות קטנה מ־15MB');
+      final bytes = await file.readAsBytes();
+      final path = 'publication_media/$uid/$deviceId/${draft.id}/$attemptId/$i';
+      final suffix = file.path.toLowerCase();
+      final mime = suffix.endsWith('.png')
+          ? 'image/png'
+          : suffix.endsWith('.webp')
+          ? 'image/webp'
+          : 'image/jpeg';
+      await FirebaseStorage.instance
+          .ref(path)
+          .putData(bytes, SettableMetadata(contentType: mime))
+          .timeout(const Duration(minutes: 2));
+      attachments.add({
+        'path': path,
+        'size': size,
+        'sha256': sha256.convert(bytes).toString(),
+      });
+    }
+    if (FirebaseAuth.instance.currentUser?.uid != uid)
+      throw StateError('החשבון השתנה; יש להתחבר מחדש');
+    final result = await RemoteApi.post(deviceId, {
+      'action': 'enqueue_publication',
+      'requestId': draft.id,
+      'attemptId': attemptId,
+      'vehicleData': draft.vehicleData,
+      'attachments': attachments,
+    });
+    await _project(
+      deviceId,
+      draft.id,
+      Map<String, dynamic>.from(result['request'] as Map),
+    );
+    _changes.add(deviceId);
   }
 }

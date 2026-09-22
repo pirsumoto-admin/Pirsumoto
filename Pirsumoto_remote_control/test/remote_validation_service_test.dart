@@ -24,23 +24,28 @@ void main() {
         'price': '45000',
         'hand': '1',
         'color': 'לבן',
+        'fuel_type': 'בנזין',
+        'gear_type': 'אוטומטי',
+        'current_ownership': 'פרטית',
+        'previous_ownership': 'פרטית',
+        'month': '5',
+        'vehicle_condition': 'טוב',
+        'city': 'חיפה',
+        'handicapped': 'לא',
+        'no_test': 'לא',
       };
-      final missingComplete = RemoteValidationService.getMissingFields(complete);
+      final missingComplete = RemoteValidationService.getMissingFields(
+        complete,
+      );
       expect(missingComplete, isEmpty);
     });
 
     test('Validates numeric fields properly', () {
-      final invalid = {
-        'km': '-50',
-        'price': '0',
-      };
+      final invalid = {'km': '-50', 'price': '0'};
       final errors = RemoteValidationService.validateValues(invalid);
       expect(errors, isNotEmpty);
 
-      final valid = {
-        'km': '120000',
-        'price': '45000',
-      };
+      final valid = {'km': '120000', 'price': '45000'};
       final validErrors = RemoteValidationService.validateValues(valid);
       expect(validErrors, isEmpty);
     });

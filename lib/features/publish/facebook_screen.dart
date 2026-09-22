@@ -73,34 +73,66 @@ class _FacebookScreenState extends State<FacebookScreen> {
   double? _tapX;
   double? _tapY;
 
+  bool _publicationStopped = false;
+  bool _publicationPaused = false;
+
   @override
   void initState() {
     super.initState();
+    FirebaseChatReceiver.bindControls(
+      widget.publishData?.publicationIdentity,
+      this,
+      pause: () async {
+        _publicationPaused = true;
+        await _service?.pauseAndWait();
+        if (mounted) setState(() => _isPaused = true);
+      },
+      resume: () {
+        _publicationPaused = false;
+        if (_publicationStopped) return;
+        _service?.resumeAutomation();
+        if (mounted) setState(() => _isPaused = false);
+      },
+      stop: () async {
+        _publicationStopped = true;
+        if (_service != null) await _service!.stopAndWait();
+        await _controller.loadRequest(Uri.parse('about:blank'));
+        if (mounted)
+          setState(() {
+            _isPaused = true;
+            _statusMessage = 'הפרסום בוטל';
+          });
+      },
+    );
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(_kDesktopUserAgent)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (url) {
-            debugPrint('[FB-Screen] onPageFinished: $url');
-            if (!_automationStarted) {
-              _automationStarted = true;
-              Future.delayed(const Duration(seconds: 2), _startAutomation);
-            }
-          },
-          onWebResourceError: (error) {
-            debugPrint('[FB-Screen] WebResourceError: ${error.description}');
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse(_kFacebookVehicleUrl));
+    _controller =
+        WebViewController()
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..setUserAgent(_kDesktopUserAgent)
+          ..setNavigationDelegate(
+            NavigationDelegate(
+              onPageFinished: (url) {
+                debugPrint('[FB-Screen] onPageFinished: $url');
+                if (!_automationStarted) {
+                  _automationStarted = true;
+                  Future.delayed(const Duration(seconds: 2), _startAutomation);
+                }
+              },
+              onWebResourceError: (error) {
+                debugPrint(
+                  '[FB-Screen] WebResourceError: ${error.description}',
+                );
+              },
+            ),
+          )
+          ..loadRequest(Uri.parse(_kFacebookVehicleUrl));
   }
 
   @override
   void dispose() {
+    FirebaseChatReceiver.unbindControls(this);
     _service?.dispose();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -110,12 +142,22 @@ class _FacebookScreenState extends State<FacebookScreen> {
   // ── Automation wiring ─────────────────────────────────────────────────────
 
   Future<void> _startAutomation() async {
-    if (!mounted) return;
+    if (!mounted ||
+        _publicationStopped ||
+        !FirebaseChatReceiver.isCurrent(
+          widget.publishData?.publicationIdentity,
+        ))
+      return;
     setState(() => _statusMessage = 'בודק הרשאת נגישות...');
 
     // Check if a11y permission is available (Android only)
     final hasPermission = await FacebookAutomationService.checkPermission();
     if (!hasPermission && mounted) {
+      FirebaseChatReceiver.reportAutomationStatus(
+        identity: widget.publishData?.publicationIdentity,
+        statusType: 'stuck',
+        text: 'נדרשת הרשאת נגישות',
+      );
       _showA11yPermissionDialog();
       return;
     }
@@ -124,7 +166,13 @@ class _FacebookScreenState extends State<FacebookScreen> {
   }
 
   void _buildAndStartService() {
-    final data = widget.publishData ??
+    if (_publicationStopped ||
+        !FirebaseChatReceiver.isCurrent(
+          widget.publishData?.publicationIdentity,
+        ))
+      return;
+    final data =
+        widget.publishData ??
         const VehiclePublishData(
           licenseNumber: '',
           color: '',
@@ -162,8 +210,10 @@ class _FacebookScreenState extends State<FacebookScreen> {
       },
       onPhaseError: (phase, error) {
         FirebaseChatReceiver.reportAutomationStatus(
+          identity: widget.publishData?.publicationIdentity,
           statusType: 'stuck',
-          text: '⚠️ האוטומציה בפייסבוק נתקעה בשלב "${phase.descriptionHe}": $error',
+          text:
+              '⚠️ האוטומציה בפייסבוק נתקעה בשלב "${phase.descriptionHe}": $error',
         );
         if (!mounted) return;
         setState(() {
@@ -180,11 +230,14 @@ class _FacebookScreenState extends State<FacebookScreen> {
       onAutomationComplete: (success) {
         if (success) {
           FirebaseChatReceiver.reportAutomationStatus(
-            statusType: 'finished',
+            identity: widget.publishData?.publicationIdentity,
+            statusType: 'platform_completed',
+            platform: 'facebook',
             text: '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!',
           );
         } else {
           FirebaseChatReceiver.reportAutomationStatus(
+            identity: widget.publishData?.publicationIdentity,
             statusType: 'stuck',
             text: '⚠️ האוטומציה בפייסבוק נכשלה',
           );
@@ -210,9 +263,11 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
     setState(() => _statusMessage = 'מתחיל אוטומציה...');
     FirebaseChatReceiver.reportAutomationStatus(
+      identity: widget.publishData?.publicationIdentity,
       statusType: 'step',
       text: '🚀 מתחיל פרסום בפייסבוק מרקטפלייס...',
     );
+    if (_publicationPaused) _service!.pauseAutomation();
     _service!.startAutomation();
   }
 
@@ -221,46 +276,49 @@ class _FacebookScreenState extends State<FacebookScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('נדרשת הרשאת נגישות', textAlign: TextAlign.right),
-        content: const Text(
-          'האוטומציה של פייסבוק דורשת הרשאת Accessibility Service. '
-          'פתח את ההגדרות, אפשר את ההרשאה לאפליקציה וחזור.',
-          textAlign: TextAlign.right,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              Navigator.of(context).pop();
-            },
-            child: const Text('ביטול'),
+      builder:
+          (ctx) => AlertDialog(
+            title: const Text('נדרשת הרשאת נגישות', textAlign: TextAlign.right),
+            content: const Text(
+              'האוטומציה של פייסבוק דורשת הרשאת Accessibility Service. '
+              'פתח את ההגדרות, אפשר את ההרשאה לאפליקציה וחזור.',
+              textAlign: TextAlign.right,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  Navigator.of(context).pop();
+                },
+                child: const Text('ביטול'),
+              ),
+              TextButton(
+                onPressed: () => FacebookAutomationService.openSettings(),
+                child: const Text('פתח הגדרות'),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  final navigator = Navigator.of(ctx);
+                  final messenger = ScaffoldMessenger.of(ctx);
+                  final ok = await FacebookAutomationService.checkPermission();
+                  if (ok) {
+                    navigator.pop();
+                    _buildAndStartService();
+                  } else {
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'עדיין לא ניתנה הרשאה',
+                          textAlign: TextAlign.right,
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: const Text('אישרתי'),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () => FacebookAutomationService.openSettings(),
-            child: const Text('פתח הגדרות'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final navigator = Navigator.of(ctx);
-              final messenger = ScaffoldMessenger.of(ctx);
-              final ok = await FacebookAutomationService.checkPermission();
-              if (ok) {
-                navigator.pop();
-                _buildAndStartService();
-              } else {
-                messenger.showSnackBar(
-                  const SnackBar(
-                    content: Text('עדיין לא ניתנה הרשאה',
-                        textAlign: TextAlign.right),
-                  ),
-                );
-              }
-            },
-            child: const Text('אישרתי'),
-          ),
-        ],
-      ),
     );
   }
 
@@ -273,7 +331,11 @@ class _FacebookScreenState extends State<FacebookScreen> {
       _tapY = cssY;
     });
     Future.delayed(const Duration(milliseconds: 700), () {
-      if (mounted) setState(() { _tapX = null; _tapY = null; });
+      if (mounted)
+        setState(() {
+          _tapX = null;
+          _tapY = null;
+        });
     });
   }
 
@@ -285,243 +347,294 @@ class _FacebookScreenState extends State<FacebookScreen> {
       canPop: _isComplete || _hasError,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
-        debugPrint('[FB-Screen] Back navigation prevented during active automation');
+        debugPrint(
+          '[FB-Screen] Back navigation prevented during active automation',
+        );
       },
       child: Scaffold(
-      body: Stack(
-        children: [
-          // WebView
-          WebViewWidget(controller: _controller),
+        body: Stack(
+          children: [
+            // WebView
+            WebViewWidget(controller: _controller),
 
-          // Status bar overlay
-          _buildStatusBar(),
+            // Status bar overlay
+            _buildStatusBar(),
 
-          // Tap preview marker
-          if (_tapX != null && _tapY != null)
-            Positioned(
-              left: _tapX! - 24,
-              top: _tapY! - 24,
-              child: IgnorePointer(
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: const Color(0x501877F2),
-                    border: Border.all(
-                        color: const Color(0xFF1877F2), width: 2.5),
-                  ),
-                  child: const Icon(Icons.touch_app,
-                      color: Color(0xFF1877F2), size: 22),
-                ),
-              ),
-            ),
-
-          // Pause / Resume control button
-          if (_showControls && !_isComplete && !_hasError)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
-              left: 16,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _isPaused
-                      ? const Color(0xFF1B5E20)
-                      : const Color(0xFFE65100),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 18, vertical: 12),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30)),
-                  elevation: 6,
-                ),
-                onPressed: () {
-                  if (_isPaused) {
-                    _service?.resumeAutomation();
-                    setState(() {
-                      _isPaused = false;
-                      _statusMessage = 'ממשיך אוטומציה...';
-                    });
-                    FirebaseChatReceiver.reportAutomationStatus(
-                      statusType: 'step',
-                      text: '▶️ ממשיך אוטומציה בפייסבוק...',
-                    );
-                  } else {
-                    _service?.pauseAutomation();
-                    setState(() {
-                      _isPaused = true;
-                      _statusMessage = 'אוטומציה מושהית — לחץ המשך';
-                    });
-                    FirebaseChatReceiver.reportAutomationStatus(
-                      statusType: 'stopped',
-                      text: '🛑 האוטומציה בפייסבוק הופסקה (הושהתה) על ידי המשתמש',
-                    );
-                  }
-                },
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(_isPaused ? Icons.play_arrow : Icons.pause, size: 18),
-                    const SizedBox(width: 8),
-                    Text(_isPaused ? 'המשך' : 'הפסק',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 15)),
-                  ],
-                ),
-              ),
-            ),
-
-          // Step-back + Exit buttons when paused
-          if (_showControls && _isPaused && !_isComplete)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
-              right: 16,
-              child: Row(
-                children: [
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFC62828),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 18, vertical: 12),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(30)),
-                      elevation: 6,
+            // Tap preview marker
+            if (_tapX != null && _tapY != null)
+              Positioned(
+                left: _tapX! - 24,
+                top: _tapY! - 24,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0x501877F2),
+                      border: Border.all(
+                        color: const Color(0xFF1877F2),
+                        width: 2.5,
+                      ),
                     ),
-                    onPressed: () =>
-                        Navigator.of(context).popUntil((r) => r.isFirst),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.home, size: 18),
-                        SizedBox(width: 8),
-                        Text('סיים',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 15)),
-                      ],
+                    child: const Icon(
+                      Icons.touch_app,
+                      color: Color(0xFF1877F2),
+                      size: 22,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1877F2),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 18, vertical: 12),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(30)),
-                      elevation: 6,
+                ),
+              ),
+
+            // Pause / Resume control button
+            if (_showControls && !_isComplete && !_hasError)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 16,
+                left: 16,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        _isPaused
+                            ? const Color(0xFF1B5E20)
+                            : const Color(0xFFE65100),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 12,
                     ),
-                    onPressed: () {
-                      _service?.stepBack();
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                    elevation: 6,
+                  ),
+                  onPressed: () async {
+                    final identity = widget.publishData?.publicationIdentity;
+                    if (identity != null) {
+                      await FirebaseChatReceiver.setLocalPaused(
+                        identity,
+                        !_isPaused,
+                      );
+                      return;
+                    }
+                    if (_isPaused) {
                       _service?.resumeAutomation();
                       setState(() {
                         _isPaused = false;
                         _statusMessage = 'ממשיך אוטומציה...';
                       });
-                    },
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.replay, size: 18),
-                        SizedBox(width: 8),
-                        Text('צעד אחורה',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 15)),
-                      ],
-                    ),
+                      FirebaseChatReceiver.reportAutomationStatus(
+                        identity: widget.publishData?.publicationIdentity,
+                        statusType: 'publishing',
+                        text: '▶️ ממשיך אוטומציה בפייסבוק...',
+                      );
+                    } else {
+                      _service?.pauseAutomation();
+                      setState(() {
+                        _isPaused = true;
+                        _statusMessage = 'אוטומציה מושהית — לחץ המשך';
+                      });
+                      FirebaseChatReceiver.reportAutomationStatus(
+                        identity: widget.publishData?.publicationIdentity,
+                        statusType: 'paused',
+                        text:
+                            '🛑 האוטומציה בפייסבוק הופסקה (הושהתה) על ידי המשתמש',
+                      );
+                    }
+                  },
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isPaused ? Icons.play_arrow : Icons.pause,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _isPaused ? 'המשך' : 'הפסק',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            ),
 
-          // Done / Error home button
-          if (_isComplete || _hasError)
-            Positioned(
-              bottom: MediaQuery.of(context).padding.bottom + 24,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.home),
-                  label: const Text('חזור לדף הבית'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _hasError
-                        ? const Color(0xFFC62828)
-                        : const Color(0xFF1877F2),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 32, vertical: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(30)),
-                    elevation: 6,
-                  ),
-                  onPressed: () =>
-                      Navigator.of(context).popUntil((r) => r.isFirst),
+            // Step-back + Exit buttons when paused
+            if (_showControls && _isPaused && !_isComplete)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 16,
+                right: 16,
+                child: Row(
+                  children: [
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFC62828),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        elevation: 6,
+                      ),
+                      onPressed:
+                          () =>
+                              Navigator.of(context).popUntil((r) => r.isFirst),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.home, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'סיים',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1877F2),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        elevation: 6,
+                      ),
+                      onPressed: () {
+                        _service?.stepBack();
+                        _service?.resumeAutomation();
+                        setState(() {
+                          _isPaused = false;
+                          _statusMessage = 'ממשיך אוטומציה...';
+                        });
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.replay, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'צעד אחורה',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-          // Floating Button to Setup Credentials / Preset Login Dialog
-          if (_isLoginRequired && !_isComplete && !_hasError)
-            Positioned(
-              bottom: 24,
-              left: 20,
-              right: 20,
-              child: SafeArea(
+
+            // Done / Error home button
+            if (_isComplete || _hasError)
+              Positioned(
+                bottom: MediaQuery.of(context).padding.bottom + 24,
+                left: 0,
+                right: 0,
                 child: Center(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF1877F2), Color(0xFF3B5BDB)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.home),
+                    label: const Text('חזור לדף הבית'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          _hasError
+                              ? const Color(0xFFC62828)
+                              : const Color(0xFF1877F2),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 14,
                       ),
-                      borderRadius: BorderRadius.circular(30),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF1877F2).withValues(alpha: 0.45),
-                          blurRadius: 14,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
+                      shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
-                        onTap: () async {
-                          final shouldReload = await showPresetLoginDialog(
-                            context,
-                            isFromWebView: true,
-                          );
-                          if (mounted && shouldReload == true) {
-                            try {
-                              await _controller.reload();
-                            } catch (_) {}
-                          }
-                        },
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 22,
-                            vertical: 13,
+                      ),
+                      elevation: 6,
+                    ),
+                    onPressed:
+                        () => Navigator.of(context).popUntil((r) => r.isFirst),
+                  ),
+                ),
+              ),
+            // Floating Button to Setup Credentials / Preset Login Dialog
+            if (_isLoginRequired && !_isComplete && !_hasError)
+              Positioned(
+                bottom: 24,
+                left: 20,
+                right: 20,
+                child: SafeArea(
+                  child: Center(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF1877F2), Color(0xFF3B5BDB)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(30),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(
+                              0xFF1877F2,
+                            ).withValues(alpha: 0.45),
+                            blurRadius: 14,
+                            offset: const Offset(0, 4),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.vpn_key_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'התחברות מראש לאתרים',
-                                style: TextStyle(
+                        ],
+                      ),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(30),
+                          onTap: () async {
+                            final shouldReload = await showPresetLoginDialog(
+                              context,
+                              isFromWebView: true,
+                            );
+                            if (mounted && shouldReload == true) {
+                              try {
+                                await _controller.reload();
+                              } catch (_) {}
+                            }
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 22,
+                              vertical: 13,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.vpn_key_rounded,
                                   color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
+                                  size: 20,
                                 ),
-                              ),
-                            ],
+                                SizedBox(width: 10),
+                                Text(
+                                  'התחברות מראש לאתרים',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -529,11 +642,10 @@ class _FacebookScreenState extends State<FacebookScreen> {
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
+    );
   }
 
   // ── Status bar ────────────────────────────────────────────────────────────
@@ -579,16 +691,17 @@ class _FacebookScreenState extends State<FacebookScreen> {
             Expanded(
               child: Text(
                 _statusMessage,
-                style:
-                    const TextStyle(color: Colors.white, fontSize: 14),
+                style: const TextStyle(color: Colors.white, fontSize: 14),
                 textAlign: TextAlign.right,
               ),
             ),
             if (_isComplete || _hasError)
               TextButton(
                 onPressed: () => Navigator.of(context).pop(),
-                child: const Text('סגור',
-                    style: TextStyle(color: Colors.white)),
+                child: const Text(
+                  'סגור',
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
           ],
         ),

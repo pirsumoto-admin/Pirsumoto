@@ -1,526 +1,488 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:intl/intl.dart' as intl;
+import 'package:publication_protocol/publication_protocol.dart';
+import '../webrtc/controller_webrtc_session.dart';
 import 'app_theme.dart';
 import 'chat_session_manager.dart';
 import 'whatsapp_chat_screen.dart';
-import '../webrtc/controller_webrtc_session.dart';
-import '../database/sqlite_database_helper.dart';
-import '../services/remote_llm_service.dart';
 
 class ChatSessionsListScreen extends StatefulWidget {
-  final String deviceId;
-  final String deviceName;
+  final String deviceId, deviceName;
   final ControllerWebRtcSession? session;
-
   const ChatSessionsListScreen({
     super.key,
     required this.deviceId,
     required this.deviceName,
     this.session,
   });
-
   @override
   State<ChatSessionsListScreen> createState() => _ChatSessionsListScreenState();
 }
 
 class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
   List<ChatSession> _sessions = [];
-  bool _isLoading = true;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _liveUpdatesSub;
-
+  StreamSubscription? _sub;
+  bool _loading = true;
+  String? _error;
+  final Set<String> _busy = {};
   @override
   void initState() {
     super.initState();
-    _loadSessions();
-    _listenToLiveUpdates();
+    ChatSessionManager.watchDevice(widget.deviceId);
+    _sub = ChatSessionManager.changes
+        .where((d) => d == widget.deviceId)
+        .listen((_) => _load());
+    _load();
   }
 
   @override
   void dispose() {
-    _liveUpdatesSub?.cancel();
+    _sub?.cancel();
     super.dispose();
   }
 
-  void _listenToLiveUpdates() {
-    // Only listen to recent status updates
-    final timestampLimit = DateTime.now().millisecondsSinceEpoch - 10000;
-    
-    _liveUpdatesSub = FirebaseFirestore.instance
-        .collection('remote_chats')
-        .doc(widget.deviceId)
-        .collection('messages')
-        .where('timestamp', isGreaterThan: timestampLimit)
-        .snapshots()
-        .listen((snapshot) async {
-      bool needsReload = false;
-      
-      for (final change in snapshot.docChanges) {
-        if (change.type == DocumentChangeType.added) {
-          final data = change.doc.data();
-          if (data == null) continue;
-          
-          final type = data['type'] as String?;
-          if (type == 'status') {
-            final sessionId = data['sessionId'] as String?;
-            if (sessionId == null) continue;
-            
-            final statusType = data['statusType'] as String?;
-            final text = data['text'] as String?;
-            
-            final session = await SqliteDatabaseHelper.instance.getSession(sessionId);
-            if (session != null) {
-              if (statusType == 'started') {
-                session.status = ChatSessionStatus.running;
-                session.lastMessage = text ?? 'בתהליך פרסום';
-              } else if (statusType == 'finished') {
-                session.status = ChatSessionStatus.done;
-                session.lastMessage = text ?? 'הושלם';
-                
-                // Auto advance queue
-                await ChatSessionManager.advanceQueueAndStartNext(widget.deviceId, session: widget.session);
-              } else if (statusType == 'stopped') {
-                session.status = ChatSessionStatus.done; // or canceled
-                session.lastMessage = text ?? 'הופסק';
-                
-                // Auto advance queue
-                await ChatSessionManager.advanceQueueAndStartNext(widget.deviceId, session: widget.session);
-              } else if (statusType == 'stuck') {
-                session.status = ChatSessionStatus.error;
-                session.lastMessage = text ?? 'נתקע';
-              }
-              
-              await ChatSessionManager.saveSession(session);
-              needsReload = true;
-            }
-          }
-        }
-      }
-      
-      if (needsReload && mounted) {
-        _loadSessions();
-      }
-    });
-  }
-
-  Future<void> _loadSessions() async {
-    setState(() => _isLoading = true);
-    final sessions = await ChatSessionManager.getSessions(widget.deviceId);
-    if (mounted) {
-      setState(() {
-        _sessions = sessions;
-        _isLoading = false;
-      });
-    }
-    _runLlmExtraction(sessions);
-  }
-
-  Future<void> _runLlmExtraction(List<ChatSession> currentSessions) async {
-    bool updated = false;
-    for (var session in currentSessions) {
-      if (session.licensePlate.isEmpty) {
-        final messages = await SqliteDatabaseHelper.instance.getMessages(session.id);
-        if (messages.isNotEmpty) {
-          final extracted = await RemoteLlmService.extractLicensePlate(messages);
-          if (extracted != null && extracted.isNotEmpty) {
-            session.licensePlate = extracted;
-            await ChatSessionManager.saveSession(session);
-            updated = true;
-          }
-        }
-      }
-    }
-    if (updated && mounted) {
-      final refreshed = await ChatSessionManager.getSessions(widget.deviceId);
-      setState(() {
-        _sessions = refreshed;
-      });
-    }
-  }
-
-  Future<void> _cancelSession(ChatSession session) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text(
-          'ביטול פרסום',
-          style: GoogleFonts.heebo(color: AppColors.onSurface, fontWeight: FontWeight.bold),
-          textDirection: TextDirection.rtl,
-        ),
-        content: Text(
-          'האם אתה בטוח שברצונך לבטל את תהליך הפרסום עבור שיחה זו?',
-          style: GoogleFonts.heebo(color: AppColors.secondary),
-          textDirection: TextDirection.rtl,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('חזור', style: GoogleFonts.heebo(color: AppColors.secondary)),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
-            child: Text('בטל פרסום', style: GoogleFonts.heebo(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      final wasRunning = session.status == ChatSessionStatus.running;
-      session.status = ChatSessionStatus.done;
-      session.lastMessage = 'הפרסום בוטל';
-      await ChatSessionManager.saveSession(session);
-
-      // Send cancel / reset command to remote device
-      try {
-        await FirebaseFirestore.instance
-            .collection('remote_chats')
-            .doc(widget.deviceId)
-            .collection('messages')
-            .add({
-              'id': 'cancel_${DateTime.now().millisecondsSinceEpoch}',
-              'sessionId': session.id,
-              'sender': 'user',
-              'senderName': 'Remote User',
-              'text': 'ביטול',
-              'type': 'message',
-              'status': 'pending',
-              'timestamp': DateTime.now().millisecondsSinceEpoch,
-              'createdAt': FieldValue.serverTimestamp(),
-            });
-        
-        if (wasRunning) {
-          await FirebaseFirestore.instance
-              .collection('remote_chats')
-              .doc(widget.deviceId)
-              .collection('messages')
-              .add({
-                'id': 'reset_${DateTime.now().millisecondsSinceEpoch}',
-                'sessionId': session.id,
-                'sender': 'user',
-                'type': 'reset',
-                'status': 'pending',
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-        }
-      } catch (e) {
-        debugPrint('[ChatSessions] Error sending cancel command to Firestore: $e');
-      }
-
-      if (wasRunning && widget.session?.isConnected == true) {
-        try {
-          widget.session!.sendChatMessage('ביטול', senderName: 'Remote User');
-          widget.session!.sendReset();
-        } catch (_) {}
-      }
-
-      // Advance queue to next waiting session
-      final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
-        widget.deviceId,
-        session: widget.session,
-      );
-
+  Future<void> _load() async {
+    try {
+      final sessions = await ChatSessionManager.getSessions(widget.deviceId);
       if (mounted) {
-        if (nextSession != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'הפרסום בוטל. מתחיל פרסום עבור הרכב הבא בתור: ${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id}',
-                textDirection: TextDirection.rtl,
-              ),
-              backgroundColor: AppColors.primary,
-            ),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('הפרסום בוטל בהצלחה.', textDirection: TextDirection.rtl),
-              backgroundColor: AppColors.surface,
-            ),
-          );
-        }
+        setState(() {
+          _sessions = sessions;
+          _loading = false;
+          _error = null;
+        });
       }
-
-      _loadSessions();
-    }
-  }
-
-  Future<void> _deleteSession(ChatSession session) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text(
-          'מחיקת שיחה',
-          style: GoogleFonts.heebo(color: AppColors.onSurface, fontWeight: FontWeight.bold),
-          textDirection: TextDirection.rtl,
-        ),
-        content: Text(
-          'האם אתה בטוח שברצונך למחוק שיחה זו?',
-          style: GoogleFonts.heebo(color: AppColors.secondary),
-          textDirection: TextDirection.rtl,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('ביטול', style: GoogleFonts.heebo(color: AppColors.secondary)),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-            child: Text('מחק', style: GoogleFonts.heebo(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      final wasRunning = session.status == ChatSessionStatus.running;
-      await ChatSessionManager.deleteSession(widget.deviceId, session.id);
-      
-      try {
-        await FirebaseFirestore.instance
-            .collection('remote_chats')
-            .doc(widget.deviceId)
-            .collection('messages')
-            .add({
-              'id': 'del_${DateTime.now().millisecondsSinceEpoch}',
-              'sessionId': session.id,
-              'sender': 'user',
-              'type': 'delete_session',
-              'status': 'pending',
-              'timestamp': DateTime.now().millisecondsSinceEpoch,
-              'createdAt': FieldValue.serverTimestamp(),
-            });
-
-        if (wasRunning) {
-          await FirebaseFirestore.instance
-              .collection('remote_chats')
-              .doc(widget.deviceId)
-              .collection('messages')
-              .add({
-                'id': 'cancel_${DateTime.now().millisecondsSinceEpoch}',
-                'sessionId': session.id,
-                'sender': 'user',
-                'senderName': 'Remote User',
-                'text': 'ביטול',
-                'type': 'message',
-                'status': 'pending',
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-        }
-      } catch (e) {
-        debugPrint('[ChatSessions] Error sending delete command to Firestore: $e');
-      }
-
-      if (wasRunning && widget.session?.isConnected == true) {
-        try {
-          widget.session!.sendChatMessage('ביטול', senderName: 'Remote User');
-          widget.session!.sendReset();
-        } catch (_) {}
-      }
-
-      // If the deleted session was running (or queue can advance), start next in line
-      final nextSession = await ChatSessionManager.advanceQueueAndStartNext(
-        widget.deviceId,
-        session: widget.session,
-      );
-
+    } catch (e) {
       if (mounted) {
-        if (nextSession != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'השיחה נמחקה. מתחיל פרסום עבור הרכב הבא בתור: ${nextSession.licensePlate.isNotEmpty ? nextSession.licensePlate : nextSession.id}',
-                textDirection: TextDirection.rtl,
-              ),
-              backgroundColor: AppColors.primary,
-            ),
-          );
-        }
+        setState(() {
+          _error = '$e';
+          _loading = false;
+        });
       }
-
-      _loadSessions();
     }
   }
 
-  void _openChat(String? sessionId) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => WhatsAppChatScreen(
-          deviceId: widget.deviceId,
-          deviceName: widget.deviceName,
-          session: widget.session,
-          sessionId: sessionId,
-        ),
-      ),
-    ).then((_) => _loadSessions()); // Reload on return in case of updates
-  }
-
-  String _formatStatus(ChatSessionStatus status) {
-    switch (status) {
-      case ChatSessionStatus.draft:
-        return 'טיוטה';
-      case ChatSessionStatus.running:
-        return 'בתהליך';
-      case ChatSessionStatus.waiting:
-        return 'ממתין';
-      case ChatSessionStatus.done:
-        return 'הסתיים';
-      case ChatSessionStatus.error:
-        return 'שגיאה / נתקע';
+  Future<void> _act(ChatSession session, Future<void> Function() action) async {
+    if (_busy.contains(session.id)) return;
+    setState(() => _busy.add(session.id));
+    try {
+      await action();
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy.remove(session.id));
     }
   }
 
-  Color _getStatusColor(ChatSessionStatus status) {
-    switch (status) {
-      case ChatSessionStatus.draft:
-        return Colors.blueGrey;
-      case ChatSessionStatus.running:
-        return Colors.blue;
-      case ChatSessionStatus.waiting:
-        return Colors.orange;
-      case ChatSessionStatus.done:
-        return Colors.green;
-      case ChatSessionStatus.error:
-        return AppColors.error;
-    }
+  void _open(String? id) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => WhatsAppChatScreen(
+              deviceId: widget.deviceId,
+              deviceName: widget.deviceName,
+              session: widget.session,
+              sessionId: id,
+            ),
+          ),
+        )
+        .then((_) => _load());
   }
+
+  String _label(ChatSessionStatus s) => switch (s) {
+    ChatSessionStatus.draft => 'טיוטה',
+    ChatSessionStatus.waiting => 'ממתין בתור',
+    ChatSessionStatus.preparing => 'מכין תמונות',
+    ChatSessionStatus.running => 'מפרסם',
+    ChatSessionStatus.paused => 'מושהה',
+    ChatSessionStatus.error => 'נתקע — נדרשת בדיקה',
+    ChatSessionStatus.canceling => 'מבטל — ממתין לאישור',
+    ChatSessionStatus.canceled => 'בוטל',
+    ChatSessionStatus.failed => 'נכשל',
+    ChatSessionStatus.done => 'פורסם',
+  };
+
+  (Color, Color, Color) _statusColors(ChatSessionStatus s) => switch (s) {
+    ChatSessionStatus.draft => (
+      AppColors.surfaceSubtle,
+      AppColors.border,
+      AppColors.secondary,
+    ),
+    ChatSessionStatus.waiting => (
+      AppColors.warningSoft,
+      AppColors.warning,
+      AppColors.warning,
+    ),
+    ChatSessionStatus.preparing => (
+      AppColors.primarySoft,
+      AppColors.primary,
+      AppColors.primaryAction,
+    ),
+    ChatSessionStatus.running => (
+      AppColors.primarySoft,
+      AppColors.primary,
+      AppColors.primaryAction,
+    ),
+    ChatSessionStatus.paused => (
+      AppColors.warningSoft,
+      AppColors.warning,
+      AppColors.warning,
+    ),
+    ChatSessionStatus.error => (
+      AppColors.errorSoft,
+      AppColors.error,
+      AppColors.error,
+    ),
+    ChatSessionStatus.canceling => (
+      AppColors.warningSoft,
+      AppColors.warning,
+      AppColors.warning,
+    ),
+    ChatSessionStatus.canceled => (
+      AppColors.offlineSoft,
+      AppColors.offline,
+      AppColors.offline,
+    ),
+    ChatSessionStatus.failed => (
+      AppColors.errorSoft,
+      AppColors.error,
+      AppColors.error,
+    ),
+    ChatSessionStatus.done => (
+      AppColors.successSoft,
+      AppColors.success,
+      AppColors.success,
+    ),
+  };
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.neutral,
-      appBar: AppBar(
-        backgroundColor: AppColors.surface,
-        title: Text(
-          'שיחות - ${widget.deviceName}',
-          style: GoogleFonts.heebo(fontWeight: FontWeight.w600),
-        ),
-        centerTitle: true,
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _sessions.isEmpty
-              ? Center(
-                  child: Text(
-                    'אין שיחות פעילות.\nלחץ על ה- + כדי להתחיל שיחה חדשה.',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.heebo(color: AppColors.secondary, fontSize: 16),
-                    textDirection: TextDirection.rtl,
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: Text('בקשות פרסום — ${widget.deviceName}'),
+      actions: [
+        IconButton(
+          tooltip: 'ייבוא היסטוריה מהגרסה הקודמת',
+          icon: const Icon(Icons.history),
+          onPressed: () async {
+            final messenger = ScaffoldMessenger.of(context);
+            try {
+              final count = await ChatSessionManager.importLegacyDevice(
+                widget.deviceId,
+              );
+              if (mounted) {
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      'יובאו $count שיחות. בקשות ישנות לא מופעלות מחדש.',
+                    ),
                   ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _sessions.length,
-                  itemBuilder: (context, index) {
-                    final session = _sessions[index];
-                    final dateStr = intl.DateFormat('dd/MM/yyyy HH:mm')
-                        .format(DateTime.fromMillisecondsSinceEpoch(session.startTimestamp));
-                    
-                    return Card(
-                      color: AppColors.surface,
-                      margin: const EdgeInsets.only(bottom: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      child: ListTile(
-                        onTap: () => _openChat(session.id),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        title: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              session.licensePlate.isNotEmpty ? 'רישוי: ${session.licensePlate}' : 'שיחה חדשה',
-                              style: GoogleFonts.heebo(
-                                color: AppColors.onSurface,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                              textDirection: TextDirection.rtl,
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: _getStatusColor(session.status).withValues(alpha: 0.2),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                _formatStatus(session.status),
-                                style: GoogleFonts.heebo(
-                                  color: _getStatusColor(session.status),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
+                );
+              }
+              await _load();
+            } catch (e) {
+              if (mounted) {
+                messenger.showSnackBar(SnackBar(content: Text('$e')));
+              }
+            }
+          },
+        ),
+      ],
+    ),
+    floatingActionButton: FloatingActionButton(
+      onPressed: () => _open(null),
+      child: const Icon(Icons.add),
+    ),
+    body: _loading
+        ? const Center(child: CircularProgressIndicator())
+        : _error != null
+        ? Center(child: Text(_error!))
+        : RefreshIndicator(
+            onRefresh: _load,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              itemCount: _sessions.isEmpty ? 1 : _sessions.length,
+              itemBuilder: (context, index) {
+                if (_sessions.isEmpty) {
+                  return const Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Text('אין בקשות. לחץ + להוספת רכב.'),
+                  );
+                }
+                final anyRunning = _sessions.any((sess) {
+                  final req = ChatSessionManager.request(
+                    widget.deviceId,
+                    sess.id,
+                  );
+                  return req != null &&
+                      !PublicationState.terminal.contains(req['state']) &&
+                      req['state'] != 'canceled';
+                });
+                final s = _sessions[index],
+                    r = ChatSessionManager.request(
+                      widget.deviceId,
+                      _sessions[index].id,
+                    );
+                final isRunning =
+                    r != null &&
+                    !PublicationState.terminal.contains(r['state']) &&
+                    r['state'] != 'canceled';
+                final canStart =
+                    (s.status == ChatSessionStatus.draft ||
+                        s.status == ChatSessionStatus.canceled ||
+                        s.status == ChatSessionStatus.failed) &&
+                    (s.isReadyToPublish ||
+                        (VehicleSchema.isComplete(s.vehicleData) &&
+                            s.imagePaths.isNotEmpty));
+                final title = [
+                  s.vehicleData['maker'],
+                  s.vehicleData['model'],
+                  s.vehicleData['year'],
+                ].whereType<String>().join(' ');
+                final (statusBg, statusBorder, statusText) = _statusColors(
+                  s.status,
+                );
+                return Card(
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  elevation: 0.5,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: AppColors.border, width: 0.8),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => _open(s.id),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          // Left side: Vehicle info and details
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '${s.licensePlate.isEmpty ? 'רכב חדש' : s.licensePlate}  $title',
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.onSurface,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        subtitle: Padding(
-                          padding: const EdgeInsets.only(top: 8.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              Text(
-                                dateStr,
-                                style: GoogleFonts.heebo(color: AppColors.secondary, fontSize: 12),
-                              ),
-                              if (session.lastMessage != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 4.0),
-                                  child: Text(
-                                    session.lastMessage!,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: GoogleFonts.heebo(color: AppColors.secondary),
-                                    textDirection: TextDirection.rtl,
+                                const SizedBox(height: 4),
+                                Text(
+                                  '${s.vehicleData['price'] ?? '—'} ₪ · ${s.vehicleData['km'] ?? '—'} ק״מ',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    color: AppColors.secondary,
+                                    fontWeight: FontWeight.w500,
                                   ),
                                 ),
-                            ],
-                          ),
-                        ),
-                        leading: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (session.status == ChatSessionStatus.running ||
-                                session.status == ChatSessionStatus.waiting)
-                              IconButton(
-                                icon: const Icon(Icons.cancel_outlined, color: AppColors.warning),
-                                tooltip: 'ביטול פרסום',
-                                onPressed: () => _cancelSession(session),
-                              ),
-                            if (session.status == ChatSessionStatus.waiting &&
-                                !_sessions.any((s) => s.status == ChatSessionStatus.running))
-                              IconButton(
-                                icon: const Icon(Icons.play_arrow_rounded, color: AppColors.success),
-                                tooltip: 'התחל פרסום',
-                                onPressed: () async {
-                                  await ChatSessionManager.startSession(widget.deviceId, session.id, session: widget.session);
-                                  _loadSessions();
-                                },
-                              ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline, color: AppColors.error),
-                              tooltip: 'מחיקת שיחה',
-                              onPressed: () => _deleteSession(session),
+                                if (s.lastMessage != null &&
+                                    s.lastMessage!.trim().isNotEmpty) ...[
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    s.lastMessage!.trim(),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: AppColors.secondary,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ],
                             ),
-                          ],
-                        ),
+                          ),
+                          const SizedBox(width: 8),
+                          // Right side: Status badge on top, trash/action buttons below
+                          if (_busy.contains(s.id))
+                            const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          else
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: statusBg,
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                      color: statusBorder,
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    s.status == ChatSessionStatus.waiting
+                                        ? ChatSessionManager.queueLabel(
+                                            widget.deviceId,
+                                            s.id,
+                                          )
+                                        : _label(s.status),
+                                    style: TextStyle(
+                                      color: statusText,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (isRunning)
+                                      Tooltip(
+                                        message: 'עצור פרסום',
+                                        child: TextButton.icon(
+                                          icon: const Icon(
+                                            Icons.stop_circle_outlined,
+                                            color: AppColors.error,
+                                            size: 15,
+                                          ),
+                                          label: Text(
+                                            'עצור',
+                                            style: GoogleFonts.heebo(
+                                              color: AppColors.error,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          style: TextButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 3,
+                                            ),
+                                            minimumSize: Size.zero,
+                                            tapTargetSize: MaterialTapTargetSize
+                                                .shrinkWrap,
+                                            backgroundColor:
+                                                AppColors.errorSoft,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              side: BorderSide(
+                                                color: AppColors.error
+                                                    .withValues(alpha: 0.3),
+                                              ),
+                                            ),
+                                          ),
+                                          onPressed: () => _act(
+                                            s,
+                                            () => ChatSessionManager.control(
+                                              widget.deviceId,
+                                              s.id,
+                                              'cancel',
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    else ...[
+                                      if (canStart && !anyRunning) ...[
+                                        Tooltip(
+                                          message: 'התחל פרסום',
+                                          child: TextButton.icon(
+                                            icon: const Icon(
+                                              Icons.play_circle_outline_rounded,
+                                              color: AppColors.success,
+                                              size: 15,
+                                            ),
+                                            label: Text(
+                                              'התחל',
+                                              style: GoogleFonts.heebo(
+                                                color: AppColors.success,
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            style: TextButton.styleFrom(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 3,
+                                                  ),
+                                              minimumSize: Size.zero,
+                                              tapTargetSize:
+                                                  MaterialTapTargetSize
+                                                      .shrinkWrap,
+                                              backgroundColor:
+                                                  AppColors.successSoft,
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                side: BorderSide(
+                                                  color: AppColors.success
+                                                      .withValues(alpha: 0.3),
+                                                ),
+                                              ),
+                                            ),
+                                            onPressed: () => _act(
+                                              s,
+                                              () =>
+                                                  ChatSessionManager.startPublication(
+                                                    widget.deviceId,
+                                                    s,
+                                                  ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                      ],
+                                      IconButton(
+                                        tooltip: 'מחק',
+                                        icon: const Icon(
+                                          Icons.delete_outline_rounded,
+                                          color: AppColors.error,
+                                        ),
+                                        iconSize: 20,
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.all(4),
+                                        constraints: const BoxConstraints(
+                                          minWidth: 32,
+                                          minHeight: 32,
+                                        ),
+                                        onPressed: () => _act(
+                                          s,
+                                          () =>
+                                              ChatSessionManager.deleteSession(
+                                                widget.deviceId,
+                                                s.id,
+                                              ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                        ],
                       ),
-                    );
-                  },
-                ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _openChat(null), // null creates a new session
-        backgroundColor: AppColors.primary,
-        child: const Icon(Icons.add, color: Colors.white),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.startFloat, // Bottom right in RTL
-    );
-  }
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+  );
 }

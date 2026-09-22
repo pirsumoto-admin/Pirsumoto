@@ -715,6 +715,31 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
+    // Unlike dispatchGesture's immediate "accepted" result, this acknowledges
+    // completion. The Dart phase cannot advance while a tap is still in flight.
+    fun performAutomationGesture(startX: Float, startY: Float, endX: Float, endY: Float,
+                                 duration: Long, completion: (Boolean) -> Unit) {
+        var finished = false
+        val timeout = Runnable {
+            if (!finished) { finished = true; completion(false) }
+        }
+        fun finish(success: Boolean) {
+            if (finished) return
+            finished = true
+            mainHandler.removeCallbacks(timeout)
+            completion(success)
+        }
+        val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
+        mainHandler.postDelayed(timeout, duration + 2000L)
+        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) { finish(true) }
+            override fun onCancelled(gestureDescription: GestureDescription?) { finish(false) }
+        }, mainHandler)
+        if (!accepted) finish(false)
+    }
+
     fun tapAt(x: Float, y: Float): Boolean {
         Log.d("A11Y", "tapAt invoked at ($x, $y)")
         val path = Path().apply {

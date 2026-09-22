@@ -1,3 +1,5 @@
+import 'package:publication_protocol/publication_protocol.dart';
+import '../remote_control/firebase_chat_receiver.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -12,7 +14,10 @@ import 'yad2_automation_models.dart';
 /// Launches Yad2 automated publication from internal P2P chat vehicle data.
 class P2PAutoPublishLauncher {
   /// Main entrypoint to launch Yad2 publication from vehicle state map.
-  static Future<bool> launch(Map<String, String> data) async {
+  static Future<bool> launch(
+    Map<String, String> data, {
+    PublicationIdentity? identity,
+  }) async {
     try {
       final licensePlate = _firstNonEmpty([
         data['license_plate'],
@@ -25,8 +30,9 @@ class P2PAutoPublishLauncher {
       // 1. Wake device screen and bring Pirsumoto app to the foreground
       if (Platform.isAndroid) {
         try {
-          const MethodChannel('com.pirsumoto/accessibility')
-              .invokeMethod('bringAppToForeground');
+          await const MethodChannel(
+            'com.pirsumoto/accessibility',
+          ).invokeMethod('bringAppToForeground');
           debugPrint(
             '[P2PAutoPublish] Invoked bringAppToForeground on accessibility channel',
           );
@@ -44,7 +50,7 @@ class P2PAutoPublishLauncher {
         debugPrint('[P2PAutoPublish] Wakelock enable error: $e');
       }
 
-      final publishData = buildPublishData(data);
+      final publishData = buildPublishData(data, identity: identity);
 
       // 3. Save listing to database asynchronously
       unawaited(
@@ -63,7 +69,10 @@ class P2PAutoPublishLauncher {
   }
 
   /// Builds a [VehiclePublishData] instance from the validation service state map.
-  static VehiclePublishData buildPublishData(Map<String, String> data) {
+  static VehiclePublishData buildPublishData(
+    Map<String, String> data, {
+    PublicationIdentity? identity,
+  }) {
     final color = _firstNonEmpty([data['color']], fallback: 'כחול');
     final images = _imagePathsFromVehicleData(data);
     final expectedCount = int.tryParse(
@@ -73,46 +82,46 @@ class P2PAutoPublishLauncher {
     if (expectedCount != null && expectedCount == 0) {
       resolvedImages = const <String>[];
     } else if (images.isNotEmpty) {
-      resolvedImages = (expectedCount != null &&
-              expectedCount > 0 &&
-              images.length > expectedCount)
-          ? images.sublist(images.length - expectedCount)
-          : images;
+      resolvedImages =
+          (expectedCount != null &&
+                  expectedCount > 0 &&
+                  images.length > expectedCount)
+              ? images.sublist(images.length - expectedCount)
+              : images;
     } else {
       resolvedImages = images;
     }
 
     return VehiclePublishData(
+      publicationIdentity: identity,
+      city: data['city'] ?? '',
       licenseNumber: _firstNonEmpty([data['license_plate'], data['license']]),
       color: color,
       shade: color,
       hand: _handToHebrew(data['hand']),
-      currentOwnership: _firstNonEmpty(
-        [data['current_ownership']],
-        fallback: 'פרטית',
-      ),
-      previousOwnership: _firstNonEmpty(
-        [data['previous_ownership']],
-        fallback: 'פרטית',
-      ),
+      currentOwnership: _firstNonEmpty([
+        data['current_ownership'],
+      ], fallback: 'פרטית'),
+      previousOwnership: _firstNonEmpty([
+        data['previous_ownership'],
+      ], fallback: 'פרטית'),
       kilometers: _firstNonEmpty([data['km'], data['kilometers']]),
-      month: _firstNonEmpty(
-        [data['month'], data['test_month']],
-        fallback: DateTime.now().month.toString(),
-      ),
+      month: _firstNonEmpty([
+        data['month'],
+        data['test_month'],
+      ], fallback: DateTime.now().month.toString()),
       price: _firstNonEmpty([data['price']]),
-      handicapped: false,
-      noTest: false,
+      handicapped: data['handicapped'] == 'כן',
+      noTest: data['no_test'] == 'כן',
       images: resolvedImages,
       maker: _firstNonEmpty([data['maker']]),
       model: _firstNonEmpty([data['model']]),
       year: _firstNonEmpty([data['year']]),
       fuelType: _firstNonEmpty([data['fuel_type']]),
       gear: _gearForForm(data['gear_type']),
-      vehicleCondition: _firstNonEmpty(
-        [data['vehicle_condition']],
-        fallback: 'טוב',
-      ),
+      vehicleCondition: _firstNonEmpty([
+        data['vehicle_condition'],
+      ], fallback: 'טוב'),
       description: _firstNonEmpty([data['description']]),
       expectedImageCount: expectedCount,
     );
@@ -122,14 +131,17 @@ class P2PAutoPublishLauncher {
     VehiclePublishData publishData, {
     int attempt = 0,
   }) async {
+    if (!FirebaseChatReceiver.isCurrent(publishData.publicationIdentity))
+      return false;
     final navigator = rootNavigatorKey.currentState;
     if (navigator != null && navigator.mounted) {
       navigator.push(
         MaterialPageRoute(
-          builder: (_) => Yad2Screen(
-            publishData: publishData,
-            useGemmaAutomation: true,
-          ),
+          builder:
+              (_) => Yad2Screen(
+                publishData: publishData,
+                useGemmaAutomation: true,
+              ),
         ),
       );
       debugPrint(
@@ -156,17 +168,19 @@ class P2PAutoPublishLauncher {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is List) {
-        list = decoded
-            .map((v) => v?.toString().trim() ?? '')
-            .where((v) => v.isNotEmpty)
-            .toList();
+        list =
+            decoded
+                .map((v) => v?.toString().trim() ?? '')
+                .where((v) => v.isNotEmpty)
+                .toList();
       }
     } catch (_) {
-      list = raw
-          .split('|')
-          .map((v) => v.trim())
-          .where((v) => v.isNotEmpty)
-          .toList();
+      list =
+          raw
+              .split('|')
+              .map((v) => v.trim())
+              .where((v) => v.isNotEmpty)
+              .toList();
     }
     return list;
   }

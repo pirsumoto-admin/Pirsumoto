@@ -10,5 +10,9 @@
     "@google-cloud/pubsub": "^4.9.0",
     "firebase-admin": "^12.1.0",
     "firebase-functions": "^6.1.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "generate:schema": "node generate-schema.js"
   }
 }

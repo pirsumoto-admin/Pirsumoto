@@ -2503,7 +2503,7 @@ class WhatsAppTextValidationService {
     ).trim();
     if (envOpenAi.isNotEmpty) return envOpenAi;
 
-    return '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';
+    return '';
   }
 
   Future<bool> _hasAiApiKey() async =>

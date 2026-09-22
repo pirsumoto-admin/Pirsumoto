@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -37,10 +38,13 @@ class RemoteControlReceiverService {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      _deviceId = explicitDeviceId ??
+      _deviceId =
+          explicitDeviceId ??
           prefs.getString(_prefDeviceIdKey) ??
-          defaultDeviceId;
+          'android_${List.generate(16, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
 
+      if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(_deviceId))
+        throw ArgumentError('Invalid device ID');
       await prefs.setString(_prefDeviceIdKey, _deviceId);
 
       // Start autonomous Firebase chat listener (works 24/7 without WebRTC)
@@ -51,28 +55,41 @@ class RemoteControlReceiverService {
       final signaling = RemoteSignalingService(deviceId: _deviceId);
       _manager = RemoteSessionManager(signaling: signaling);
 
-      _manager!.onAutomationPauseRequested = () {
-        debugPrint('[RemoteControlReceiver] Pausing automation for remote human control');
+      _manager!.onAutomationPauseRequested = () async {
+        debugPrint(
+          '[RemoteControlReceiver] Pausing automation for remote human control',
+        );
+        await FirebaseChatReceiver.pauseForTakeover();
         onPauseAutomation?.call();
       };
 
       _manager!.onAutomationResumeRequested = () {
-        debugPrint('[RemoteControlReceiver] Resuming automation after remote human control');
+        debugPrint(
+          '[RemoteControlReceiver] Resuming automation after remote human control',
+        );
+        FirebaseChatReceiver.resumeAfterTakeover();
         onResumeAutomation?.call();
       };
 
       await _manager!.startListening();
       _isInitialized = true;
-      debugPrint('[RemoteControlReceiver] Initialized receiver and Firebase chat listener for device: $_deviceId');
+      debugPrint(
+        '[RemoteControlReceiver] Initialized receiver and Firebase chat listener for device: $_deviceId',
+      );
 
       // Start persistent Android Foreground Daemon so the process stays alive 24/7
       if (Platform.isAndroid) {
         try {
-          const MethodChannel('com.pirsumoto/accessibility')
-              .invokeMethod('startDaemonService');
-          debugPrint('[RemoteControlReceiver] Started persistent Android foreground daemon');
+          const MethodChannel(
+            'com.pirsumoto/accessibility',
+          ).invokeMethod('startDaemonService');
+          debugPrint(
+            '[RemoteControlReceiver] Started persistent Android foreground daemon',
+          );
         } catch (e) {
-          debugPrint('[RemoteControlReceiver] Error starting daemon service: $e');
+          debugPrint(
+            '[RemoteControlReceiver] Error starting daemon service: $e',
+          );
         }
       }
     } catch (e) {
@@ -82,7 +99,13 @@ class RemoteControlReceiverService {
 
   /// Update the MDM Device ID
   Future<void> updateDeviceId(String newDeviceId) async {
-    if (newDeviceId.isEmpty || newDeviceId == _deviceId) return;
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(newDeviceId))
+      throw ArgumentError('Invalid device ID');
+    if (newDeviceId == _deviceId) return;
+    if (FirebaseChatReceiver.isPublishingActive)
+      throw StateError(
+        'Cancel the active publication before changing device ID',
+      );
     _deviceId = newDeviceId;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_prefDeviceIdKey, _deviceId);

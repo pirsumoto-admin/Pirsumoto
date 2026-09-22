@@ -1,3 +1,4 @@
+import 'worker_backend.dart';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
@@ -16,7 +17,8 @@ class AgentConfigService {
   static const String _prefKeySystemPrompt = 'agent_config_system_prompt';
   static const String _prefKeyColorPrompt = 'agent_config_color_prompt';
   static const String _prefKeyRulesJson = 'agent_config_rules_json';
-  static const String _prefKeyGeneralRulesJson = 'agent_config_general_rules_json';
+  static const String _prefKeyGeneralRulesJson =
+      'agent_config_general_rules_json';
   static const String _prefKeyRulesMd = 'agent_config_rules_md';
   static const String _prefKeyVersion = 'agent_config_version';
   static const String _prefKeyApiKey = 'agent_config_api_key';
@@ -755,9 +757,11 @@ license
       if (lastUpdatedMs != null && lastUpdatedMs > 0) {
         _lastUpdated = DateTime.fromMillisecondsSinceEpoch(lastUpdatedMs);
       }
-      _systemPrompt = prefs.getString(_prefKeySystemPrompt) ?? defaultSystemPrompt;
+      _systemPrompt =
+          prefs.getString(_prefKeySystemPrompt) ?? defaultSystemPrompt;
       _colorMatchingPrompt =
-          prefs.getString(_prefKeyColorPrompt) ?? defaultColorMatchingPromptTemplate;
+          prefs.getString(_prefKeyColorPrompt) ??
+          defaultColorMatchingPromptTemplate;
       _version = prefs.getString(_prefKeyVersion) ?? '1.0.0';
 
       final rulesJson = prefs.getString(_prefKeyRulesJson);
@@ -779,7 +783,8 @@ license
       }
 
       _rulesMd = prefs.getString(_prefKeyRulesMd);
-      _apiKey = prefs.getString(_prefKeyApiKey);
+      await prefs.remove(_prefKeyApiKey);
+      _apiKey = null;
     } catch (e) {
       debugPrint('[AgentConfigService] Error reading local cached config: $e');
     } finally {
@@ -805,18 +810,11 @@ license
     _lastCheckTime = now;
 
     try {
-      debugPrint('[AgentConfigService] Checking Firestore for updated prompt & rules ($collectionName/$documentId)...');
-      final docRef = FirebaseFirestore.instance.collection(collectionName).doc(documentId);
-      final snapshot = await docRef.get(const GetOptions(source: Source.serverAndCache)).timeout(
-        const Duration(seconds: 6),
+      debugPrint(
+        '[AgentConfigService] Checking Firestore for updated prompt & rules ($collectionName/$documentId)...',
       );
-
-      if (!snapshot.exists || snapshot.data() == null) {
-        debugPrint('[AgentConfigService] Config document $collectionName/$documentId not found in Firestore. Using defaults.');
-        return false;
-      }
-
-      final data = snapshot.data()!;
+      final response = await WorkerBackend.post({'action': 'agent_config'});
+      final data = Map<String, dynamic>.from(response['config'] as Map);
       DateTime? remoteLastUpdated;
 
       final lastUpdatedRaw = data['lastUpdated'];
@@ -828,7 +826,9 @@ license
         remoteLastUpdated = DateTime.fromMillisecondsSinceEpoch(lastUpdatedRaw);
       }
 
-      debugPrint('[AgentConfigService] Updating config from Firestore (remote timestamp: $remoteLastUpdated)...');
+      debugPrint(
+        '[AgentConfigService] Updating config from Firestore (remote timestamp: $remoteLastUpdated)...',
+      );
 
       final remotePrompt = data['systemPrompt']?.toString();
       if (remotePrompt != null && remotePrompt.trim().isNotEmpty) {
@@ -845,11 +845,6 @@ license
         _version = remoteVersion;
       }
 
-      final remoteApiKey = data['openAiApiKey']?.toString() ?? data['apiKey']?.toString();
-      if (remoteApiKey != null && remoteApiKey.trim().isNotEmpty) {
-        _apiKey = remoteApiKey.trim();
-      }
-
       final remoteRules = data['rules'];
       if (remoteRules is Map) {
         _rules = Map<String, dynamic>.from(remoteRules);
@@ -859,13 +854,15 @@ license
         _generalRulesRaw = remoteRules;
       }
 
-      final remoteGeneralRules = data['generalRules'] ??
+      final remoteGeneralRules =
+          data['generalRules'] ??
           (remoteRules is Map ? remoteRules['generalRules'] : null);
       if (remoteGeneralRules != null) {
         _generalRulesRaw = remoteGeneralRules;
       }
 
-      final remoteRulesMd = data['rules_md']?.toString() ??
+      final remoteRulesMd =
+          data['rules_md']?.toString() ??
           data['rulesMd']?.toString() ??
           (remoteRules is Map ? remoteRules['rules_md']?.toString() : null);
       if (remoteRulesMd != null) {
@@ -877,7 +874,10 @@ license
       // Persist to SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       if (_lastUpdated != null) {
-        await prefs.setInt(_prefKeyLastUpdated, _lastUpdated!.millisecondsSinceEpoch);
+        await prefs.setInt(
+          _prefKeyLastUpdated,
+          _lastUpdated!.millisecondsSinceEpoch,
+        );
       }
       if (_systemPrompt != null) {
         await prefs.setString(_prefKeySystemPrompt, _systemPrompt!);
@@ -888,23 +888,28 @@ license
       if (_version != null) {
         await prefs.setString(_prefKeyVersion, _version!);
       }
-      if (_apiKey != null) {
-        await prefs.setString(_prefKeyApiKey, _apiKey!);
-      }
+
       if (_rules != null) {
         await prefs.setString(_prefKeyRulesJson, jsonEncode(_rules));
       }
       if (_generalRulesRaw != null) {
-        await prefs.setString(_prefKeyGeneralRulesJson, jsonEncode(_generalRulesRaw));
+        await prefs.setString(
+          _prefKeyGeneralRulesJson,
+          jsonEncode(_generalRulesRaw),
+        );
       }
       if (_rulesMd != null) {
         await prefs.setString(_prefKeyRulesMd, _rulesMd!);
       }
 
-      debugPrint('[AgentConfigService] Successfully updated system prompt and rules cache.');
+      debugPrint(
+        '[AgentConfigService] Successfully updated system prompt and rules cache.',
+      );
       return true;
     } catch (e) {
-      debugPrint('[AgentConfigService] Error fetching agent config from Firestore (falling back to cache): $e');
+      debugPrint(
+        '[AgentConfigService] Error fetching agent config from Firestore (falling back to cache): $e',
+      );
       return false;
     }
   }
@@ -917,7 +922,10 @@ license
   List<String> get generalRules {
     final raw = _generalRulesRaw ?? _rules?['generalRules'];
     if (raw is List) {
-      return raw.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return raw
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     if (raw is String && raw.trim().isNotEmpty) {
       return raw
@@ -934,9 +942,10 @@ license
 
   /// System prompt to pass to the LLM agent turn, automatically including any `rules_md` and `generalRules`.
   String get systemPrompt {
-    final base = (_systemPrompt != null && _systemPrompt!.trim().isNotEmpty)
-        ? _systemPrompt!
-        : defaultSystemPrompt;
+    final base =
+        (_systemPrompt != null && _systemPrompt!.trim().isNotEmpty)
+            ? _systemPrompt!
+            : defaultSystemPrompt;
 
     final md = rulesMd;
     final legacyRules = generalRules;
@@ -968,7 +977,8 @@ license
 
   /// Raw template for color matching
   String get colorMatchingPromptTemplate {
-    return (_colorMatchingPrompt != null && _colorMatchingPrompt!.trim().isNotEmpty)
+    return (_colorMatchingPrompt != null &&
+            _colorMatchingPrompt!.trim().isNotEmpty)
         ? _colorMatchingPrompt!
         : defaultColorMatchingPromptTemplate;
   }
@@ -985,7 +995,10 @@ license
   List<String> get allowedColors {
     final list = _rules?['allowedColors'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedColors;
   }
@@ -994,7 +1007,10 @@ license
   List<String> get allowedOwnerships {
     final list = _rules?['allowedOwnerships'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedOwnerships;
   }
@@ -1003,7 +1019,10 @@ license
   List<String> get allowedConditions {
     final list = _rules?['allowedConditions'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedConditions;
   }
@@ -1012,7 +1031,10 @@ license
   List<String> get allowedFuelTypes {
     final list = _rules?['allowedFuelTypes'];
     if (list is List && list.isNotEmpty) {
-      return list.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return list
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return defaultAllowedFuelTypes;
   }
@@ -1047,7 +1069,9 @@ license
   /// Helper to upload the default configuration to Firestore if missing.
   Future<bool> seedDefaultConfigToFirestore() async {
     try {
-      final docRef = FirebaseFirestore.instance.collection(collectionName).doc(documentId);
+      final docRef = FirebaseFirestore.instance
+          .collection(collectionName)
+          .doc(documentId);
       final data = {
         'lastUpdated': FieldValue.serverTimestamp(),
         'version': '1.0.0',

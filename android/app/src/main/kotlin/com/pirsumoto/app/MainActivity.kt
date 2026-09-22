@@ -311,6 +311,19 @@ class MainActivity : FlutterActivity() {
             }
 
             val rootNode = service.rootInActiveWindow
+            if (call.argument<Boolean>("requireAppWindow") == true) {
+                val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+                val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+                if (!isAppInForeground || !power.isInteractive || keyguard.isKeyguardLocked ||
+                    rootNode?.packageName?.toString() != packageName) {
+                    result.error("AUTOMATION_INTERRUPTED", "Publication window is not active or the phone is locked", null)
+                    return@setMethodCallHandler
+                }
+                if (call.method == "checkAutomationWindow") {
+                    result.success(true)
+                    return@setMethodCallHandler
+                }
+            }
             if (rootNode == null && call.method != "injectTextNative" && call.method != "pressBack" && call.method != "pressHome" && call.method != "pressRecents" && call.method != "tapScreen" && call.method != "pasteText" && !call.method.startsWith("remote")) {
                 result.error("UNAVAILABLE", "Cannot get root window node", null)
                 return@setMethodCallHandler
@@ -439,14 +452,27 @@ class MainActivity : FlutterActivity() {
                     val startY = height * 0.8f
                     val endY = startY - (height * percent).toFloat()
                     
-                    val scrolled = service.swipe(startX, startY, startX, endY, 400L)
-                    result.success(scrolled)
+                    if (call.argument<Boolean>("requireAppWindow") == true) {
+                        service.performAutomationGesture(startX, startY, startX, endY, 400L) { completed ->
+                            if (completed) result.success(true)
+                            else result.error("AUTOMATION_INTERRUPTED", "Scroll gesture was canceled or rejected", null)
+                        }
+                    } else {
+                        result.success(service.swipe(startX, startY, startX, endY, 400L))
+                    }
                 }
                 "tapScreen" -> {
                     val x = call.argument<Double>("x") ?: 500.0
                     val y = call.argument<Double>("y") ?: 500.0
-                    service.tapBounds(android.graphics.Rect(x.toInt(), y.toInt(), x.toInt(), y.toInt()))
-                    result.success(true)
+                    if (call.argument<Boolean>("requireAppWindow") == true) {
+                        service.performAutomationGesture(x.toFloat(), y.toFloat(), x.toFloat()+1f, y.toFloat()+1f, 50L) { completed ->
+                            if (completed) result.success(true)
+                            else result.error("AUTOMATION_INTERRUPTED", "Tap gesture was canceled or rejected", null)
+                        }
+                    } else {
+                        service.tapBounds(android.graphics.Rect(x.toInt(), y.toInt(), x.toInt(), y.toInt()))
+                        result.success(true)
+                    }
                 }
                 "remoteTap" -> {
                     val x = (call.argument<Double>("x") ?: 0.0).toFloat()

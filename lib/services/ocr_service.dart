@@ -1,12 +1,14 @@
+import 'worker_backend.dart';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 
 class TextLocation {
   final String text;
   final double minX, minY, maxX, maxY;
   final double centerX, centerY;
   final int confidence;
+
   /// True when this location came from the Shadow AxTree (CSS element center),
   /// false when it came from OCR (physical-px text-label position).
   /// Phase actions use this to skip OCR-specific y-offsets.
@@ -20,8 +22,8 @@ class TextLocation {
     required this.maxY,
     required this.confidence,
     this.fromAxTree = false,
-  })  : centerX = (minX + maxX) / 2,
-        centerY = (minY + maxY) / 2;
+  }) : centerX = (minX + maxX) / 2,
+       centerY = (minY + maxY) / 2;
 
   @override
   String toString() =>
@@ -29,10 +31,6 @@ class TextLocation {
 }
 
 class OcrService {
-  static const _apiKey = 'AIzaSyCtTgvlKOOrVTTWAQOD_-PWL26tCYg5nr8';
-  static const _url =
-      'https://vision.googleapis.com/v1/images:annotate?key=$_apiKey';
-
   /// Finds text in [imageBytes] matching [searchText] (supports | for multi-option).
   /// [targetInstance] is 1-based (1 = first match).
   Future<TextLocation?> findTextLocation(
@@ -40,8 +38,7 @@ class OcrService {
     String searchText, {
     int targetInstance = 1,
   }) async {
-    final base64Image = base64Encode(imageBytes);
-    final response = await _callVisionApi(base64Image);
+    final response = await _analyzeImage(imageBytes);
     if (response == null) return null;
     return _parseVisionResponse(response, searchText, targetInstance);
   }
@@ -54,12 +51,14 @@ class OcrService {
   }) async {
     final words = phrase.trim().split(RegExp(r'\s+'));
     if (words.length < 2) {
-      return findTextLocation(imageBytes, phrase,
-          targetInstance: targetInstance);
+      return findTextLocation(
+        imageBytes,
+        phrase,
+        targetInstance: targetInstance,
+      );
     }
 
-    final base64Image = base64Encode(imageBytes);
-    final response = await _callVisionApi(base64Image);
+    final response = await _analyzeImage(imageBytes);
     if (response == null) return null;
     return _parseMultiWordResponse(response, words, targetInstance);
   }
@@ -70,11 +69,12 @@ class OcrService {
       '[OcrService] 📸 extractFullText called with ${imageBytes.length} bytes of image data',
     );
     if (imageBytes.isEmpty) {
-      debugPrint('[OcrService] ⚠️ Image bytes are empty (0 bytes). Returning null.');
+      debugPrint(
+        '[OcrService] ⚠️ Image bytes are empty (0 bytes). Returning null.',
+      );
       return null;
     }
-    final base64Image = base64Encode(imageBytes);
-    final response = await _callVisionApi(base64Image);
+    final response = await _analyzeImage(imageBytes);
     if (response == null) {
       debugPrint('[OcrService] ⚠️ Vision API returned null decoded map.');
       return null;
@@ -97,44 +97,32 @@ class OcrService {
 
   // ── API call ────────────────────────────────────────────────────────────────
 
+  final Map<String, Future<Map<String, dynamic>?>> _ocrCache = {};
+  Future<Map<String, dynamic>?> _analyzeImage(Uint8List bytes) {
+    final key = sha256.convert(bytes).toString();
+    final cached = _ocrCache[key];
+    if (cached != null) return cached;
+    if (_ocrCache.length >= 4) _ocrCache.remove(_ocrCache.keys.first);
+    final response = _callVisionApi(base64Encode(bytes));
+    _ocrCache[key] = response;
+    response.then((result) {
+      if (result == null && identical(_ocrCache[key], response))
+        _ocrCache.remove(key);
+    });
+    return response;
+  }
+
   Future<Map<String, dynamic>?> _callVisionApi(String base64Image) async {
     try {
-      debugPrint(
-        '[OcrService] 🚀 Posting to Vision API (Base64 length: ${base64Image.length} chars)...',
+      return Map<String, dynamic>.from(
+        (await WorkerBackend.post({
+              'action': 'worker_ocr',
+              'imageBase64': base64Image,
+            }))['result']
+            as Map,
       );
-      final body = jsonEncode({
-        'requests': [
-          {
-            'image': {'content': base64Image},
-            'features': [
-              {'type': 'DOCUMENT_TEXT_DETECTION', 'model': 'builtin/latest'}
-            ],
-          }
-        ]
-      });
-
-      final res = await http.post(
-        Uri.parse(_url),
-        headers: {'Content-Type': 'application/json'},
-        body: body,
-      );
-
-      debugPrint('[OcrService] 📥 HTTP Status: ${res.statusCode}');
-      debugPrint(
-        '[OcrService] 📥 Raw Response Body:\n${res.body.length > 2000 ? "${res.body.substring(0, 2000)}... (truncated)" : res.body}',
-      );
-
-      if (res.statusCode != 200) {
-        debugPrint(
-          '[OcrService] ❌ Vision API error ${res.statusCode}: ${res.body}',
-        );
-        return null;
-      }
-
-      final decoded = jsonDecode(res.body) as Map<String, dynamic>;
-      return decoded;
-    } catch (e, st) {
-      debugPrint('[OcrService] ❌ Vision API call failed: $e\n$st');
+    } catch (e) {
+      debugPrint('[OCR] Backend unavailable: $e');
       return null;
     }
   }
@@ -150,12 +138,12 @@ class OcrService {
       final annotations = _getAnnotations(json);
       if (annotations == null) return null;
 
-      final searchOptions = searchText.contains('|')
-          ? searchText.split('|')
-          : [searchText];
-      final normalizedOptions = searchOptions
-          .map((o) => o.trim().replaceAll(RegExp(r'\s+'), '').toLowerCase())
-          .toList();
+      final searchOptions =
+          searchText.contains('|') ? searchText.split('|') : [searchText];
+      final normalizedOptions =
+          searchOptions
+              .map((o) => o.trim().replaceAll(RegExp(r'\s+'), '').toLowerCase())
+              .toList();
 
       int currentInstance = 0;
       for (int i = 1; i < annotations.length; i++) {
@@ -163,24 +151,29 @@ class OcrService {
         final text = (annotation['description'] as String?) ?? '';
         final normalized = text.replaceAll(RegExp(r'\s+'), '').toLowerCase();
 
-        final matched = normalizedOptions
-            .any((opt) => normalized == opt || normalized.contains(opt));
+        final matched = normalizedOptions.any(
+          (opt) => normalized == opt || normalized.contains(opt),
+        );
 
         if (matched) {
           currentInstance++;
           if (currentInstance == targetInstance) {
             final loc = _extractLocation(annotation, text);
             if (loc != null) {
-              debugPrint('[OcrService] MATCH[$i]: "$text" (instance #$currentInstance) '
-                  'center(${loc.centerX.toStringAsFixed(0)}, ${loc.centerY.toStringAsFixed(0)})');
+              debugPrint(
+                '[OcrService] MATCH[$i]: "$text" (instance #$currentInstance) '
+                'center(${loc.centerX.toStringAsFixed(0)}, ${loc.centerY.toStringAsFixed(0)})',
+              );
             }
             return loc;
           }
         }
       }
 
-      debugPrint('[OcrService] "$searchText" instance #$targetInstance not found '
-          '(found $currentInstance total)');
+      debugPrint(
+        '[OcrService] "$searchText" instance #$targetInstance not found '
+        '(found $currentInstance total)',
+      );
       return null;
     } catch (e, st) {
       debugPrint('[OcrService] parseVisionResponse error: $e\n$st');
@@ -202,9 +195,10 @@ class OcrService {
       const yProximityThreshold = 20.0;
       const maxIndexGap = 3;
 
-      final normalizedWords = words
-          .map((w) => w.trim().replaceAll(RegExp(r'\s+'), '').toLowerCase())
-          .toList();
+      final normalizedWords =
+          words
+              .map((w) => w.trim().replaceAll(RegExp(r'\s+'), '').toLowerCase())
+              .toList();
 
       int currentInstance = 0;
 
@@ -226,16 +220,19 @@ class OcrService {
 
         for (int wordIdx = 1; wordIdx < words.length; wordIdx++) {
           bool foundWord = false;
-          final searchEnd =
-              (lastMatchIndex + maxIndexGap + 1).clamp(0, annotations.length);
+          final searchEnd = (lastMatchIndex + maxIndexGap + 1).clamp(
+            0,
+            annotations.length,
+          );
 
           for (int j = lastMatchIndex + 1; j < searchEnd; j++) {
-            final candidateAnnotation =
-                annotations[j] as Map<String, dynamic>;
+            final candidateAnnotation = annotations[j] as Map<String, dynamic>;
             final candidateText =
                 (candidateAnnotation['description'] as String?) ?? '';
-            final candidateLoc =
-                _extractLocation(candidateAnnotation, candidateText);
+            final candidateLoc = _extractLocation(
+              candidateAnnotation,
+              candidateText,
+            );
             if (candidateLoc == null) continue;
 
             if ((candidateLoc.centerY - firstWordY).abs() >
@@ -280,16 +277,20 @@ class OcrService {
               maxY: maxY,
               confidence: 100,
             );
-            debugPrint('[OcrService] MULTI-WORD MATCH: "${words.join(' ')}" '
-                '(instance #$currentInstance) center(${combined.centerX.toStringAsFixed(0)}, '
-                '${combined.centerY.toStringAsFixed(0)})');
+            debugPrint(
+              '[OcrService] MULTI-WORD MATCH: "${words.join(' ')}" '
+              '(instance #$currentInstance) center(${combined.centerX.toStringAsFixed(0)}, '
+              '${combined.centerY.toStringAsFixed(0)})',
+            );
             return combined;
           }
         }
       }
 
-      debugPrint('[OcrService] Multi-word "${words.join(' ')}" instance #$targetInstance '
-          'not found (found $currentInstance total)');
+      debugPrint(
+        '[OcrService] Multi-word "${words.join(' ')}" instance #$targetInstance '
+        'not found (found $currentInstance total)',
+      );
       return null;
     } catch (e, st) {
       debugPrint('[OcrService] parseMultiWordResponse error: $e\n$st');
@@ -308,8 +309,7 @@ class OcrService {
     return annotations;
   }
 
-  TextLocation? _extractLocation(
-      Map<String, dynamic> annotation, String text) {
+  TextLocation? _extractLocation(Map<String, dynamic> annotation, String text) {
     try {
       final boundingPoly = annotation['boundingPoly'] as Map<String, dynamic>?;
       if (boundingPoly == null) return null;
@@ -332,8 +332,7 @@ class OcrService {
         if (y > maxY) maxY = y;
       }
 
-      final confidence =
-          (annotation['confidence'] as num?)?.toInt() ?? 0;
+      final confidence = (annotation['confidence'] as num?)?.toInt() ?? 0;
 
       return TextLocation(
         text: text,

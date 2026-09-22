@@ -1,4 +1,7 @@
+import 'package:publication_protocol/publication_protocol.dart';
+
 class VehiclePublishData {
+  final PublicationIdentity? publicationIdentity;
   final String licenseNumber;
   final String color;
   final String shade;
@@ -26,6 +29,7 @@ class VehiclePublishData {
   final int? expectedImageCount;
 
   const VehiclePublishData({
+    this.publicationIdentity,
     required this.licenseNumber,
     required this.color,
     required this.shade,
@@ -81,6 +85,7 @@ class VehiclePublishData {
     int? expectedImageCount,
   }) {
     return VehiclePublishData(
+      publicationIdentity: publicationIdentity,
       licenseNumber: licenseNumber ?? this.licenseNumber,
       color: color ?? this.color,
       shade: shade ?? this.shade,
@@ -196,16 +201,8 @@ enum AutomationPhase {
     'תמונות|העלאת תמונות|הוספת תמונות|תמונות הרכב|העלו תמונות|המשך',
     1,
   ),
-  phase18(
-    'Terms Agreement',
-    'קראתי ואישרתי את התקנון',
-    1,
-  ),
-  phase19(
-    'Promotional Screen Dismiss',
-    'X|x|✕|✖|×|סגור|סגירה|close|Close',
-    1,
-  ),
+  phase18('Terms Agreement', 'קראתי ואישרתי את התקנון', 1),
+  phase19('Promotional Screen Dismiss', 'X|x|✕|✖|×|סגור|סגירה|close|Close', 1),
   complete('Automation Complete', null, 1);
 
   final String description;

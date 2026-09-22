@@ -12,7 +12,9 @@ import 'remote_chat_receiver.dart';
 import '../services/whatsapp_text_validation_service.dart';
 
 class RemoteSessionManager extends ChangeNotifier {
-  static const MethodChannel _channel = MethodChannel('com.pirsumoto/accessibility');
+  static const MethodChannel _channel = MethodChannel(
+    'com.pirsumoto/accessibility',
+  );
 
   final RemoteSignalingService signaling;
 
@@ -26,11 +28,20 @@ class RemoteSessionManager extends ChangeNotifier {
   int _screenHeight = 2400;
   double _screenDensity = 2.6;
   String? _modelName;
+  String? _sessionOwnerUid;
+  int _sessionGeneration = 0;
+  Future<void> _commands = Future.value();
+  Future<void> _incomingRequests = Future.value();
+  Future<void>? _termination;
+  bool _authorizedSession(int generation) =>
+      generation == _sessionGeneration &&
+      _sessionOwnerUid != null &&
+      FirebaseAuth.instance.currentUser?.uid == _sessionOwnerUid;
   String? get modelName => _modelName;
   StreamSubscription<User?>? _authSub;
 
   // Callback for automation pause/resume
-  VoidCallback? onAutomationPauseRequested;
+  Future<void> Function()? onAutomationPauseRequested;
   VoidCallback? onAutomationResumeRequested;
 
   RemoteSessionManager({required this.signaling});
@@ -41,23 +52,31 @@ class RemoteSessionManager extends ChangeNotifier {
 
     // Fetch physical screen dimensions and device model from Android
     try {
-      final dims = await _channel.invokeMapMethod<String, dynamic>('getScreenDimensions');
+      final dims = await _channel.invokeMapMethod<String, dynamic>(
+        'getScreenDimensions',
+      );
       if (dims != null) {
         _screenWidth = (dims['width'] as num?)?.toInt() ?? _screenWidth;
         _screenHeight = (dims['height'] as num?)?.toInt() ?? _screenHeight;
-        _screenDensity = (dims['density'] as num?)?.toDouble() ?? _screenDensity;
-        debugPrint('[RemoteSessionManager] Screen size: ${_screenWidth}x$_screenHeight, density: $_screenDensity');
+        _screenDensity =
+            (dims['density'] as num?)?.toDouble() ?? _screenDensity;
+        debugPrint(
+          '[RemoteSessionManager] Screen size: ${_screenWidth}x$_screenHeight, density: $_screenDensity',
+        );
       }
     } catch (e) {
       debugPrint('[RemoteSessionManager] Could not get screen dimensions: $e');
     }
 
     try {
-      final info = await _channel.invokeMapMethod<String, dynamic>('getDeviceInfo');
+      final info = await _channel.invokeMapMethod<String, dynamic>(
+        'getDeviceInfo',
+      );
       if (info != null) {
         final manufacturer = info['manufacturer'] as String? ?? '';
         final model = info['model'] as String? ?? '';
-        if (manufacturer.isNotEmpty && !model.toLowerCase().contains(manufacturer.toLowerCase())) {
+        if (manufacturer.isNotEmpty &&
+            !model.toLowerCase().contains(manufacturer.toLowerCase())) {
           _modelName = '$manufacturer $model'.trim();
         } else {
           _modelName = model.isNotEmpty ? model : 'Android Device';
@@ -72,7 +91,12 @@ class RemoteSessionManager extends ChangeNotifier {
     await _registerDeviceInFirestore(status: 'idle');
     _authSub?.cancel();
     _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
-      debugPrint('[RemoteSessionManager] Auth state changed for user: ${user?.email}');
+      debugPrint(
+        '[RemoteSessionManager] Auth state changed for user: ${user?.email}',
+      );
+      if (_sessionOwnerUid != null && _sessionOwnerUid != user?.uid) {
+        unawaited(terminateSession(error: 'Authentication changed'));
+      }
       _registerDeviceInFirestore();
     });
 
@@ -82,16 +106,22 @@ class RemoteSessionManager extends ChangeNotifier {
         onSessionRequested: _handleIncomingSession,
         onSessionTerminated: _handleSessionTerminatedRemotely,
       );
-      _updateState(_sessionInfo.copyWith(
-        state: RemoteSessionState.idle,
-        inputOwner: InputOwner.automation,
-      ));
-      debugPrint('[RemoteSessionManager] Receiver is IDLE and listening for session requests');
+      _updateState(
+        _sessionInfo.copyWith(
+          state: RemoteSessionState.idle,
+          inputOwner: InputOwner.automation,
+        ),
+      );
+      debugPrint(
+        '[RemoteSessionManager] Receiver is IDLE and listening for session requests',
+      );
     } catch (e) {
-      _updateState(_sessionInfo.copyWith(
-        state: RemoteSessionState.offline,
-        lastError: e.toString(),
-      ));
+      _updateState(
+        _sessionInfo.copyWith(
+          state: RemoteSessionState.offline,
+          lastError: e.toString(),
+        ),
+      );
       debugPrint('[RemoteSessionManager] Error entering IDLE: $e');
     }
   }
@@ -100,24 +130,37 @@ class RemoteSessionManager extends ChangeNotifier {
   Future<void> _registerDeviceInFirestore({String? status}) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
       final docRef = FirebaseFirestore.instance
           .collection('remote_control_devices')
           .doc(signaling.deviceId);
 
       final data = <String, dynamic>{
         'deviceId': signaling.deviceId,
-        'ownerUid': user?.uid,
-        'ownerEmail': user?.email,
+        'ownerUid': user.uid,
+        'ownerEmail': user.email,
         'modelName': _modelName ?? 'Android Device',
         'updatedAt': FieldValue.serverTimestamp(),
       };
       if (status != null) {
         data['status'] = status;
       }
-      await docRef.set(data, SetOptions(merge: true));
-      debugPrint('[RemoteSessionManager] Registered device in Firestore: $data');
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final existing = (await tx.get(docRef)).data();
+        if (existing?['ownerUid'] != null &&
+            existing?['ownerUid'] != user.uid) {
+          throw StateError('Device ID belongs to another account');
+        }
+        if (FirebaseAuth.instance.currentUser?.uid != user.uid) return;
+        tx.set(docRef, data, SetOptions(merge: true));
+      });
+      debugPrint(
+        '[RemoteSessionManager] Registered device in Firestore: $data',
+      );
     } catch (e) {
-      debugPrint('[RemoteSessionManager] Error registering device in Firestore: $e');
+      debugPrint(
+        '[RemoteSessionManager] Error registering device in Firestore: $e',
+      );
     }
   }
 
@@ -128,44 +171,97 @@ class RemoteSessionManager extends ChangeNotifier {
     String? controllerUid,
     RTCSessionDescription offer, [
     String sessionType = 'remote_control',
-  ]) async {
-    _sessionType = sessionType;
-    if (_sessionInfo.state == RemoteSessionState.active ||
-        _sessionInfo.state == RemoteSessionState.connectingWebRTC) {
-      if (_sessionInfo.activeSessionId == sessionId) {
-        debugPrint('[RemoteSessionManager] Ignoring session request: already active/connecting with this sessionId');
-        return;
-      }
-      debugPrint('[RemoteSessionManager] New session requested ($sessionId) while previous session was active (${_sessionInfo.activeSessionId}). Cleaning up old session...');
-      await terminateSession();
-    }
+  ]) {
+    final task = _incomingRequests.then(
+      (_) => _startIncomingSession(
+        sessionId,
+        controllerId,
+        controllerUid,
+        offer,
+        sessionType,
+      ),
+    );
+    _incomingRequests = task.catchError((Object e) {
+      debugPrint('[RemoteSessionManager] Session setup: $e');
+    });
+    return _incomingRequests;
+  }
 
+  Future<void> _startIncomingSession(
+    String sessionId,
+    String controllerId,
+    String? controllerUid,
+    RTCSessionDescription offer,
+    String sessionType,
+  ) async {
+    // Legacy chat-only offers must not trigger foregrounding, capture, or takeover.
+    if (sessionType != 'remote_control') return;
+    await _termination;
     final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null || controllerUid == null || controllerUid != currentUser.uid) {
-      debugPrint('[RemoteSessionManager] REJECTED: Session request from controllerUid=$controllerUid does not match receiver owner UID=${currentUser?.uid}');
-      await signaling.closeSession();
+    if (currentUser == null ||
+        controllerUid == null ||
+        controllerUid != currentUser.uid) {
+      debugPrint(
+        '[RemoteSessionManager] REJECTED: Session request from controllerUid=$controllerUid does not match receiver owner UID=${currentUser?.uid}',
+      );
       return;
     }
 
-    debugPrint('[RemoteSessionManager] AUTO-APPROVED: Controller $controllerId authenticated under same account (${currentUser.email}), sessionType=$sessionType');
-    _updateState(_sessionInfo.copyWith(
-      state: RemoteSessionState.connectingWebRTC,
-      activeSessionId: sessionId,
-      controllerId: controllerId,
-      inputOwner: InputOwner.automation,
-    ));
+    if (_sessionInfo.state == RemoteSessionState.active ||
+        _sessionInfo.state == RemoteSessionState.connectingWebRTC) {
+      if (_sessionInfo.activeSessionId == sessionId) {
+        debugPrint(
+          '[RemoteSessionManager] Ignoring session request: already active/connecting with this sessionId',
+        );
+        return;
+      }
+      debugPrint(
+        '[RemoteSessionManager] New session requested ($sessionId) while previous session was active (${_sessionInfo.activeSessionId}). Cleaning up old session...',
+      );
+      await terminateSession();
+    }
+
+    final registered = await FirebaseFirestore.instance
+        .collection('remote_control_devices')
+        .doc(signaling.deviceId)
+        .get(const GetOptions(source: Source.server));
+    if (FirebaseAuth.instance.currentUser?.uid != controllerUid ||
+        registered.data()?['ownerUid'] != controllerUid)
+      return;
+    _sessionType = sessionType;
+    _sessionOwnerUid = controllerUid;
+    final generation = ++_sessionGeneration;
+    debugPrint(
+      '[RemoteSessionManager] AUTO-APPROVED: Controller $controllerId authenticated under same account (${currentUser.email}), sessionType=$sessionType',
+    );
+    _updateState(
+      _sessionInfo.copyWith(
+        state: RemoteSessionState.connectingWebRTC,
+        activeSessionId: sessionId,
+        controllerId: controllerId,
+        inputOwner: InputOwner.automation,
+      ),
+    );
     signaling.setActiveSessionId(sessionId);
 
     try {
+      await onAutomationPauseRequested?.call();
+      if (!_authorizedSession(generation)) return;
       // Ensure app is in the foreground so Android allows MediaProjection capture token initialization
       try {
-        final bool? inForeground = await _channel.invokeMethod<bool>('isAppInForeground');
+        final bool? inForeground = await _channel.invokeMethod<bool>(
+          'isAppInForeground',
+        );
         if (inForeground != true) {
-          debugPrint('[RemoteSessionManager] App is in background. Bringing to foreground for screen capture...');
+          debugPrint(
+            '[RemoteSessionManager] App is in background. Bringing to foreground for screen capture...',
+          );
           await _channel.invokeMethod('bringAppToForeground');
           for (int i = 0; i < 20; i++) {
             await Future.delayed(const Duration(milliseconds: 100));
-            final bool? nowInForeground = await _channel.invokeMethod<bool>('isAppInForeground');
+            final bool? nowInForeground = await _channel.invokeMethod<bool>(
+              'isAppInForeground',
+            );
             if (nowInForeground == true) {
               debugPrint('[RemoteSessionManager] App is now in foreground');
               break;
@@ -173,27 +269,49 @@ class RemoteSessionManager extends ChangeNotifier {
           }
         }
       } catch (e) {
-        debugPrint('[RemoteSessionManager] Error checking/bringing app to foreground: $e');
+        debugPrint(
+          '[RemoteSessionManager] Error checking/bringing app to foreground: $e',
+        );
       }
 
+      if (!_authorizedSession(generation)) return;
       // Request Screen Capture Permission (immediately granted via PROJECT_MEDIA AppOp)
-      debugPrint('[RemoteSessionManager] Requesting screen capture permission...');
-      final granted = await Helper.requestCapturePermission(fullScreenOnly: true);
+      debugPrint(
+        '[RemoteSessionManager] Requesting screen capture permission...',
+      );
+      final granted = await Helper.requestCapturePermission(
+        fullScreenOnly: true,
+      );
       if (!granted) {
         throw Exception('User cancelled or denied screen capture permission');
       }
+      if (!_authorizedSession(generation)) return;
       debugPrint('[RemoteSessionManager] Screen capture permission granted');
 
       // Start Android MediaProjection foreground service
       await _channel.invokeMethod('startRemoteCaptureService');
+      if (!_authorizedSession(generation)) {
+        await _channel.invokeMethod('stopRemoteCaptureService');
+        return;
+      }
 
       // Initialize WebRTC receiver
-      _webrtc = RemoteWebRtcReceiver(
-        onLocalCandidate: (candidate) => signaling.sendIceCandidate(candidate, explicitSessionId: sessionId),
-        onCommandReceived: _handleIncomingCommand,
-        onConnectionStateChange: _handleWebRtcStateChange,
+      final receiver = RemoteWebRtcReceiver(
+        onLocalCandidate:
+            (candidate) => signaling.sendIceCandidate(
+              candidate,
+              explicitSessionId: sessionId,
+            ),
+        onCommandReceived: (command) {
+          if (_authorizedSession(generation))
+            unawaited(_handleIncomingCommand(command));
+        },
+        onConnectionStateChange: (state) {
+          if (_authorizedSession(generation)) _handleWebRtcStateChange(state);
+        },
       );
 
+      _webrtc = receiver;
       _chatReceiver?.dispose();
       _chatReceiver = RemoteChatReceiver(
         webrtc: _webrtc!,
@@ -206,41 +324,71 @@ class RemoteSessionManager extends ChangeNotifier {
         onCandidate: (candidate) => _webrtc?.addCandidate(candidate),
       );
 
-      await _webrtc!.initializePeerConnection(
+      await receiver.initializePeerConnection(
         width: _screenWidth,
         height: _screenHeight,
         enableScreenCapture: true,
       );
 
+      if (!_authorizedSession(generation)) {
+        await receiver.close();
+        return;
+      }
       // Create SDP answer and send via Firestore
-      final answer = await _webrtc!.handleOffer(offer);
+      final answer = await receiver.handleOffer(offer);
+      if (!_authorizedSession(generation)) return;
       await signaling.sendAnswer(answer, sessionId);
+      if (!_authorizedSession(generation)) return;
 
-      _updateState(_sessionInfo.copyWith(
-        state: RemoteSessionState.active,
-        connectedAt: DateTime.now(),
-      ));
+      _updateState(
+        _sessionInfo.copyWith(
+          state: RemoteSessionState.active,
+          connectedAt: DateTime.now(),
+        ),
+      );
 
       await _registerDeviceInFirestore(status: 'active');
 
       // Send screen dimensions to controller so coordinate mapping is pixel-perfect
       Future.delayed(const Duration(milliseconds: 500), () {
-        _webrtc?.sendReply(RemoteDimensionsCommand(
-          width: _screenWidth,
-          height: _screenHeight,
-          density: _screenDensity,
-        ));
+        if (!_authorizedSession(generation)) return;
+        _webrtc?.sendReply(
+          RemoteDimensionsCommand(
+            width: _screenWidth,
+            height: _screenHeight,
+            density: _screenDensity,
+          ),
+        );
       });
 
-      debugPrint('[RemoteSessionManager] Remote session is ACTIVE ($sessionType)');
+      debugPrint(
+        '[RemoteSessionManager] Remote session is ACTIVE ($sessionType)',
+      );
     } catch (e) {
       debugPrint('[RemoteSessionManager] Failed to start remote session: $e');
-      await terminateSession(error: e.toString());
+      if (_authorizedSession(generation))
+        await terminateSession(error: e.toString());
     }
   }
 
   /// Handle commands received from the controller DataChannel
-  Future<void> _handleIncomingCommand(RemoteCommand command) async {
+  Future<void> _handleIncomingCommand(RemoteCommand command) {
+    final generation = _sessionGeneration;
+    _commands = _commands
+        .then((_) async {
+          if (_authorizedSession(generation))
+            await _processIncomingCommand(command, generation);
+        })
+        .catchError((Object e) {
+          debugPrint('[RemoteSessionManager] Command: $e');
+        });
+    return _commands;
+  }
+
+  Future<void> _processIncomingCommand(
+    RemoteCommand command,
+    int generation,
+  ) async {
     // Intercept chat messages first
     if (await _chatReceiver?.handleIncomingCommand(command) == true) {
       return;
@@ -250,7 +398,9 @@ class RemoteSessionManager extends ChangeNotifier {
         command is! RemoteHandoverCommand &&
         command is! RemoteDisconnectCommand &&
         command is! RemotePingCommand) {
-      debugPrint('[RemoteSessionManager] Command dropped: automation has input ownership');
+      debugPrint(
+        '[RemoteSessionManager] Command dropped: automation has input ownership',
+      );
       return;
     }
 
@@ -258,10 +408,7 @@ class RemoteSessionManager extends ChangeNotifier {
       if (command is RemoteTapCommand) {
         final pixelX = command.x * _screenWidth;
         final pixelY = command.y * _screenHeight;
-        await _channel.invokeMethod('remoteTap', {
-          'x': pixelX,
-          'y': pixelY,
-        });
+        await _channel.invokeMethod('remoteTap', {'x': pixelX, 'y': pixelY});
       } else if (command is RemoteLongPressCommand) {
         final pixelX = command.x * _screenWidth;
         final pixelY = command.y * _screenHeight;
@@ -300,28 +447,36 @@ class RemoteSessionManager extends ChangeNotifier {
         );
         if (focusedSuccess != true) {
           // Fallback to native injection
-          await _channel.invokeMethod('injectTextNative', {'value': command.text});
+          await _channel.invokeMethod('injectTextNative', {
+            'value': command.text,
+          });
         }
       } else if (command is RemoteHandoverCommand) {
-        final newOwner = command.owner == 'automation'
-            ? InputOwner.automation
-            : InputOwner.remoteHuman;
-        _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
+        final newOwner =
+            command.owner == 'automation'
+                ? InputOwner.automation
+                : InputOwner.remoteHuman;
         if (newOwner == InputOwner.automation) {
           onAutomationResumeRequested?.call();
         } else {
-          onAutomationPauseRequested?.call();
+          await onAutomationPauseRequested?.call();
         }
+        if (!_authorizedSession(generation)) return;
+        _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
       } else if (command is RemoteDisconnectCommand) {
         await terminateSession();
       } else if (command is RemoteResetCommand) {
         debugPrint('[RemoteSessionManager] Handling RemoteResetCommand');
         final currentDeviceId = signaling.deviceId;
-        await WhatsAppTextValidationService.instance.clearSenderState('p2p_$currentDeviceId');
+        await WhatsAppTextValidationService.instance.clearSenderState(
+          'p2p_$currentDeviceId',
+        );
         if (_sessionInfo.controllerId != null) {
-          await WhatsAppTextValidationService.instance.clearSenderState('p2p_${currentDeviceId}_${_sessionInfo.controllerId}');
+          await WhatsAppTextValidationService.instance.clearSenderState(
+            'p2p_${currentDeviceId}_${_sessionInfo.controllerId}',
+          );
         }
-        onAutomationPauseRequested?.call();
+        await onAutomationPauseRequested?.call();
       }
     } catch (e) {
       debugPrint('[RemoteSessionManager] Error executing command $command: $e');
@@ -331,7 +486,9 @@ class RemoteSessionManager extends ChangeNotifier {
   Timer? _failureGraceTimer;
 
   void _handleWebRtcStateChange(RTCPeerConnectionState state) {
-    debugPrint('[RemoteSessionManager] WebRTC connection state changed: $state');
+    debugPrint(
+      '[RemoteSessionManager] WebRTC connection state changed: $state',
+    );
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _failureGraceTimer?.cancel();
       _failureGraceTimer = null;
@@ -341,12 +498,17 @@ class RemoteSessionManager extends ChangeNotifier {
       debugPrint('[RemoteSessionManager] WebRTC connection closed');
       terminateSession();
     } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-      debugPrint('[RemoteSessionManager] WebRTC connection failed, allowing 3s grace period for reconnect');
+      debugPrint(
+        '[RemoteSessionManager] WebRTC connection failed, allowing 3s grace period for reconnect',
+      );
       _failureGraceTimer?.cancel();
       _failureGraceTimer = Timer(const Duration(seconds: 3), () {
         if (_sessionInfo.state == RemoteSessionState.active &&
-            _webrtc?.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-          debugPrint('[RemoteSessionManager] WebRTC remained in failed state after grace period, terminating');
+            _webrtc?.connectionState ==
+                RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+          debugPrint(
+            '[RemoteSessionManager] WebRTC remained in failed state after grace period, terminating',
+          );
           terminateSession();
         }
       });
@@ -356,22 +518,34 @@ class RemoteSessionManager extends ChangeNotifier {
   void _handleSessionTerminatedRemotely() {
     if (_sessionInfo.state == RemoteSessionState.active ||
         _sessionInfo.state == RemoteSessionState.connectingWebRTC) {
-      debugPrint('[RemoteSessionManager] Remote session terminated by signaling');
+      debugPrint(
+        '[RemoteSessionManager] Remote session terminated by signaling',
+      );
       terminateSession();
     }
   }
 
   /// Terminate the active remote session and return to IDLE
-  Future<void> terminateSession({String? error}) async {
+  Future<void> terminateSession({String? error}) {
+    return _termination ??= _terminateSession(
+      error: error,
+    ).whenComplete(() => _termination = null);
+  }
+
+  Future<void> _terminateSession({String? error}) async {
+    _sessionGeneration++;
+    _sessionOwnerUid = null;
     _failureGraceTimer?.cancel();
     _failureGraceTimer = null;
 
     final endingSessionId = _sessionInfo.activeSessionId;
 
-    _updateState(_sessionInfo.copyWith(
-      state: RemoteSessionState.disconnecting,
-      lastError: error,
-    ));
+    _updateState(
+      _sessionInfo.copyWith(
+        state: RemoteSessionState.disconnecting,
+        lastError: error,
+      ),
+    );
 
     try {
       _chatReceiver?.dispose();
@@ -391,23 +565,27 @@ class RemoteSessionManager extends ChangeNotifier {
       await signaling.setReceiverIdle(endingSessionId: endingSessionId);
 
       // Restore automation input ownership
-      _updateState(_sessionInfo.copyWith(
-        state: RemoteSessionState.idle,
-        inputOwner: InputOwner.automation,
-        activeSessionId: null,
-        controllerId: null,
-        connectedAt: null,
-      ));
+      _updateState(
+        _sessionInfo.copyWith(
+          state: RemoteSessionState.idle,
+          inputOwner: InputOwner.automation,
+          activeSessionId: null,
+          controllerId: null,
+          connectedAt: null,
+        ),
+      );
 
       onAutomationResumeRequested?.call();
       await _registerDeviceInFirestore(status: 'idle');
       debugPrint('[RemoteSessionManager] Cleaned up and returned to IDLE');
     } catch (e) {
       debugPrint('[RemoteSessionManager] Error terminating session: $e');
-      _updateState(_sessionInfo.copyWith(
-        state: RemoteSessionState.idle,
-        inputOwner: InputOwner.automation,
-      ));
+      _updateState(
+        _sessionInfo.copyWith(
+          state: RemoteSessionState.idle,
+          inputOwner: InputOwner.automation,
+        ),
+      );
       await _registerDeviceInFirestore(status: 'idle');
     }
   }
