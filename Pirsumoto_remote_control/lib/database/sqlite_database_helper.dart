@@ -285,4 +285,13 @@ class SqliteDatabaseHelper {
       whereArgs: [sessionId],
     );
   }
+
+  Future<int> deleteMessage(String sessionId, String messageId) async {
+    Database db = await instance.database;
+    return await db.delete(
+      tableMessages,
+      where: 'id = ?',
+      whereArgs: ['$sessionId/$messageId'],
+    );
+  }
 }

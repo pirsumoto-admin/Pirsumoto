@@ -2,9 +2,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:publication_protocol/publication_protocol.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../signaling/controller_signaling.dart';
 import '../webrtc/controller_webrtc_session.dart';
 import 'app_theme.dart';
 import 'chat_session_manager.dart';
+import 'remote_control_screen.dart';
 import 'whatsapp_chat_screen.dart';
 
 class ChatSessionsListScreen extends StatefulWidget {
@@ -92,6 +95,58 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
           ),
         )
         .then((_) => _load());
+  }
+
+  Future<void> _switchToRemoteControl() async {
+    ControllerWebRtcSession? session = widget.session;
+    if (session == null || !session.isConnected) {
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('מתחבר לשליטה מרחוק במסך (WebRTC)...'),
+            duration: Duration(seconds: 2),
+            backgroundColor: Color(0xFF1F2C34),
+          ),
+        );
+        final user = FirebaseAuth.instance.currentUser;
+        final controllerId =
+            user?.displayName ??
+            'Controller_${DateTime.now().millisecondsSinceEpoch % 1000}';
+        final signaling = ControllerSignalingClient(
+          deviceId: widget.deviceId,
+          controllerId: controllerId,
+        );
+        session = ControllerWebRtcSession(
+          signaling: signaling,
+          sessionType: 'remote_control',
+        );
+        await session.initRenderer();
+        session.connect();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('שגיאה בהתחברות לשליטה מרחוק: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RemoteControlScreen(
+          session: session!,
+          deviceName: widget.deviceName,
+        ),
+      ),
+    );
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   String _label(ChatSessionStatus s) => switch (s) {
@@ -352,7 +407,45 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                 Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    if (isRunning)
+                                    if (isRunning) ...[
+                                      Tooltip(
+                                        message: 'שליטה מרחוק במסך',
+                                        child: TextButton.icon(
+                                          icon: const Icon(
+                                            Icons.screen_share_outlined,
+                                            color: AppColors.onSurface,
+                                            size: 15,
+                                          ),
+                                          label: Text(
+                                            'שליטה',
+                                            style: GoogleFonts.heebo(
+                                              color: AppColors.onSurface,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          style: TextButton.styleFrom(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 3,
+                                            ),
+                                            minimumSize: Size.zero,
+                                            tapTargetSize: MaterialTapTargetSize
+                                                .shrinkWrap,
+                                            backgroundColor:
+                                                AppColors.surfaceSubtle,
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              side: const BorderSide(
+                                                color: AppColors.border,
+                                              ),
+                                            ),
+                                          ),
+                                          onPressed: _switchToRemoteControl,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
                                       Tooltip(
                                         message: 'עצור פרסום',
                                         child: TextButton.icon(
@@ -397,7 +490,8 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                             ),
                                           ),
                                         ),
-                                      )
+                                      ),
+                                    ]
                                     else ...[
                                       if (canStart && !anyRunning) ...[
                                         Tooltip(

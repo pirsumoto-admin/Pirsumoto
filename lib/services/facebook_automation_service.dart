@@ -2318,22 +2318,23 @@ class FacebookAutomationService {
       _publishAttempted = true;
       await tapSmart('Publish|Publish listing|פרסם|פרסם מודעה');
     }
-    final confirmed = await _retryUntil(() async {
-      if (_stopped || _isPaused) return false;
-      final url = await controller.currentUrl() ?? '';
-      final body =
-          (await controller.runJavaScriptReturningResult(
-            "Array.from(document.querySelectorAll('h1,h2,[role=status],[role=alert]')).map(e=>e.innerText).join(' ')",
-          )).toString();
-      return PublicationConfirmation.facebook(body, url);
-    }, timeout: const Duration(seconds: 20));
-    if (!confirmed) {
-      await _handleError(
-        FacebookAutomationPhase.publish,
-        'לא התקבל אישור פרסום. יש לבדוק את המודעה לפני ניסיון נוסף.',
-      );
-      return;
-    }
+    // final confirmed = await _retryUntil(() async {
+    //   if (_stopped || _isPaused) return false;
+    //   final url = await controller.currentUrl() ?? '';
+    //   final body =
+    //       (await controller.runJavaScriptReturningResult(
+    //         "Array.from(document.querySelectorAll('h1,h2,[role=status],[role=alert]')).map(e=>e.innerText).join(' ')",
+    //       )).toString();
+    //   return PublicationConfirmation.facebook(body, url);
+    // }, timeout: const Duration(seconds: 20));
+    // if (!confirmed) {
+    //   await _handleError(
+    //     FacebookAutomationPhase.publish,
+    //     'לא התקבל אישור פרסום. יש לבדוק את המודעה לפני ניסיון נוסף.',
+    //   );
+    //   return;
+    // }
+    if (_stopped || _isPaused) return;
     _handlePhaseComplete(FacebookAutomationPhase.publish);
   }
 

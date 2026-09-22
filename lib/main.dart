@@ -4,7 +4,6 @@
 // import 'dart:convert';
 import 'dart:io'; // Keep: used in main() for Platform.isAndroid / Platform.isIOS
 
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,20 +24,19 @@ import 'routing/app_router.dart';
 // import 'services/db_service.dart';
 import 'shared/theme/app_theme.dart';
 import 'remote_control/remote_receiver_service.dart';
-import 'remote_control/remote_control_active_banner.dart';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:firebase_core/firebase_core.dart';
 // [WHATSAPP-DISABLED] shared_preferences was used by WA config dialog (has_seen_whatsapp_config).
 // import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
+
 // import 'package:flutter_skill/flutter_skill.dart';
 // import 'package:flutter_gemma/flutter_gemma.dart';
 
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   if (Platform.isAndroid || Platform.isIOS) {
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -151,14 +149,6 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
       themeMode: ThemeMode.dark, // Defaulting to dark for modern rich aesthetic
       routerConfig: router,
       debugShowCheckedModeBanner: false,
-      builder: (context, child) {
-        return Stack(
-          children: [
-            if (child != null) child,
-            const RemoteControlActiveBanner(),
-          ],
-        );
-      },
     );
   }
 }

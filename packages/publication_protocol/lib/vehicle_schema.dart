@@ -10,7 +10,7 @@ class VehicleSchema {
           .toList();
   static List<String> errors(Map<String, String> data) {
     final errors = <String>[];
-    const disregarded = {'city', 'handicapped', 'no_test'};
+    final disregarded = {'city', 'handicapped', 'no_test', 'history_records', 'force_show_current_ownership'};
     void invalid(String key) =>
         errors.add('${vehicleFieldLabels[key] ?? key}: ערך לא תקין');
     for (final entry in data.entries) {

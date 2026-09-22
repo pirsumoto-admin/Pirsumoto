@@ -11,8 +11,7 @@ class VehicleDataService {
   static const String _apiUrl =
       'https://data.gov.il/api/3/action/datastore_search';
   static const String _resourceId = '053cea08-09bc-40ec-8f7a-156f0677aff3';
-  static const String _gearResourceId =
-      '142afde2-6228-49f9-8a29-9b6c3a0cbe40';
+  static const String _gearResourceId = '142afde2-6228-49f9-8a29-9b6c3a0cbe40';
   static const String _testHistoryResourceId =
       '56063a99-8a3e-4ff4-912e-5966c0279bad';
 
@@ -39,19 +38,21 @@ class VehicleDataService {
 
       final vehicle = records[0] as Map<String, dynamic>;
 
-      // Concurrently fetch gear (142afde2) and last test kilometer (56063a99)
+      // Concurrently fetch gear (142afde2), last test kilometer (56063a99), and ownership history
       final gearFuture = _fetchGearType(vehicle);
       final kmFuture = _fetchKilometerTestAharon(cleanedPlate);
+      final ownershipHistoryFuture = _fetchOwnershipHistory(cleanedPlate);
 
       final gear = await gearFuture;
       final rawKmTest = await kmFuture;
+      final ownershipHistory = await ownershipHistoryFuture;
 
       final year = vehicle['shnat_yitzur']?.toString() ?? '';
       final moedAliya = vehicle['moed_aliya_lakvish']?.toString() ?? '';
       final regMonth = _registrationMonth(moedAliya);
       final tokefDt = vehicle['tokef_dt']?.toString() ?? '';
       final lastTestDate = vehicle['mivchan_acharon_dt']?.toString() ?? '';
-      final ownership = _mapOwnershipType(vehicle['baalut']?.toString() ?? '');
+      String ownership = _mapOwnershipType(vehicle['baalut']?.toString() ?? '');
 
       // Parse test month and test year
       String testMonth = '';
@@ -78,6 +79,12 @@ class VehicleDataService {
         );
       }
 
+      bool forceShowCurrent = false;
+      if (vehicle['baalut']?.toString().trim() == 'סוחר') {
+        forceShowCurrent = true;
+        ownership = ownershipHistory['current_ownership'] ?? '';
+      }
+
       return {
         'license_plate': cleanedPlate,
         'maker': vehicle['tozeret_nm']?.toString() ?? '',
@@ -91,6 +98,7 @@ class VehicleDataService {
         'fuel_type': vehicle['sug_delek_nm']?.toString() ?? '',
         'ownership': ownership,
         'current_ownership': ownership,
+        if (forceShowCurrent) 'force_show_current_ownership': 'true',
         'registrationMonth': regMonth,
         'month': regMonth,
         'testExpiry': _formatTestDate(tokefDt),
@@ -103,8 +111,14 @@ class VehicleDataService {
         'gear': gear,
         'gear_type': gear,
         'kilometer_test_aharon': rawKmTest?.toString() ?? '',
-        'km': estimatedKm != null ? estimatedKm.toString() : (rawKmTest?.toString() ?? ''),
+        'km':
+            estimatedKm != null
+                ? estimatedKm.toString()
+                : (rawKmTest?.toString() ?? ''),
         'estimatedKm': estimatedKm?.toString() ?? '',
+        'hand': ownershipHistory['hand'] ?? '',
+        'previous_ownership': ownershipHistory['previous_ownership'] ?? '',
+        'history_records': ownershipHistory['history_records'] ?? '',
       };
     } catch (e) {
       debugPrint('[VehicleDataService] Error fetching vehicle data: $e');
@@ -128,7 +142,8 @@ class VehicleDataService {
         if (degemcd != null && degemcd.toString().isNotEmpty)
           'degem_cd': degemcd,
         if (sug.isNotEmpty) 'sug_degem': sug,
-        if (yearStr.isNotEmpty) 'shnat_yitzur': int.tryParse(yearStr) ?? yearStr,
+        if (yearStr.isNotEmpty)
+          'shnat_yitzur': int.tryParse(yearStr) ?? yearStr,
       };
 
       if (filtersObj.isEmpty) return defaultGear;
@@ -155,6 +170,64 @@ class VehicleDataService {
     } catch (_) {
       return defaultGear;
     }
+  }
+
+  static Future<Map<String, String>> _fetchOwnershipHistory(
+    String cleanedPlate,
+  ) async {
+    try {
+      final url =
+          '$_apiUrl?resource_id=bb2355dc-9ec7-4f06-9c3f-3344672171da&q=$cleanedPlate';
+      final response = await http
+          .get(Uri.parse(url), headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        final total = decoded?['result']?['total'];
+        final records = decoded?['result']?['records'] as List?;
+
+        String hand = '';
+        String currentOwnership = '';
+        String previousOwnership = '';
+
+        if (total != null && total is int && total > 0) {
+          hand = total.toString();
+        }
+
+        if (records != null && records.isNotEmpty) {
+          // Sort by baalut_dt ascending (oldest first).
+          records.sort((a, b) {
+            final aDt = a['baalut_dt'] ?? 0;
+            final bDt = b['baalut_dt'] ?? 0;
+            return aDt.compareTo(bDt);
+          });
+          
+          List<String> nonSocher = [];
+          for (var r in records) {
+            final baalut = r['baalut']?.toString().trim() ?? '';
+            if (baalut != 'סוחר' && baalut.isNotEmpty) {
+              nonSocher.add(_mapOwnershipType(baalut));
+            }
+          }
+          
+          if (nonSocher.isNotEmpty) {
+            currentOwnership = nonSocher.last;
+            if (nonSocher.length >= 2) {
+              previousOwnership = nonSocher[nonSocher.length - 2];
+            }
+          }
+        }
+
+        return {
+          'hand': hand,
+          if (currentOwnership.isNotEmpty) 'current_ownership': currentOwnership,
+          if (previousOwnership.isNotEmpty) 'previous_ownership': previousOwnership,
+          'history_records': records != null ? jsonEncode(records) : '[]',
+        };
+      }
+    } catch (_) {}
+    return {};
   }
 
   static Future<int?> _fetchKilometerTestAharon(String cleanedPlate) async {
@@ -311,6 +384,7 @@ class VehicleDataService {
       'ייבוא מקביל': 'ייבוא מקביל',
       'ממשלתי': 'ממשלתי',
       'או"ם': 'או"ם',
+      'החכר': 'השכרה / החכר',
     };
     return map[hebrewOwnership] ?? hebrewOwnership;
   }

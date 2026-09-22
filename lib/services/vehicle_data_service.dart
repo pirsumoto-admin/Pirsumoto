@@ -11,8 +11,7 @@ class VehicleDataService {
   static const String _apiUrl =
       'https://data.gov.il/api/3/action/datastore_search';
   static const String _resourceId = '053cea08-09bc-40ec-8f7a-156f0677aff3';
-  static const String _gearResourceId =
-      '142afde2-6228-49f9-8a29-9b6c3a0cbe40';
+  static const String _gearResourceId = '142afde2-6228-49f9-8a29-9b6c3a0cbe40';
   static const String _testHistoryResourceId =
       '56063a99-8a3e-4ff4-912e-5966c0279bad';
 
@@ -103,7 +102,10 @@ class VehicleDataService {
         'gear': gear,
         'gear_type': gear,
         'kilometer_test_aharon': rawKmTest?.toString() ?? '',
-        'km': estimatedKm != null ? estimatedKm.toString() : (rawKmTest?.toString() ?? ''),
+        'km':
+            estimatedKm != null
+                ? estimatedKm.toString()
+                : (rawKmTest?.toString() ?? ''),
         'estimatedKm': estimatedKm?.toString() ?? '',
       };
     } catch (e) {
@@ -128,7 +130,8 @@ class VehicleDataService {
         if (degemcd != null && degemcd.toString().isNotEmpty)
           'degem_cd': degemcd,
         if (sug.isNotEmpty) 'sug_degem': sug,
-        if (yearStr.isNotEmpty) 'shnat_yitzur': int.tryParse(yearStr) ?? yearStr,
+        if (yearStr.isNotEmpty)
+          'shnat_yitzur': int.tryParse(yearStr) ?? yearStr,
       };
 
       if (filtersObj.isEmpty) return defaultGear;
@@ -300,7 +303,6 @@ class VehicleDataService {
 
   static String _mapOwnershipType(String hebrewOwnership) {
     const map = {
-      'פרטי': 'פרטית',
       'פרטית': 'פרטית',
       'חברה': 'חברה',
       'השכרה': 'השכרה',
@@ -311,6 +313,7 @@ class VehicleDataService {
       'ייבוא מקביל': 'ייבוא מקביל',
       'ממשלתי': 'ממשלתי',
       'או"ם': 'או"ם',
+      'החכר': 'החכר',
     };
     return map[hebrewOwnership] ?? hebrewOwnership;
   }

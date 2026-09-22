@@ -121,43 +121,78 @@ void main() {
     expect(publishMsg.contains('מוכנים לפרסום'), isTrue);
   });
 
-  testWidgets('MissingFieldsInlineForm renders field labels on right and inputs on left', (tester) async {
-    Map<String, String>? savedValues;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Directionality(
-          textDirection: TextDirection.rtl,
-          child: Scaffold(
-            body: SingleChildScrollView(
-              child: MissingFieldsInlineForm(
-                missingFields: const ['price', 'gear_type'],
-                currentData: const {'maker': 'מאזדה'},
-                onSave: (val) async {
-                  savedValues = val;
-                },
+  testWidgets(
+    'MissingFieldsInlineForm always shows km and previous owner with default values, hides badge, and validates save button',
+    (tester) async {
+      Map<String, String>? savedValues;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Directionality(
+            textDirection: TextDirection.rtl,
+            child: Scaffold(
+              body: SingleChildScrollView(
+                child: MissingFieldsInlineForm(
+                  missingFields: const ['price'],
+                  currentData: const {
+                    'maker': 'מאזדה',
+                    'km': '85000',
+                    'previous_ownership': 'פרטית',
+                  },
+                  onSave: (val) async {
+                    savedValues = val;
+                  },
+                ),
               ),
             ),
           ),
         ),
-      ),
-    );
+      );
 
-    expect(find.text('להשלמת פרטי הרכב:'), findsOneWidget);
-    expect(find.text('מחיר מבוקש'), findsOneWidget);
-    expect(find.text('תיבת הילוכים'), findsOneWidget);
-    expect(find.text('שמור פרטים'), findsOneWidget);
+      // Header is present, but missing fields badge count is removed
+      expect(find.text('להשלמת פרטי רכב חסרים:'), findsOneWidget);
+      expect(find.text('1 חסרים'), findsNothing);
+      expect(find.text('3 חסרים'), findsNothing);
 
-    // Enter a price in the text field
-    final priceField = find.byType(TextField);
-    expect(priceField, findsOneWidget);
-    await tester.enterText(priceField, '45000');
+      // Missing field 'price' is present
+      expect(find.text('מחיר מבוקש'), findsOneWidget);
 
-    // Tap save button
-    await tester.tap(find.text('שמור פרטים'));
-    await tester.pumpAndSettle();
+      // 'km' and 'previous_ownership' are ALWAYS present even if not in missingFields
+      expect(find.text('קילומטראז׳'), findsOneWidget);
+      expect(find.text('בעלות קודמת'), findsOneWidget);
 
-    expect(savedValues, isNotNull);
-    expect(savedValues!['price'], '45000');
-  });
+      // Check detected default values are displayed
+      expect(find.text('85000'), findsOneWidget);
+      expect(find.text('פרטית'), findsOneWidget);
+
+      // Save button is present
+      final saveBtnFinder = find.widgetWithText(ElevatedButton, 'שמור פרטים');
+      expect(saveBtnFinder, findsOneWidget);
+
+      // Initially, price is empty -> save button must be disabled (onPressed is null)
+      final ElevatedButton initialBtn = tester.widget(saveBtnFinder);
+      expect(initialBtn.onPressed, isNull);
+
+      // Enter price as '0' -> still disabled
+      final priceField = find.byType(TextField).first;
+      await tester.enterText(priceField, '0');
+      await tester.pump();
+      final ElevatedButton zeroBtn = tester.widget(saveBtnFinder);
+      expect(zeroBtn.onPressed, isNull);
+
+      // Enter a valid price -> now all fields (price, km=85000, previous_ownership=פרטית) are filled!
+      await tester.enterText(priceField, '45000');
+      await tester.pump();
+      final ElevatedButton validBtn = tester.widget(saveBtnFinder);
+      expect(validBtn.onPressed, isNotNull);
+
+      // Tap save button
+      await tester.tap(saveBtnFinder);
+      await tester.pumpAndSettle();
+
+      expect(savedValues, isNotNull);
+      expect(savedValues!['price'], '45000');
+      expect(savedValues!['km'], '85000');
+      expect(savedValues!['previous_ownership'], 'פרטית');
+    },
+  );
 }
-

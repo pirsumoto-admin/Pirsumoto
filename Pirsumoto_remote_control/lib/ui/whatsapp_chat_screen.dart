@@ -6,6 +6,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
@@ -145,9 +146,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               id: id,
               sender: ChatSender.bot,
               text: text,
-              timestamp: timestamp is Timestamp
-                  ? timestamp.toDate()
-                  : DateTime.now(),
+              timestamp:
+                  timestamp is Timestamp ? timestamp.toDate() : DateTime.now(),
             ),
           );
           _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -208,15 +208,16 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _sessionId,
         beforeTimestamp: before,
       );
-      final remote = await FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(widget.deviceId)
-          .collection('messages')
-          .where('sessionId', isEqualTo: _sessionId)
-          .orderBy('timestamp', descending: true)
-          .startAfter([before])
-          .limit(100)
-          .get();
+      final remote =
+          await FirebaseFirestore.instance
+              .collection('remote_chats')
+              .doc(widget.deviceId)
+              .collection('messages')
+              .where('sessionId', isEqualTo: _sessionId)
+              .orderBy('timestamp', descending: true)
+              .startAfter([before])
+              .limit(100)
+              .get();
       for (final doc in remote.docs) {
         if (doc.data()['sender'] == 'bot' && doc.data()['type'] == 'status')
           older.add(ChatMessageItem.fromJson({...doc.data(), 'id': doc.id}));
@@ -256,6 +257,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (_publicationState != null || _submitting || _pendingTurns > 0) {
       _showError('לא ניתן לנקות שיחה במהלך פרסום או עיבוד');
       return;
+    }
+    for (final m in _messages) {
+      if (m.localFilePath != null) {
+        try {
+          final f = File(m.localFilePath!);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
     }
     await SqliteDatabaseHelper.instance.deleteMessages(_sessionId);
     await SqliteDatabaseHelper.instance.deleteSession(_sessionId);
@@ -463,15 +472,16 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final currentVehicleData = session?.vehicleData ?? {};
     var currentImagePaths = session?.imagePaths ?? [];
 
-    final historyList = _messages
-        .where((m) => m.id != userMessage.id && m.text.trim().isNotEmpty)
-        .map(
-          (m) => {
-            'role': m.sender == ChatSender.user ? 'user' : 'assistant',
-            'text': m.text,
-          },
-        )
-        .toList();
+    final historyList =
+        _messages
+            .where((m) => m.id != userMessage.id && m.text.trim().isNotEmpty)
+            .map(
+              (m) => {
+                'role': m.sender == ChatSender.user ? 'user' : 'assistant',
+                'text': m.text,
+              },
+            )
+            .toList();
 
     // The authenticated backend extracts fields and looks up the vehicle.
     final result = await RemoteValidationService.processTurn(
@@ -491,9 +501,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _currentLicensePlate = result.vehicleData['license_plate']!;
     }
 
-    final plate = _currentLicensePlate.isNotEmpty
-        ? _currentLicensePlate
-        : (result.vehicleData['license_plate'] ?? '');
+    final plate =
+        _currentLicensePlate.isNotEmpty
+            ? _currentLicensePlate
+            : (result.vehicleData['license_plate'] ?? '');
 
     // Merge vehicle data with gov.il sources if needed
     final mergedVehicleData = Map<String, String>.from(result.vehicleData);
@@ -517,8 +528,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }
 
     final missing = RemoteValidationService.getMissingFields(mergedVehicleData);
-    final errors = RemoteValidationService.validateValues(mergedVehicleData);
-    final isComplete = missing.isEmpty && errors.isEmpty;
+    final allErrors = RemoteValidationService.validateValues(mergedVehicleData);
+    final errors = _getFilteredErrors(allErrors, mergedVehicleData, missing);
+    final isComplete = missing.isEmpty && allErrors.isEmpty;
 
     if (isComplete && currentImagePaths.isNotEmpty) {
       _allDataFilled = true;
@@ -530,11 +542,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (plate.isNotEmpty) {
       final summary =
           'נקלט רכב $plate: ${[mergedVehicleData['maker'], mergedVehicleData['model'], mergedVehicleData['year']].where((s) => s != null && s.isNotEmpty).join(' ')}';
-      final guidance = missing.isNotEmpty
-          ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
-          : (currentImagePaths.isNotEmpty
-                ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.'
-                : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
+      final guidance =
+          missing.isNotEmpty
+              ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
+              : (currentImagePaths.isNotEmpty
+                  ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.'
+                  : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
       final errorLines = errors.map((e) => '⚠️ $e').toList();
       finalBotReply = [
         if (summary.isNotEmpty) summary,
@@ -575,6 +588,33 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     await _refreshSession();
   }
 
+  List<String> _getFilteredErrors(
+    List<String> allErrors,
+    Map<String, String> data,
+    List<String> missing,
+  ) {
+    final formFields = List<String>.from(missing);
+    if (!formFields.contains('km')) formFields.add('km');
+    if (!formFields.contains('hand')) formFields.add('hand');
+    if (!formFields.contains('previous_ownership')) {
+      formFields.add('previous_ownership');
+    }
+    if (data['force_show_current_ownership'] == 'true' &&
+        !formFields.contains('current_ownership')) {
+      formFields.add('current_ownership');
+    }
+
+    final labelsToFilter =
+        formFields.map((f) => vehicleFieldLabels[f] ?? f).toSet();
+
+    return allErrors.where((err) {
+      for (final label in labelsToFilter) {
+        if (err.startsWith(label)) return false;
+      }
+      return true;
+    }).toList();
+  }
+
   Future<void> _saveMissingFields(Map<String, String> updatedValues) async {
     final merged = Map<String, String>.from(_vehicleData);
     for (final entry in updatedValues.entries) {
@@ -602,8 +642,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }
 
     final missing = RemoteValidationService.getMissingFields(merged);
-    final errors = RemoteValidationService.validateValues(merged);
-    final isComplete = missing.isEmpty && errors.isEmpty;
+    final allErrors = RemoteValidationService.validateValues(merged);
+    final errors = _getFilteredErrors(allErrors, merged, missing);
+    final isComplete = missing.isEmpty && allErrors.isEmpty;
 
     final session = await SqliteDatabaseHelper.instance.getSession(_sessionId);
     final currentImagePaths = List<String>.from(session?.imagePaths ?? []);
@@ -611,9 +652,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final updatedSession = ChatSession(
       id: _sessionId,
       deviceId: widget.deviceId,
-      licensePlate: _currentLicensePlate.isNotEmpty
-          ? _currentLicensePlate
-          : (session?.licensePlate ?? ''),
+      licensePlate:
+          _currentLicensePlate.isNotEmpty
+              ? _currentLicensePlate
+              : (session?.licensePlate ?? ''),
       startTimestamp:
           session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
       status: session?.status ?? ChatSessionStatus.draft,
@@ -671,9 +713,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _sessionId,
       );
       final status = existing?.status ?? ChatSessionStatus.draft;
-      final plate = _currentLicensePlate.isNotEmpty
-          ? _currentLicensePlate
-          : (existing?.licensePlate ?? '');
+      final plate =
+          _currentLicensePlate.isNotEmpty
+              ? _currentLicensePlate
+              : (existing?.licensePlate ?? '');
       await ChatSessionManager.saveSession(
         ChatSession(
           id: _sessionId,
@@ -753,9 +796,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final updatedSession = ChatSession(
       id: _sessionId,
       deviceId: widget.deviceId,
-      licensePlate: _currentLicensePlate.isNotEmpty
-          ? _currentLicensePlate
-          : (session?.licensePlate ?? ''),
+      licensePlate:
+          _currentLicensePlate.isNotEmpty
+              ? _currentLicensePlate
+              : (session?.licensePlate ?? ''),
       startTimestamp:
           session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
       status: session?.status ?? ChatSessionStatus.draft,
@@ -832,6 +876,743 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     } catch (e) {
       debugPrint('[WhatsAppChat] Pick multi image failed: $e');
     }
+  }
+
+  /// Delete a single image message, cleaning up local storage, SQLite database,
+  /// backend Firestore and Firebase Storage, and updating the session imagePaths
+  /// and readiness state so it is never published to the main Pirsumoto app.
+  Future<void> _deleteImageMessage(ChatMessageItem message) async {
+    if (_publicationState != null || _submitting) {
+      _showError('לא ניתן למחוק תמונות במהלך פרסום או עיבוד');
+      return;
+    }
+
+    try {
+      // 1. Delete local file from storage
+      if (message.localFilePath != null) {
+        try {
+          final file = File(message.localFilePath!);
+          if (await file.exists()) {
+            await file.delete();
+          }
+        } catch (e) {
+          debugPrint('[WhatsAppChat] Error deleting local image file: $e');
+        }
+      }
+
+      // 2. Delete message from local SQLite DB
+      await SqliteDatabaseHelper.instance.deleteMessage(_sessionId, message.id);
+      _savedMessages.remove(message.id);
+
+      // 3. Delete message doc from Firestore
+      try {
+        await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(widget.deviceId)
+            .collection('messages')
+            .doc(message.id)
+            .delete();
+      } catch (e) {
+        debugPrint('[WhatsAppChat] Error deleting Firestore message: $e');
+      }
+
+      // 4. Delete from Firebase Storage if a remote media URL exists
+      if (message.mediaUrl != null && message.mediaUrl!.isNotEmpty) {
+        try {
+          final ref = FirebaseStorage.instance.refFromURL(message.mediaUrl!);
+          await ref.delete();
+        } catch (e) {
+          debugPrint('[WhatsAppChat] Error deleting from FirebaseStorage: $e');
+        }
+      }
+
+      // 5. Clean up any uploaded publication attempt media for this session if present
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        try {
+          final storageRef = FirebaseStorage.instance.ref(
+            'publication_media/$uid/${widget.deviceId}/$_sessionId',
+          );
+          final listResult = await storageRef.listAll();
+          for (final item in listResult.items) {
+            await item.delete();
+          }
+          for (final prefix in listResult.prefixes) {
+            final subList = await prefix.listAll();
+            for (final item in subList.items) {
+              await item.delete();
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 6. Remove from in-memory messages list
+      setState(() {
+        _messages.removeWhere((m) => m.id == message.id);
+      });
+
+      // 7. Update session image paths and readiness
+      final session = await SqliteDatabaseHelper.instance.getSession(
+        _sessionId,
+      );
+      final currentImgs = List<String>.from(session?.imagePaths ?? []);
+      if (message.localFilePath != null) {
+        currentImgs.remove(message.localFilePath);
+        final fileName = message.localFilePath!.split('/').last;
+        currentImgs.removeWhere((p) => p.endsWith(fileName));
+      }
+      if (message.mediaUrl != null) {
+        currentImgs.remove(message.mediaUrl);
+      }
+
+      final vehicleData = session?.vehicleData ?? _vehicleData;
+      final hasPlate =
+          (_currentLicensePlate.isNotEmpty) ||
+          ((vehicleData['license_plate'] ?? '').isNotEmpty);
+      final missing = RemoteValidationService.getMissingFields(vehicleData);
+      final errors = RemoteValidationService.validateValues(vehicleData);
+      final isNowReady =
+          hasPlate &&
+          missing.isEmpty &&
+          errors.isEmpty &&
+          currentImgs.isNotEmpty;
+
+      _allDataFilled = isNowReady;
+
+      final updatedSession = ChatSession(
+        id: _sessionId,
+        deviceId: widget.deviceId,
+        licensePlate:
+            _currentLicensePlate.isNotEmpty
+                ? _currentLicensePlate
+                : (session?.licensePlate ?? ''),
+        startTimestamp:
+            session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
+        status: session?.status ?? ChatSessionStatus.draft,
+        lastMessage:
+            isNowReady
+                ? 'מוכן לפרסום'
+                : (currentImgs.isNotEmpty
+                    ? '📷 תמונה (${currentImgs.length})'
+                    : 'הוסרה תמונה'),
+        vehicleData: vehicleData,
+        imagePaths: currentImgs,
+        isReadyToPublish: isNowReady,
+      );
+      await ChatSessionManager.saveSession(updatedSession);
+      await _refreshSession();
+      await _saveMessagesToPrefs();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              currentImgs.isNotEmpty
+                  ? 'התמונה נמחקה (נותרו ${currentImgs.length} תמונות)'
+                  : 'התמונה נמחקה. יש לצרף לפחות תמונה אחת כדי לפרסם.',
+              textDirection: TextDirection.rtl,
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: AppColors.surface,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[WhatsAppChat] Error deleting image: $e');
+      _showError('שגיאה במחיקת התמונה: $e');
+    }
+  }
+
+  /// Batch delete multiple selected image paths
+  Future<void> _deleteSelectedImages(List<String> pathsToDelete) async {
+    if (_publicationState != null || _submitting) {
+      _showError('לא ניתן למחוק תמונות במהלך פרסום או עיבוד');
+      return;
+    }
+    if (pathsToDelete.isEmpty) return;
+
+    try {
+      final pathsSet = pathsToDelete.toSet();
+      final messagesToDelete =
+          _messages.where((m) {
+            if (m.mediaType != 'image') return false;
+            if (m.localFilePath != null && pathsSet.contains(m.localFilePath)) {
+              return true;
+            }
+            if (m.mediaUrl != null && pathsSet.contains(m.mediaUrl))
+              return true;
+            if (m.localFilePath != null) {
+              final fn = m.localFilePath!.split('/').last;
+              if (pathsToDelete.any((p) => p.endsWith(fn))) return true;
+            }
+            return false;
+          }).toList();
+
+      for (final msg in messagesToDelete) {
+        if (msg.localFilePath != null) {
+          try {
+            final f = File(msg.localFilePath!);
+            if (await f.exists()) await f.delete();
+          } catch (_) {}
+        }
+        await SqliteDatabaseHelper.instance.deleteMessage(_sessionId, msg.id);
+        _savedMessages.remove(msg.id);
+        try {
+          await FirebaseFirestore.instance
+              .collection('remote_chats')
+              .doc(widget.deviceId)
+              .collection('messages')
+              .doc(msg.id)
+              .delete();
+        } catch (_) {}
+        if (msg.mediaUrl != null && msg.mediaUrl!.isNotEmpty) {
+          try {
+            final ref = FirebaseStorage.instance.refFromURL(msg.mediaUrl!);
+            await ref.delete();
+          } catch (_) {}
+        }
+      }
+
+      // Directly delete any file in pathsToDelete that wasn't bound to an in-memory message
+      for (final path in pathsToDelete) {
+        try {
+          final f = File(path);
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
+
+      final idsToDelete = messagesToDelete.map((m) => m.id).toSet();
+      setState(() {
+        _messages.removeWhere((m) => idsToDelete.contains(m.id));
+      });
+
+      final session = await SqliteDatabaseHelper.instance.getSession(
+        _sessionId,
+      );
+      final currentImgs = List<String>.from(session?.imagePaths ?? []);
+      currentImgs.removeWhere(
+        (p) =>
+            pathsSet.contains(p) ||
+            pathsToDelete.any((d) => p.endsWith(d.split('/').last)),
+      );
+
+      final vehicleData = session?.vehicleData ?? _vehicleData;
+      final hasPlate =
+          (_currentLicensePlate.isNotEmpty) ||
+          ((vehicleData['license_plate'] ?? '').isNotEmpty);
+      final missing = RemoteValidationService.getMissingFields(vehicleData);
+      final errors = RemoteValidationService.validateValues(vehicleData);
+      final isNowReady =
+          hasPlate &&
+          missing.isEmpty &&
+          errors.isEmpty &&
+          currentImgs.isNotEmpty;
+
+      _allDataFilled = isNowReady;
+
+      final updatedSession = ChatSession(
+        id: _sessionId,
+        deviceId: widget.deviceId,
+        licensePlate:
+            _currentLicensePlate.isNotEmpty
+                ? _currentLicensePlate
+                : (session?.licensePlate ?? ''),
+        startTimestamp:
+            session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
+        status: session?.status ?? ChatSessionStatus.draft,
+        lastMessage:
+            isNowReady
+                ? 'מוכן לפרסום'
+                : (currentImgs.isNotEmpty
+                    ? '📷 תמונה (${currentImgs.length})'
+                    : 'הוסרו תמונות'),
+        vehicleData: vehicleData,
+        imagePaths: currentImgs,
+        isReadyToPublish: isNowReady,
+      );
+      await ChatSessionManager.saveSession(updatedSession);
+      await _refreshSession();
+      await _saveMessagesToPrefs();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'נמחקו ${pathsToDelete.length} תמונות בהצלחה',
+              textDirection: TextDirection.rtl,
+            ),
+            duration: const Duration(seconds: 2),
+            backgroundColor: AppColors.surface,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[WhatsAppChat] Error batch deleting images: $e');
+      _showError('שגיאה במחיקת תמונות: $e');
+    }
+  }
+
+  void _confirmAndDeleteImage(ChatMessageItem message) {
+    if (_publicationState != null || _submitting) {
+      _showError('לא ניתן למחוק תמונות במהלך פרסום');
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder:
+          (ctx) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  const Icon(
+                    Icons.delete_outline_rounded,
+                    color: AppColors.error,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'מחיקת תמונה',
+                    style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              content: Text(
+                'האם למחוק תמונה זו?\nהתמונה תוסר מפרסום הרכב, תימחק מהמכשיר ומהשרת, ולא תישלח לפרסום.',
+                style: GoogleFonts.heebo(
+                  fontSize: 14,
+                  color: AppColors.onSurface,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(
+                    'ביטול',
+                    style: GoogleFonts.heebo(color: AppColors.secondary),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.error,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _deleteImageMessage(message);
+                  },
+                  child: Text(
+                    'מחק תמונה',
+                    style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+          ),
+    );
+  }
+
+  void _showFullScreenImagePreview(ChatMessageItem message) {
+    final hasLocal =
+        message.localFilePath != null &&
+        File(message.localFilePath!).existsSync();
+    final hasUrl = message.mediaUrl != null && message.mediaUrl!.isNotEmpty;
+
+    ImageProvider? imageProvider;
+    if (hasLocal) {
+      imageProvider = FileImage(File(message.localFilePath!));
+    } else if (hasUrl) {
+      imageProvider = NetworkImage(message.mediaUrl!);
+    }
+
+    showDialog(
+      context: context,
+      builder:
+          (ctx) => Dialog(
+            backgroundColor: Colors.black,
+            insetPadding: EdgeInsets.zero,
+            child: Stack(
+              children: [
+                Center(
+                  child: InteractiveViewer(
+                    minScale: 0.5,
+                    maxScale: 4.0,
+                    child:
+                        imageProvider != null
+                            ? Image(image: imageProvider, fit: BoxFit.contain)
+                            : const Icon(
+                              Icons.broken_image_rounded,
+                              color: Colors.white54,
+                              size: 64,
+                            ),
+                  ),
+                ),
+                // Top Action Bar
+                SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        IconButton(
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white,
+                            size: 28,
+                          ),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                        if (_publicationState == null && !_submitting)
+                          IconButton(
+                            tooltip: 'מחק תמונה',
+                            icon: const Icon(
+                              Icons.delete_outline_rounded,
+                              color: Colors.white,
+                              size: 28,
+                            ),
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _confirmAndDeleteImage(message);
+                            },
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+    );
+  }
+
+  void _showManageImagesSheet() async {
+    final session = await SqliteDatabaseHelper.instance.getSession(_sessionId);
+    final imgs = List<String>.from(session?.imagePaths ?? []);
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        final selected = <String>{};
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final imageMessages =
+                _messages.where((m) => m.mediaType == 'image').toList();
+            // Combine paths from session and messages
+            final allPaths = <String>[];
+            for (final p in imgs) {
+              if (!allPaths.contains(p)) allPaths.add(p);
+            }
+            for (final m in imageMessages) {
+              if (m.localFilePath != null &&
+                  !allPaths.contains(m.localFilePath)) {
+                allPaths.add(m.localFilePath!);
+              }
+            }
+
+            return SafeArea(
+              child: Directionality(
+                textDirection: TextDirection.rtl,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Header
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.photo_library_rounded,
+                                color: AppColors.primaryAction,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'תמונות הרכב (${allPaths.length})',
+                                style: GoogleFonts.heebo(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.onSurface,
+                                ),
+                              ),
+                            ],
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close_rounded),
+                            onPressed: () => Navigator.pop(sheetContext),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'בחר תמונות להסרה או לחץ על פח האשפה למחיקה מיידית.',
+                        style: GoogleFonts.heebo(
+                          fontSize: 12.5,
+                          color: AppColors.secondary,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      if (allPaths.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 32),
+                          child: Center(
+                            child: Column(
+                              children: [
+                                const Icon(
+                                  Icons.add_photo_alternate_rounded,
+                                  size: 48,
+                                  color: AppColors.secondary,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'אין תמונות מצורפות לרכב זה',
+                                  style: GoogleFonts.heebo(
+                                    fontSize: 14,
+                                    color: AppColors.secondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
+                      else
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxHeight:
+                                MediaQuery.of(context).size.height * 0.45,
+                          ),
+                          child: GridView.builder(
+                            shrinkWrap: true,
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 3,
+                                  crossAxisSpacing: 8,
+                                  mainAxisSpacing: 8,
+                                  childAspectRatio: 1.0,
+                                ),
+                            itemCount: allPaths.length,
+                            itemBuilder: (context, i) {
+                              final path = allPaths[i];
+                              final isSelected = selected.contains(path);
+                              final file = File(path);
+                              final fileExists = file.existsSync();
+
+                              return GestureDetector(
+                                onTap: () {
+                                  setSheetState(() {
+                                    if (isSelected) {
+                                      selected.remove(path);
+                                    } else {
+                                      selected.add(path);
+                                    }
+                                  });
+                                },
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child:
+                                          fileExists
+                                              ? Image.file(
+                                                file,
+                                                fit: BoxFit.cover,
+                                              )
+                                              : (path.startsWith('http')
+                                                  ? Image.network(
+                                                    path,
+                                                    fit: BoxFit.cover,
+                                                  )
+                                                  : Container(
+                                                    color:
+                                                        AppColors.surfaceSubtle,
+                                                    child: const Icon(
+                                                      Icons
+                                                          .broken_image_rounded,
+                                                    ),
+                                                  )),
+                                    ),
+                                    if (isSelected)
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          color: AppColors.primary.withValues(
+                                            alpha: 0.4,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
+                                          border: Border.all(
+                                            color: AppColors.primary,
+                                            width: 2.5,
+                                          ),
+                                        ),
+                                      ),
+                                    // Selection checkbox indicator
+                                    Positioned(
+                                      top: 4,
+                                      right: 4,
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color:
+                                              isSelected
+                                                  ? AppColors.primary
+                                                  : Colors.black45,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        padding: const EdgeInsets.all(2),
+                                        child: Icon(
+                                          isSelected
+                                              ? Icons.check
+                                              : Icons.circle_outlined,
+                                          size: 16,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                    // Single delete icon
+                                    if (_publicationState == null &&
+                                        !_submitting)
+                                      Positioned(
+                                        bottom: 4,
+                                        left: 4,
+                                        child: GestureDetector(
+                                          onTap: () {
+                                            Navigator.pop(sheetContext);
+                                            final matchingMsg = _messages
+                                                .firstWhere(
+                                                  (m) =>
+                                                      m.localFilePath == path ||
+                                                      m.mediaUrl == path,
+                                                  orElse:
+                                                      () => ChatMessageItem(
+                                                        id:
+                                                            'tmp_${DateTime.now().microsecondsSinceEpoch}',
+                                                        sender: ChatSender.user,
+                                                        localFilePath: path,
+                                                        timestamp:
+                                                            DateTime.now(),
+                                                      ),
+                                                );
+                                            _confirmAndDeleteImage(matchingMsg);
+                                          },
+                                          child: Container(
+                                            decoration: const BoxDecoration(
+                                              color: Colors.black54,
+                                              shape: BoxShape.circle,
+                                            ),
+                                            padding: const EdgeInsets.all(4),
+                                            child: const Icon(
+                                              Icons.delete_outline_rounded,
+                                              size: 16,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+
+                      const SizedBox(height: 14),
+
+                      // Action buttons
+                      Row(
+                        children: [
+                          if (selected.isNotEmpty &&
+                              _publicationState == null &&
+                              !_submitting) ...[
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.error,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 10,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                ),
+                                icon: const Icon(
+                                  Icons.delete_sweep_rounded,
+                                  size: 18,
+                                ),
+                                label: Text(
+                                  'מחק נבחרות (${selected.length})',
+                                  style: GoogleFonts.heebo(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                onPressed: () {
+                                  Navigator.pop(sheetContext);
+                                  _deleteSelectedImages(selected.toList());
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 10,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              icon: const Icon(
+                                Icons.add_photo_alternate_rounded,
+                                size: 18,
+                              ),
+                              label: Text(
+                                'הוסף תמונות',
+                                style: GoogleFonts.heebo(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              onPressed: () {
+                                Navigator.pop(sheetContext);
+                                _showAttachmentMenu();
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _pickVideo() async {
@@ -1112,10 +1893,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => RemoteControlScreen(
-          session: session!,
-          deviceName: widget.deviceName,
-        ),
+        builder:
+            (_) => RemoteControlScreen(
+              session: session!,
+              deviceName: widget.deviceName,
+            ),
       ),
     );
     if (mounted) {
@@ -1192,13 +1974,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (session != null) {
       return ListenableBuilder(
         listenable: session,
-        builder: (context, _) => label(
-          session.isConnected
-              ? 'מחובר'
-              : session.isConnecting
-              ? 'מתחבר'
-              : 'מנותק',
-        ),
+        builder:
+            (context, _) => label(
+              session.isConnected
+                  ? 'מחובר'
+                  : session.isConnecting
+                  ? 'מתחבר'
+                  : 'מנותק',
+            ),
       );
     }
 
@@ -1256,11 +2039,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                     Navigator.pushReplacement(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => ChatSessionsListScreen(
-                          deviceId: widget.deviceId,
-                          deviceName: widget.deviceName,
-                          session: widget.session,
-                        ),
+                        builder:
+                            (context) => ChatSessionsListScreen(
+                              deviceId: widget.deviceId,
+                              deviceName: widget.deviceName,
+                              session: widget.session,
+                            ),
                       ),
                     );
                   },
@@ -1405,9 +2189,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         !isUser &&
         (message.text.contains('המודעה מוכנה') ||
             message.text.contains('טיוטה'));
-    final missingFields = !isUser
-        ? RemoteValidationService.getMissingFields(_vehicleData)
-        : <String>[];
+    final missingFields =
+        !isUser
+            ? RemoteValidationService.getMissingFields(_vehicleData)
+            : <String>[];
     final hasPlate =
         (_vehicleData['license_plate'] ?? '').isNotEmpty ||
         _currentLicensePlate.isNotEmpty;
@@ -1508,8 +2293,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         (plateToLookup != null && plateToLookup.isNotEmpty
                 ? plateToLookup
                 : (_currentLicensePlate.isNotEmpty
-                      ? _currentLicensePlate
-                      : (_vehicleData['license_plate'] ?? '')))
+                    ? _currentLicensePlate
+                    : (_vehicleData['license_plate'] ?? '')))
             .trim();
 
     showModalBottomSheet(
@@ -1599,12 +2384,13 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               required IconData icon,
               required List<Widget> children,
             }) {
-              final visibleChildren = children.where((w) {
-                if (w is SizedBox) {
-                  return w.height != 0 && w.width != 0;
-                }
-                return true;
-              }).toList();
+              final visibleChildren =
+                  children.where((w) {
+                    if (w is SizedBox) {
+                      return w.height != 0 && w.width != 0;
+                    }
+                    return true;
+                  }).toList();
               if (visibleChildren.isEmpty) return const SizedBox.shrink();
 
               return Container(
@@ -1841,6 +2627,63 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                             ),
                           ],
                         ),
+
+                        // 5. היסטוריית בעלויות
+                        buildSectionCard(
+                          title: 'היסטוריית בעלויות',
+                          icon: Icons.history_edu_rounded,
+                          children: [
+                            buildInfoRow(
+                              'יד (סה"כ)',
+                              displayData['hand'],
+                              icon: Icons.format_list_numbered_rounded,
+                            ),
+                            buildInfoRow(
+                              'בעלות קודמת',
+                              displayData['previous_ownership'],
+                              icon: Icons.person_add_alt_1_rounded,
+                            ),
+                            Builder(
+                              builder: (context) {
+                                List<dynamic> history = [];
+                                try {
+                                  if (displayData['history_records'] != null) {
+                                    history = jsonDecode(
+                                      displayData['history_records']!,
+                                    );
+                                  }
+                                } catch (_) {}
+                                if (history.isEmpty)
+                                  return const SizedBox.shrink();
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Divider(
+                                      height: 16,
+                                      color: AppColors.border,
+                                    ),
+                                    ...history.map((r) {
+                                      final dt =
+                                          r['baalut_dt']?.toString() ?? '';
+                                      final baalut =
+                                          r['baalut']?.toString() ?? '';
+                                      String formattedDt = dt;
+                                      if (dt.length == 6) {
+                                        formattedDt =
+                                            '${dt.substring(4, 6)}/${dt.substring(0, 4)}';
+                                      }
+                                      return buildInfoRow(
+                                        'תאריך: $formattedDt',
+                                        baalut,
+                                        icon: Icons.history_rounded,
+                                      );
+                                    }).toList(),
+                                  ],
+                                );
+                              },
+                            ),
+                          ],
+                        ),
                       ],
 
                       const SizedBox(height: 10),
@@ -1871,36 +2714,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                           const SizedBox(width: 10),
                           Expanded(
                             child: ElevatedButton.icon(
-                              onPressed: () async {
-                                setState(() {
-                                  _vehicleData.addAll(displayData);
-                                  if (displayData['license_plate']
-                                          ?.isNotEmpty ==
-                                      true) {
-                                    _currentLicensePlate =
-                                        displayData['license_plate']!;
-                                  }
-                                });
-                                await _persistSessionUpdate(
-                                  'עודכנו פרטי רכב מ-gov.il',
-                                );
+                              onPressed: () {
                                 if (sheetContext.mounted) {
                                   Navigator.pop(sheetContext);
                                 }
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'פרטי הרכב עודכנו בהצלחה בטיוטת השיחה',
-                                      ),
-                                      backgroundColor: AppColors.success,
-                                    ),
-                                  );
-                                }
                               },
-                              icon: const Icon(Icons.check_rounded, size: 18),
+                              icon: const Icon(Icons.close_rounded, size: 18),
                               label: Text(
-                                'החל נתונים בשיחה',
+                                'סגור',
                                 style: GoogleFonts.heebo(
                                   fontWeight: FontWeight.bold,
                                 ),
@@ -1945,11 +2766,16 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     void action(String label, VoidCallback callback) => actions.add(
       ActionChip(label: Text(label), onPressed: busy ? null : callback),
     );
-    final plate = _currentLicensePlate.isNotEmpty
-        ? _currentLicensePlate
-        : (_vehicleData['license_plate'] ?? '');
+    final plate =
+        _currentLicensePlate.isNotEmpty
+            ? _currentLicensePlate
+            : (_vehicleData['license_plate'] ?? '');
     if (plate.isNotEmpty || _vehicleData.isNotEmpty)
       action('הצגת פרטי רכב', () => _showAggregatedGovVehicleDetails(plate));
+    final currentImageCount =
+        _messages.where((m) => m.mediaType == 'image').length;
+    if (currentImageCount > 0)
+      action('תמונות ($currentImageCount)', () => _showManageImagesSheet());
     if (state == null && _allDataFilled)
       action('פרסם עכשיו', () => _onPublishTapped());
     if (state == 'queued')
@@ -1983,6 +2809,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   Widget _buildQuickActionChips(String text) {
     if (_publicationState != null || _submitting)
       return const SizedBox.shrink();
+    final imageCount = _messages.where((m) => m.mediaType == 'image').length;
     return Wrap(
       spacing: 8,
       children: [
@@ -1994,6 +2821,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           label: const Text('צלם תמונה'),
           onPressed: () => _pickImage(ImageSource.camera),
         ),
+        if (imageCount > 0)
+          ActionChip(
+            avatar: const Icon(Icons.photo_library_outlined, size: 16),
+            label: Text('ניהול תמונות ($imageCount)'),
+            onPressed: _showManageImagesSheet,
+          ),
       ],
     );
   }
@@ -2006,72 +2839,121 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          if (hasLocal)
-            Image.file(
-              File(message.localFilePath!),
-              width: double.infinity,
-              height: 200,
-              fit: BoxFit.cover,
-            )
-          else if (hasUrl)
-            Image.network(
-              message.mediaUrl!,
-              width: double.infinity,
-              height: 200,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => Container(
+      child: GestureDetector(
+        onTap: () => _showFullScreenImagePreview(message),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            if (hasLocal)
+              Image.file(
+                File(message.localFilePath!),
+                width: double.infinity,
+                height: 200,
+                fit: BoxFit.cover,
+              )
+            else if (hasUrl)
+              Image.network(
+                message.mediaUrl!,
+                width: double.infinity,
+                height: 200,
+                fit: BoxFit.cover,
+                errorBuilder:
+                    (_, _, _) => Container(
+                      color: AppColors.surfaceSubtle,
+                      height: 140,
+                      child: const Center(
+                        child: Icon(
+                          Icons.broken_image_rounded,
+                          color: AppColors.secondary,
+                          size: 36,
+                        ),
+                      ),
+                    ),
+              )
+            else
+              Container(
                 color: AppColors.surfaceSubtle,
                 height: 140,
                 child: const Center(
                   child: Icon(
-                    Icons.broken_image_rounded,
+                    Icons.image_rounded,
                     color: AppColors.secondary,
                     size: 36,
                   ),
                 ),
               ),
-            )
-          else
-            Container(
-              color: AppColors.surfaceSubtle,
-              height: 140,
-              child: const Center(
-                child: Icon(
-                  Icons.image_rounded,
-                  color: AppColors.secondary,
-                  size: 36,
+            if (message.isUploading)
+              Container(
+                color: Colors.black45,
+                width: double.infinity,
+                height: 200,
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(
+                        value: message.uploadProgress,
+                        color: AppColors.primaryAction,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'מעלה... ${(message.uploadProgress * 100).toInt()}%',
+                        style: GoogleFonts.heebo(
+                          color: Colors.white,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          if (message.isUploading)
-            Container(
-              color: Colors.black45,
-              width: double.infinity,
-              height: 200,
-              child: Center(
-                child: Column(
+            // Delete button overlay
+            if (_publicationState == null && !_submitting)
+              Positioned(
+                top: 8,
+                left: 8,
+                child: Material(
+                  color: Colors.black54,
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: () => _confirmAndDeleteImage(message),
+                    child: const Padding(
+                      padding: EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.delete_outline_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            // Zoom indicator
+            Positioned(
+              bottom: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black45,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    CircularProgressIndicator(
-                      value: message.uploadProgress,
-                      color: AppColors.primaryAction,
-                    ),
-                    const SizedBox(height: 8),
+                    Icon(Icons.zoom_in_rounded, size: 14, color: Colors.white),
+                    SizedBox(width: 3),
                     Text(
-                      'מעלה... ${(message.uploadProgress * 100).toInt()}%',
-                      style: GoogleFonts.heebo(
-                        color: Colors.white,
-                        fontSize: 12,
-                      ),
+                      'הגדל',
+                      style: TextStyle(color: Colors.white, fontSize: 10),
                     ),
                   ],
                 ),
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -2102,11 +2984,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 LinearProgressIndicator(
-                  value: isPlaying && _currentAudioDuration.inMilliseconds > 0
-                      ? (_currentAudioPosition.inMilliseconds /
-                                _currentAudioDuration.inMilliseconds)
-                            .clamp(0.0, 1.0)
-                      : 0.0,
+                  value:
+                      isPlaying && _currentAudioDuration.inMilliseconds > 0
+                          ? (_currentAudioPosition.inMilliseconds /
+                                  _currentAudioDuration.inMilliseconds)
+                              .clamp(0.0, 1.0)
+                          : 0.0,
                   backgroundColor: AppColors.border,
                   color: AppColors.primaryAction,
                   minHeight: 4,
@@ -2229,112 +3112,113 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
             // Center: Text Input or Recording State
             Expanded(
-              child: _isRecording
-                  ? Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppColors.errorSoft,
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(
-                          color: AppColors.error.withValues(alpha: 0.3),
+              child:
+                  _isRecording
+                      ? Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
                         ),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: AppColors.error,
-                            ),
+                        decoration: BoxDecoration(
+                          color: AppColors.errorSoft,
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: AppColors.error.withValues(alpha: 0.3),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'הקלטת הודעה... ${_formatDuration(_recordSeconds)}',
-                            style: GoogleFonts.heebo(
-                              color: AppColors.error,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: AppColors.error,
+                              ),
                             ),
-                          ),
-                          const Spacer(),
-                          TextButton(
-                            onPressed: () =>
-                                _stopAndSendRecording(cancel: true),
-                            child: Text(
-                              'ביטול',
+                            const SizedBox(width: 8),
+                            Text(
+                              'הקלטת הודעה... ${_formatDuration(_recordSeconds)}',
                               style: GoogleFonts.heebo(
                                 color: AppColors.error,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                    )
-                  : Container(
-                      decoration: BoxDecoration(
-                        color: AppColors.surfaceSubtle,
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: AppColors.border),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _textController,
-                              style: GoogleFonts.heebo(
-                                color: AppColors.onSurface,
-                                fontSize: 15,
+                            const Spacer(),
+                            TextButton(
+                              onPressed:
+                                  () => _stopAndSendRecording(cancel: true),
+                              child: Text(
+                                'ביטול',
+                                style: GoogleFonts.heebo(
+                                  color: AppColors.error,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
-                              textDirection: TextDirection.rtl,
-                              maxLines: 4,
-                              minLines: 1,
-                              decoration: InputDecoration(
-                                hintText: '...הודעה למכשיר',
-                                hintStyle: GoogleFonts.heebo(
+                            ),
+                          ],
+                        ),
+                      )
+                      : Container(
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceSubtle,
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _textController,
+                                style: GoogleFonts.heebo(
+                                  color: AppColors.onSurface,
+                                  fontSize: 15,
+                                ),
+                                textDirection: TextDirection.rtl,
+                                maxLines: 4,
+                                minLines: 1,
+                                decoration: InputDecoration(
+                                  hintText: '...הודעה למכשיר',
+                                  hintStyle: GoogleFonts.heebo(
+                                    color: AppColors.secondary,
+                                    fontSize: 14,
+                                  ),
+                                  hintTextDirection: TextDirection.rtl,
+                                  border: InputBorder.none,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 10,
+                                  ),
+                                ),
+                                onChanged: (text) => setState(() {}),
+                                onSubmitted: (_) => _sendTextMessage(),
+                              ),
+                            ),
+                            GestureDetector(
+                              onLongPressStart: (_) => _startRecording(),
+                              onLongPressEnd:
+                                  (_) => _stopAndSendRecording(cancel: false),
+                              child: IconButton(
+                                tooltip: 'הקלטת הודעה',
+                                icon: const Icon(
+                                  Icons.mic_none_rounded,
                                   color: AppColors.secondary,
-                                  fontSize: 14,
+                                  size: 22,
                                 ),
-                                hintTextDirection: TextDirection.rtl,
-                                border: InputBorder.none,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 10,
-                                ),
+                                onPressed: () {
+                                  if (_isRecording) {
+                                    _stopAndSendRecording(cancel: false);
+                                  } else {
+                                    _startRecording();
+                                  }
+                                },
                               ),
-                              onChanged: (text) => setState(() {}),
-                              onSubmitted: (_) => _sendTextMessage(),
                             ),
-                          ),
-                          GestureDetector(
-                            onLongPressStart: (_) => _startRecording(),
-                            onLongPressEnd: (_) =>
-                                _stopAndSendRecording(cancel: false),
-                            child: IconButton(
-                              tooltip: 'הקלטת הודעה',
-                              icon: const Icon(
-                                Icons.mic_none_rounded,
-                                color: AppColors.secondary,
-                                size: 22,
-                              ),
-                              onPressed: () {
-                                if (_isRecording) {
-                                  _stopAndSendRecording(cancel: false);
-                                } else {
-                                  _startRecording();
-                                }
-                              },
-                            ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
             ),
             const SizedBox(width: 8),
 
@@ -2401,30 +3285,114 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   @override
   void didUpdateWidget(covariant MissingFieldsInlineForm oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.missingFields != widget.missingFields ||
-        oldWidget.currentData != widget.currentData) {
-      _initFields();
+    _initFields();
+  }
+
+  List<String> get _fieldsToShow {
+    final fields = List<String>.from(widget.missingFields);
+    if (!fields.contains('km')) {
+      fields.add('km');
     }
+    if (!fields.contains('previous_ownership')) {
+      fields.add('previous_ownership');
+    }
+    if (widget.currentData['force_show_current_ownership'] == 'true' &&
+        !fields.contains('current_ownership')) {
+      fields.add('current_ownership');
+    }
+    return fields;
   }
 
   void _initFields() {
-    for (final field in widget.missingFields) {
-      final existingVal = widget.currentData[field] ?? '';
+    for (final field in _fieldsToShow) {
+      var existingVal = (widget.currentData[field] ?? '').trim();
+      if (field == 'km' && (existingVal.isEmpty || existingVal == '0')) {
+        final estKm = (widget.currentData['estimatedKm'] ??
+                widget.currentData['kilometer_test_aharon'] ??
+                '')
+            .trim();
+        if (estKm.isNotEmpty && estKm != '0') {
+          existingVal = estKm;
+        }
+      }
+      if (field == 'previous_ownership' && existingVal.isEmpty) {
+        final prev = (widget.currentData['ownershipHistory'] ??
+                widget.currentData['prev_ownership'] ??
+                widget.currentData['previousOwnership'] ??
+                '')
+            .trim();
+        if (prev.isNotEmpty) {
+          existingVal = prev;
+        }
+      }
+
       if (_isDropdownField(field)) {
         final options = _getFieldOptions(field);
         if (options.contains(existingVal)) {
-          _dropdownValues[field] = existingVal;
-        } else {
-          _dropdownValues[field] = null;
+          if (_dropdownValues[field] == null ||
+              _dropdownValues[field]!.isEmpty) {
+            _dropdownValues[field] = existingVal;
+          }
+        } else if (existingVal == 'פרטי' && options.contains('פרטית')) {
+          if (_dropdownValues[field] == null ||
+              _dropdownValues[field]!.isEmpty) {
+            _dropdownValues[field] = 'פרטית';
+          }
+        } else if (existingVal == 'פרטית' && options.contains('פרטי')) {
+          if (_dropdownValues[field] == null ||
+              _dropdownValues[field]!.isEmpty) {
+            _dropdownValues[field] = 'פרטי';
+          }
         }
       } else {
         if (!_controllers.containsKey(field)) {
-          _controllers[field] = TextEditingController(text: existingVal);
+          final c = TextEditingController(text: existingVal);
+          c.addListener(() {
+            if (mounted) setState(() {});
+          });
+          _controllers[field] = c;
         } else {
-          _controllers[field]!.text = existingVal;
+          if ((_controllers[field]!.text.trim().isEmpty ||
+                  _controllers[field]!.text.trim() == '0') &&
+              existingVal.isNotEmpty &&
+              existingVal != '0') {
+            _controllers[field]!.text = existingVal;
+          }
         }
       }
     }
+  }
+
+  bool _isFieldFilled(String field) {
+    if (_isDropdownField(field)) {
+      final val = _dropdownValues[field]?.trim();
+      if (val == null || val.isEmpty || val == 'בחר...' || val == '0') {
+        return false;
+      }
+      return true;
+    } else {
+      final val = _controllers[field]?.text.trim() ?? '';
+      if (val.isEmpty || val == '0' || val == 'הזן...') {
+        return false;
+      }
+      final digitsOnly = val.replaceAll(RegExp(r'[^\d]'), '');
+      if (digitsOnly.isNotEmpty) {
+        final n = int.tryParse(digitsOnly);
+        if (n != null && n == 0) return false;
+      }
+      return true;
+    }
+  }
+
+  bool get _canSave {
+    if (_isSaving) return false;
+    if (_fieldsToShow.isEmpty) return false;
+    for (final field in _fieldsToShow) {
+      if (!_isFieldFilled(field)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   @override
@@ -2461,13 +3429,13 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   Future<void> _handleSave() async {
-    if (_isSaving) return;
+    if (!_canSave || _isSaving) return;
     setState(() => _isSaving = true);
     try {
       final updated = <String, String>{};
-      for (final field in widget.missingFields) {
+      for (final field in _fieldsToShow) {
         if (_isDropdownField(field)) {
-          final val = _dropdownValues[field];
+          final val = _dropdownValues[field]?.trim();
           if (val != null && val.isNotEmpty) {
             updated[field] = val;
           }
@@ -2478,7 +3446,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           }
         }
       }
-      await widget.onSave(updated);
+      if (updated.isNotEmpty) {
+        await widget.onSave(updated);
+      }
     } catch (e) {
       debugPrint('[MissingFieldsInlineForm] Error saving fields: $e');
     } finally {
@@ -2490,7 +3460,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.missingFields.isEmpty) return const SizedBox.shrink();
+    if (_fieldsToShow.isEmpty) return const SizedBox.shrink();
 
     return Container(
       margin: const EdgeInsets.only(top: 8, bottom: 4),
@@ -2533,28 +3503,12 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'להשלמת פרטי הרכב:',
+                  'להשלמת פרטי רכב חסרים:',
                   textDirection: TextDirection.rtl,
                   style: GoogleFonts.heebo(
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
                     color: AppColors.onSurface,
-                  ),
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: AppColors.primarySoft,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  '${widget.missingFields.length} חסרים',
-                  textDirection: TextDirection.rtl,
-                  style: GoogleFonts.heebo(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.primaryAction,
                   ),
                 ),
               ),
@@ -2565,7 +3519,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           const SizedBox(height: 10),
 
           // Fields list
-          ...widget.missingFields.map((field) => _buildFieldRow(field)),
+          ..._fieldsToShow.map((field) => _buildFieldRow(field)),
 
           const SizedBox(height: 12),
 
@@ -2574,21 +3528,22 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             width: double.infinity,
             height: 42,
             child: ElevatedButton.icon(
-              onPressed: _isSaving ? null : _handleSave,
-              icon: _isSaving
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
+              onPressed: _canSave ? _handleSave : null,
+              icon:
+                  _isSaving
+                      ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                      : const Icon(
+                        Icons.check_rounded,
                         color: Colors.white,
+                        size: 20,
                       ),
-                    )
-                  : const Icon(
-                      Icons.check_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
               label: Text(
                 _isSaving ? 'שומר פרטים...' : 'שמור פרטים',
                 style: GoogleFonts.heebo(
@@ -2599,7 +3554,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
               ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primaryAction,
+                disabledBackgroundColor:
+                    AppColors.primaryAction.withValues(alpha: 0.38),
                 foregroundColor: Colors.white,
+                disabledForegroundColor:
+                    Colors.white.withValues(alpha: 0.6),
                 elevation: 0,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
@@ -2646,9 +3605,10 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             // 2. Input Field on the Left (Second child in RTL - physically to the left of field name!)
             Expanded(
               flex: 6,
-              child: isDropdown
-                  ? _buildDropdownInput(field)
-                  : _buildTextInput(field),
+              child:
+                  isDropdown
+                      ? _buildDropdownInput(field)
+                      : _buildTextInput(field),
             ),
           ],
         ),
@@ -2686,19 +3646,20 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             color: AppColors.secondary,
             size: 20,
           ),
-          items: options.map((opt) {
-            return DropdownMenuItem<String>(
-              value: opt,
-              child: Text(
-                opt,
-                textDirection: TextDirection.rtl,
-                style: GoogleFonts.heebo(
-                  fontSize: 13,
-                  color: AppColors.onSurface,
-                ),
-              ),
-            );
-          }).toList(),
+          items:
+              options.map((opt) {
+                return DropdownMenuItem<String>(
+                  value: opt,
+                  child: Text(
+                    opt,
+                    textDirection: TextDirection.rtl,
+                    style: GoogleFonts.heebo(
+                      fontSize: 13,
+                      color: AppColors.onSurface,
+                    ),
+                  ),
+                );
+              }).toList(),
           onChanged: (val) {
             setState(() {
               _dropdownValues[field] = val;
@@ -2733,6 +3694,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       ),
       child: TextField(
         controller: controller,
+        onChanged: (_) => setState(() {}),
         textDirection: isNumeric ? TextDirection.ltr : TextDirection.rtl,
         textAlign: isNumeric ? TextAlign.center : TextAlign.right,
         keyboardType: isNumeric ? TextInputType.number : TextInputType.text,

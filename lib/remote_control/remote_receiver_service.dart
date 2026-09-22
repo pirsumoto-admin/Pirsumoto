@@ -77,14 +77,15 @@ class RemoteControlReceiverService {
         '[RemoteControlReceiver] Initialized receiver and Firebase chat listener for device: $_deviceId',
       );
 
-      // Start persistent Android Foreground Daemon so the process stays alive 24/7
+      // Android starts the foreground host independently in MainActivity. This
+      // request is an idempotent fallback, and reports launch failures honestly.
       if (Platform.isAndroid) {
         try {
-          const MethodChannel(
+          final accepted = await const MethodChannel(
             'com.pirsumoto/accessibility',
-          ).invokeMethod('startDaemonService');
+          ).invokeMethod<bool>('startDaemonService');
           debugPrint(
-            '[RemoteControlReceiver] Started persistent Android foreground daemon',
+            '[RemoteControlReceiver] Foreground daemon start accepted: $accepted',
           );
         } catch (e) {
           debugPrint(

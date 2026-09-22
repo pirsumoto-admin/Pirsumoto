@@ -72,6 +72,8 @@ class MainActivity : FlutterActivity() {
         // prepareForAutoPublishIntent(intent)
         super.onCreate(savedInstanceState)
         currentActivity = this
+        // Independent of Flutter/Firebase initialization and network availability.
+        PirsumotoBackgroundService.start(applicationContext)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -79,10 +81,10 @@ class MainActivity : FlutterActivity() {
             @Suppress("DEPRECATION")
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
             )
         }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUI()
     }
 
@@ -90,6 +92,8 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         isAppInForeground = true
         currentActivity = this
+        // Reassert foreground state (and its notification) on every app return.
+        PirsumotoBackgroundService.start(applicationContext)
     }
 
     override fun onPause() {
@@ -244,8 +248,7 @@ class MainActivity : FlutterActivity() {
                 return@setMethodCallHandler
             }
             if (call.method == "startDaemonService") {
-                PirsumotoBackgroundService.start(context)
-                result.success(true)
+                result.success(PirsumotoBackgroundService.start(context))
                 return@setMethodCallHandler
             }
             if (call.method == "stopDaemonService") {
@@ -255,6 +258,15 @@ class MainActivity : FlutterActivity() {
             }
             if (call.method == "isDaemonRunning") {
                 result.success(PirsumotoBackgroundService.isRunning)
+                return@setMethodCallHandler
+            }
+
+            if (call.method == "showToast") {
+                val message = call.argument<String>("message") ?: ""
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+                }
+                result.success(true)
                 return@setMethodCallHandler
             }
 
@@ -310,13 +322,25 @@ class MainActivity : FlutterActivity() {
                 return@setMethodCallHandler
             }
 
-            val rootNode = service.rootInActiveWindow
+            var rootNode = service.rootInActiveWindow
             if (call.argument<Boolean>("requireAppWindow") == true) {
                 val power = getSystemService(Context.POWER_SERVICE) as PowerManager
-                val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
-                if (!isAppInForeground || !power.isInteractive || keyguard.isKeyguardLocked ||
-                    rootNode?.packageName?.toString() != packageName) {
-                    result.error("AUTOMATION_INTERRUPTED", "Publication window is not active or the phone is locked", null)
+                if (!power.isInteractive) {
+                    try {
+                        @Suppress("DEPRECATION")
+                        val wl = power.newWakeLock(
+                            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                            "pirsumoto:automation_wakeup"
+                        )
+                        wl.acquire(3000)
+                    } catch (e: Exception) {
+                        Log.w("A11Y", "Failed to acquire wakeup lock: $e")
+                    }
+                }
+
+                val currentPkg = rootNode?.packageName?.toString()
+                if (!isAppInForeground || (currentPkg != null && currentPkg != packageName)) {
+                    result.error("AUTOMATION_INTERRUPTED", "Publication window is not active", null)
                     return@setMethodCallHandler
                 }
                 if (call.method == "checkAutomationWindow") {

@@ -170,14 +170,31 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       this,
       pause: () async {
         _publicationPaused = true;
+        if (mounted) {
+          setState(() {
+            _isPaused = true;
+            _showPauseButton = true;
+            _hideOverlayForStep = false;
+            _statusMessage =
+                'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך.';
+          });
+        }
         await _automationService?.pauseAndWait();
-        if (mounted) setState(() => _isPaused = true);
       },
       resume: () {
         _publicationPaused = false;
         if (_publicationStopped) return;
         _automationService?.resumeAutomation();
-        if (mounted) setState(() => _isPaused = false);
+        if (mounted) {
+          setState(() {
+            _isPaused =
+                _automationService is Yad2AccessibilityAutomationService
+                    ? _automationService.isPaused as bool
+                    : false;
+            _showPauseButton = true;
+            _statusMessage = 'ממשיך משלב $_savedStepDescription';
+          });
+        }
       },
       stop: () async {
         _publicationStopped = true;
@@ -673,36 +690,35 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               );
             }
           },
-          onPhaseComplete: (phase) {
-            if (mounted) setState(() => _statusMessage = phase.description);
+          onPhaseChanged: (phase) {
+            if (!mounted) return;
+            setState(() {
+              _isPaused = _automationService.isPaused as bool;
+              _statusMessage =
+                  _isPaused
+                      ? 'מושהה בשלב ${phase.name}: ${phase.description}. לחץ המשך מאותו שלב.'
+                      : 'שלב ${phase.name}: ${phase.description}';
+              if (_isPaused) {
+                _showPauseButton = true;
+                _hideOverlayForStep = false;
+              } else {
+                _isLoginRequired = false;
+              }
+            });
           },
           onPhaseError: (phase, error) {
+            _publicationPaused = true;
             FirebaseChatReceiver.reportAutomationStatus(
               identity: widget.publishData.publicationIdentity,
               statusType: 'stuck',
-              text: 'האוטומציה נתקעה: $error',
-            );
-            unawaited(
-              // [WHATSAPP-DISABLED] _notifyWhatsAppAutomationStopped disabled.
-              // _notifyWhatsAppAutomationStopped(
-              //   stepName: phase.description,
-              //   error: error,
-              // ),
-              Future.value(),
+              text: error,
             );
             if (mounted) {
               setState(() {
                 _isPaused = true;
-                _showPauseButton = false;
-                _statusMessage = 'שגיאה: $error';
-              });
-              Future.delayed(const Duration(seconds: 5), () {
-                if (mounted) {
-                  setState(() {
-                    _statusMessage = '';
-                    _showPauseButton = true;
-                  });
-                }
+                _showPauseButton = true;
+                _hideOverlayForStep = false;
+                _statusMessage = error;
               });
             }
           },
@@ -736,16 +752,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             }
           },
           onLoginRequired: () {
-            FirebaseChatReceiver.reportAutomationStatus(
-              identity: widget.publishData.publicationIdentity,
-              statusType: 'stuck',
-              text: 'נדרשת התחברות ליד2',
-            );
             if (mounted && !_isReloading) {
-              setState(() {
-                _isLoginRequired = true;
-                _statusMessage = 'נדרשת התחברות לחשבון יד2';
-              });
+              setState(() => _isLoginRequired = true);
               _openPresetLoginDialog();
             }
           },
@@ -990,7 +998,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ),
               ),
             ),
-          if (_showPauseButton && !_hideOverlayForStep)
+          if ((_showPauseButton || _isPaused) &&
+              (!_hideOverlayForStep || _isPaused) &&
+              !_publicationStopped &&
+              !_automationComplete)
             Positioned(
               top: MediaQuery.of(context).padding.top + 4,
               left: 16,
@@ -1020,10 +1031,15 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     return;
                   }
                   if (_isPaused) {
+                    _publicationPaused = false;
                     _automationService?.resumeAutomation();
                     setState(() {
-                      _isPaused = false;
-                      _statusMessage = 'ממשיך אוטומציה...';
+                      _isPaused =
+                          _automationService
+                                  is Yad2AccessibilityAutomationService
+                              ? _automationService.isPaused as bool
+                              : false;
+                      _statusMessage = 'ממשיך משלב $_savedStepDescription';
                     });
                     FirebaseChatReceiver.reportAutomationStatus(
                       identity: widget.publishData.publicationIdentity,
@@ -1035,12 +1051,13 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     setState(() {
                       _isPaused = true;
                       _statusMessage =
-                          'האוטומציה מושהית. לחץ על המשך כדי לחזור';
+                          'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך.';
                     });
                     FirebaseChatReceiver.reportAutomationStatus(
                       identity: widget.publishData.publicationIdentity,
                       statusType: 'paused',
-                      text: '🛑 האוטומציה ביד2 הופסקה (הושהתה) על ידי המשתמש',
+                      text:
+                          'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך מאותו שלב.',
                     );
                   }
                 },
@@ -1060,7 +1077,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ),
               ),
             ),
-          if (_showPauseButton && _isPaused && !_hideOverlayForStep)
+          if (_isPaused && !_publicationStopped && !_automationComplete)
             Positioned(
               top: MediaQuery.of(context).padding.top + 4,
               right: 16,
@@ -1116,8 +1133,18 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                       ),
                       elevation: 6,
                     ),
-                    onPressed: () {
-                      _automationService?.stepBack();
+                    onPressed: () async {
+                      await _automationService?.stepBack();
+                      if (!mounted || _publicationStopped) return;
+                      final identity = widget.publishData.publicationIdentity;
+                      if (identity != null) {
+                        await FirebaseChatReceiver.setLocalPaused(
+                          identity,
+                          false,
+                        );
+                        return;
+                      }
+                      _publicationPaused = false;
                       _automationService?.resumeAutomation();
                       setState(() {
                         _isPaused = false;
@@ -1209,6 +1236,15 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     );
   }
 
+  String get _savedStepDescription {
+    final service = _automationService;
+    if (service is Yad2AccessibilityAutomationService) {
+      final phase = service.pausedPhase ?? service.currentPhase;
+      if (phase != null) return '${phase.name}: ${phase.description}';
+    }
+    return _statusMessage;
+  }
+
   Widget _buildStatusOverlay() {
     if (_statusMessage.isEmpty) {
       return const SizedBox.shrink();
@@ -1233,40 +1269,44 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
 
     return Positioned(
-      top: 0,
+      top: _isPaused ? null : 0,
+      bottom: _isPaused ? 0 : null,
       left: 0,
       right: 0,
-      child: Container(
-        padding: EdgeInsets.fromLTRB(
-          12,
-          MediaQuery.of(context).padding.top + 6,
-          12,
-          6,
-        ),
-        color: bgColor,
-        child: Row(
-          children: [
-            if (_automationComplete)
-              Icon(icon, color: iconColor, size: 16)
-            else
-              const SizedBox(width: 16, height: 16),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _statusMessage,
-                style: const TextStyle(color: Colors.white, fontSize: 12),
-                textAlign: TextAlign.right,
-              ),
-            ),
-            if (_automationComplete)
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text(
-                  'סגור',
-                  style: TextStyle(color: Colors.white),
+      child: IgnorePointer(
+        ignoring: !_automationComplete,
+        child: Container(
+          padding: EdgeInsets.fromLTRB(
+            12,
+            MediaQuery.of(context).padding.top + 6,
+            12,
+            6,
+          ),
+          color: bgColor,
+          child: Row(
+            children: [
+              if (_automationComplete)
+                Icon(icon, color: iconColor, size: 16)
+              else
+                const SizedBox(width: 16, height: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _statusMessage,
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  textAlign: TextAlign.right,
                 ),
               ),
-          ],
+              if (_automationComplete)
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text(
+                    'סגור',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

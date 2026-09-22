@@ -15,9 +15,9 @@ import androidx.core.app.NotificationCompat
 
 /**
  * Persistent Foreground Service for Pirsumoto.
- * Keeps the application process alive 24/7 in the background so that
- * the Firebase chat receiver, remote control signaling, and automation listeners
- * remain continuously active and responsive even when the UI is closed.
+ * Gives the remote-control/automation host foreground process priority.
+ * START_STICKY lets Android recreate it after process reclamation; it does not
+ * override a user force-stop or guarantee that the OS will never kill it.
  */
 class PirsumotoBackgroundService : Service() {
 
@@ -32,28 +32,30 @@ class PirsumotoBackgroundService : Service() {
         var isRunning = false
             private set
 
-        fun start(context: Context) {
+        /** Returns whether Android accepted the start request. */
+        fun start(context: Context): Boolean {
             val intent = Intent(context, PirsumotoBackgroundService::class.java).apply {
                 action = ACTION_START
             }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return try {
+                val component = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
                 } else {
                     context.startService(intent)
                 }
                 Log.i(TAG, "PirsumotoBackgroundService start requested")
+                component != null
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start PirsumotoBackgroundService: ${e.message}", e)
+                false
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, PirsumotoBackgroundService::class.java).apply {
-                action = ACTION_STOP
-            }
             try {
-                context.startService(intent)
+                // Stopping must not create a new service or require a permitted
+                // background-service launch on Android 8+.
+                context.stopService(Intent(context, PirsumotoBackgroundService::class.java))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to stop PirsumotoBackgroundService: ${e.message}", e)
             }
@@ -75,26 +77,32 @@ class PirsumotoBackgroundService : Service() {
             return START_NOT_STICKY
         }
 
-        startDaemonForeground()
-        return START_STICKY
+        // A null intent is expected when Android recreates a sticky service.
+        return if (startDaemonForeground()) START_STICKY else START_NOT_STICKY
     }
 
-    private fun startDaemonForeground() {
-        try {
+    private fun startDaemonForeground(): Boolean {
+        return try {
             val notification = buildNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 )
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
             isRunning = true
             Log.i(TAG, "PirsumotoBackgroundService is now running in foreground (STICKY)")
+            true
         } catch (e: Exception) {
+            isRunning = false
             Log.e(TAG, "Failed to startDaemonForeground: ${e.message}", e)
+            // Do not leave a failed startForegroundService request alive until
+            // Android's foreground-promotion deadline crashes the process.
+            stopSelf()
+            false
         }
     }
 
@@ -111,23 +119,13 @@ class PirsumotoBackgroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.w(TAG, "onTaskRemoved triggered (app swiped from recents). Restarting background service...")
-        val restartIntent = Intent(applicationContext, PirsumotoBackgroundService::class.java).apply {
-            action = ACTION_START
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                applicationContext.startForegroundService(restartIntent)
-            } else {
-                applicationContext.startService(restartIntent)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to restart daemon onTaskRemoved: ${e.message}", e)
-        }
+        // stopWithTask=false keeps this service running. A redundant background
+        // start here can be rejected on Android 12+; system restarts use STICKY.
+        Log.i(TAG, "Task removed; foreground service remains active")
     }
 
     override fun onDestroy() {
-        isRunning = false
+        stopDaemonForeground()
         super.onDestroy()
     }
 
@@ -138,7 +136,7 @@ class PirsumotoBackgroundService : Service() {
                 "Pirsumoto Background Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps Pirsumoto automation, chat and remote control active 24/7"
+                description = "Pirsumoto automation, chat and remote control host"
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -162,6 +160,10 @@ class PirsumotoBackgroundService : Service() {
             .setContentText("ממתין לפקודות פרסום ושליטה מרחוק")
             .setSmallIcon(R.mipmap.launcher_icon)
             .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
