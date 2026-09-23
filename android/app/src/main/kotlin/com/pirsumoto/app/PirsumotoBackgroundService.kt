@@ -93,10 +93,12 @@ class PirsumotoBackgroundService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            ForegroundServiceNotifications.track(NOTIFICATION_ID, notification)
             isRunning = true
             Log.i(TAG, "PirsumotoBackgroundService is now running in foreground (STICKY)")
             true
         } catch (e: Exception) {
+            ForegroundServiceNotifications.forget(NOTIFICATION_ID)
             isRunning = false
             Log.e(TAG, "Failed to startDaemonForeground: ${e.message}", e)
             // Do not leave a failed startForegroundService request alive until
@@ -107,6 +109,7 @@ class PirsumotoBackgroundService : Service() {
     }
 
     private fun stopDaemonForeground() {
+        ForegroundServiceNotifications.forget(NOTIFICATION_ID)
         isRunning = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -158,13 +161,14 @@ class PirsumotoBackgroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("פרסומוטו - שירות פעיל ברקע")
             .setContentText("ממתין לפקודות פרסום ושליטה מרחוק")
-            .setSmallIcon(R.mipmap.launcher_icon)
+            .setSmallIcon(R.drawable.ic_pirsumoto_notification)
             .setOngoing(true)
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(pendingIntent)
+            .setDeleteIntent(ForegroundServiceNotifications.dismissalIntent(this, NOTIFICATION_ID))
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

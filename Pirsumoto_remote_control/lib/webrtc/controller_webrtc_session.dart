@@ -17,11 +17,14 @@ class ControllerWebRtcSession extends ChangeNotifier {
   RTCDataChannel? _pointerChannel;
   RTCDataChannel? _chatChannel;
 
-  final _chatReplyController = StreamController<RemoteChatReplyMessage>.broadcast();
+  final _chatReplyController =
+      StreamController<RemoteChatReplyMessage>.broadcast();
   Stream<RemoteChatReplyMessage> get chatReplies => _chatReplyController.stream;
 
-  final _chatStatusController = StreamController<RemoteChatStatusMessage>.broadcast();
-  Stream<RemoteChatStatusMessage> get chatStatuses => _chatStatusController.stream;
+  final _chatStatusController =
+      StreamController<RemoteChatStatusMessage>.broadcast();
+  Stream<RemoteChatStatusMessage> get chatStatuses =>
+      _chatStatusController.stream;
 
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
@@ -40,6 +43,33 @@ class ControllerWebRtcSession extends ChangeNotifier {
   double get remoteAspectRatio => _remoteWidth / _remoteHeight;
 
   Timer? _pingTimer;
+  Timer? _connectionTimer;
+  bool _disposed = false;
+  int _connectionGeneration = 0;
+  bool _transportConnected = false;
+  bool _hasVideoFrame = false;
+
+  void _updateConnectionReadiness() {
+    if (!_transportConnected ||
+        (sessionType == 'remote_control' && !_hasVideoFrame)) {
+      return;
+    }
+    _connectionTimer?.cancel();
+    _isConnected = true;
+    _isConnecting = false;
+    _startPingTimer();
+    notifyListeners();
+  }
+
+  Future<void> _failConnection(String message) async {
+    _errorMessage = message;
+    await disconnect();
+  }
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
 
   ControllerWebRtcSession({
     required this.signaling,
@@ -49,7 +79,9 @@ class ControllerWebRtcSession extends ChangeNotifier {
   Future<void> initRenderer() async {
     await videoRenderer.initialize();
     videoRenderer.onResize = () {
-      debugPrint('[ControllerWebRTC] videoRenderer onResize: ${videoRenderer.videoWidth}x${videoRenderer.videoHeight}');
+      debugPrint(
+        '[ControllerWebRTC] videoRenderer onResize: ${videoRenderer.videoWidth}x${videoRenderer.videoHeight}',
+      );
       if (videoRenderer.videoWidth > 0 && videoRenderer.videoHeight > 0) {
         _remoteWidth = videoRenderer.videoWidth;
         _remoteHeight = videoRenderer.videoHeight;
@@ -58,21 +90,32 @@ class ControllerWebRtcSession extends ChangeNotifier {
     };
     videoRenderer.onFirstFrameRendered = () {
       debugPrint('[ControllerWebRTC] videoRenderer onFirstFrameRendered!');
+      _hasVideoFrame = true;
+      _updateConnectionReadiness();
       notifyListeners();
     };
   }
 
   /// Connect to the remote receiver
   Future<void> connect({List<Map<String, dynamic>>? customIceServers}) async {
+    if (_disposed || _isConnecting) return;
+    await _disconnecting;
+    if (_disposed || _isConnecting) return;
     if (_peerConnection != null) {
       await disconnect();
     }
 
     _isConnecting = true;
+    _transportConnected = false;
+    _hasVideoFrame = false;
     _errorMessage = null;
     notifyListeners();
 
+    final generation = ++_connectionGeneration;
     try {
+      final sessionId = 'session_${DateTime.now().microsecondsSinceEpoch}';
+      await signaling.prepareSession(sessionId);
+      if (_disposed || generation != _connectionGeneration) return;
       final config = {
         'iceServers': customIceServers ?? WebRtcIceConfig.defaultIceServers,
         'sdpSemantics': 'unified-plan',
@@ -84,16 +127,43 @@ class ControllerWebRtcSession extends ChangeNotifier {
         ],
       };
 
-      _peerConnection = await createPeerConnection(config);
+      final peer = await createPeerConnection(config);
+      if (_disposed || generation != _connectionGeneration) {
+        await peer.close();
+        await peer.dispose();
+        return;
+      }
+      _peerConnection = peer;
+      _connectionTimer?.cancel();
+      _connectionTimer = Timer(const Duration(seconds: 45), () {
+        if (_peerConnection == peer && !_isConnected) {
+          unawaited(
+            _failConnection('לא התקבל שידור מסך מהמכשיר. נסה להתחבר מחדש.'),
+          );
+        }
+      });
+      peer.onConnectionState = (state) {
+        if (_peerConnection != peer || _disposed) return;
+        if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          _transportConnected = true;
+          _updateConnectionReadiness();
+        } else if (state ==
+            RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+          unawaited(
+            _failConnection('חיבור הרשת למכשיר נכשל. נסה להתחבר מחדש.'),
+          );
+        }
+      };
 
       // On ICE candidate, send to signaling
-      _peerConnection!.onIceCandidate = (candidate) {
-        if (candidate.candidate != null) {
-          signaling.sendIceCandidate(candidate);
+      peer.onIceCandidate = (candidate) {
+        if (_peerConnection == peer && candidate.candidate != null) {
+          signaling.sendIceCandidate(candidate, sessionId: sessionId);
         }
       };
 
       void bindStream(MediaStream stream) {
+        if (_peerConnection != peer || _disposed) return;
         for (final track in stream.getVideoTracks()) {
           try {
             track.enabled = true;
@@ -103,14 +173,18 @@ class ControllerWebRtcSession extends ChangeNotifier {
           debugPrint('[ControllerWebRTC] Stream ${stream.id} already bound');
           return;
         }
-        debugPrint('[ControllerWebRTC] Binding stream ${stream.id} to videoRenderer');
+        debugPrint(
+          '[ControllerWebRTC] Binding stream ${stream.id} to videoRenderer',
+        );
         videoRenderer.srcObject = stream;
         notifyListeners();
       }
 
       // Listen for remote video track
-      _peerConnection!.onTrack = (RTCTrackEvent event) async {
-        debugPrint('[ControllerWebRTC] Received remote track: ${event.track.kind}, streams: ${event.streams.length}');
+      peer.onTrack = (RTCTrackEvent event) async {
+        debugPrint(
+          '[ControllerWebRTC] Received remote track: ${event.track.kind}, streams: ${event.streams.length}',
+        );
         try {
           event.track.enabled = true;
         } catch (_) {}
@@ -121,24 +195,24 @@ class ControllerWebRtcSession extends ChangeNotifier {
             stream = event.streams[0];
           } else {
             stream = await createLocalMediaStream('remote_stream');
-            stream.addTrack(event.track);
+            await stream.addTrack(event.track);
           }
           bindStream(stream);
         }
       };
 
-      _peerConnection!.onAddStream = (MediaStream stream) {
-        debugPrint('[ControllerWebRTC] onAddStream received with ${stream.getVideoTracks().length} video tracks');
+      peer.onAddStream = (MediaStream stream) {
+        debugPrint(
+          '[ControllerWebRTC] onAddStream received with ${stream.getVideoTracks().length} video tracks',
+        );
         bindStream(stream);
       };
 
       // Ensure Unified Plan SDP includes m=video in recvonly direction
       try {
-        await _peerConnection!.addTransceiver(
+        await peer.addTransceiver(
           kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-          init: RTCRtpTransceiverInit(
-            direction: TransceiverDirection.RecvOnly,
-          ),
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
         );
       } catch (e) {
         debugPrint('[ControllerWebRTC] addTransceiver note: $e');
@@ -148,7 +222,7 @@ class ControllerWebRtcSession extends ChangeNotifier {
       final cmdInit = RTCDataChannelInit()
         ..ordered = true
         ..maxRetransmits = -1;
-      _commandsChannel = await _peerConnection!.createDataChannel(
+      _commandsChannel = await peer.createDataChannel(
         RemoteProtocolConstants.channelCommands,
         cmdInit,
       );
@@ -158,7 +232,7 @@ class ControllerWebRtcSession extends ChangeNotifier {
       final ptrInit = RTCDataChannelInit()
         ..ordered = false
         ..maxRetransmits = 0;
-      _pointerChannel = await _peerConnection!.createDataChannel(
+      _pointerChannel = await peer.createDataChannel(
         RemoteProtocolConstants.channelPointer,
         ptrInit,
       );
@@ -167,7 +241,7 @@ class ControllerWebRtcSession extends ChangeNotifier {
       final chatInit = RTCDataChannelInit()
         ..ordered = true
         ..maxRetransmits = -1;
-      _chatChannel = await _peerConnection!.createDataChannel(
+      _chatChannel = await peer.createDataChannel(
         RemoteProtocolConstants.channelChat,
         chatInit,
       );
@@ -182,10 +256,10 @@ class ControllerWebRtcSession extends ChangeNotifier {
         'optional': [],
       };
 
-      final offer = await _peerConnection!.createOffer(offerConstraints);
-      await _peerConnection!.setLocalDescription(offer);
-
-      final sessionId = 'session_${DateTime.now().millisecondsSinceEpoch}';
+      final offer = await peer.createOffer(offerConstraints);
+      if (_peerConnection != peer || _disposed) return;
+      await peer.setLocalDescription(offer);
+      if (_peerConnection != peer || _disposed) return;
 
       final List<RTCIceCandidate> pendingCandidates = [];
       bool hasRemoteDescription = false;
@@ -193,16 +267,21 @@ class ControllerWebRtcSession extends ChangeNotifier {
       // Start listening to receiver ICE candidates
       signaling.listenForReceiverCandidates(
         onCandidate: (candidate) async {
+          if (_peerConnection != peer || _disposed) return;
           if (!hasRemoteDescription) {
-            debugPrint('[ControllerWebRTC] Queuing receiver candidate until answer set');
+            debugPrint(
+              '[ControllerWebRTC] Queuing receiver candidate until answer set',
+            );
             pendingCandidates.add(candidate);
             return;
           }
           try {
-            await _peerConnection?.addCandidate(candidate);
+            await peer.addCandidate(candidate);
             debugPrint('[ControllerWebRTC] Added receiver ICE candidate');
           } catch (e) {
-            debugPrint('[ControllerWebRTC] Error adding receiver candidate: $e');
+            debugPrint(
+              '[ControllerWebRTC] Error adding receiver candidate: $e',
+            );
           }
         },
       );
@@ -213,35 +292,41 @@ class ControllerWebRtcSession extends ChangeNotifier {
         offer: offer,
         sessionType: sessionType,
         onAnswerReceived: (answer) async {
+          if (_peerConnection != peer || _disposed) return;
           debugPrint('[ControllerWebRTC] Received SDP answer');
-          await _peerConnection?.setRemoteDescription(answer);
+          try {
+            await peer.setRemoteDescription(answer);
+          } catch (error) {
+            if (_peerConnection == peer) {
+              await _failConnection(error.toString());
+            }
+            return;
+          }
+          if (_peerConnection != peer || _disposed) return;
           hasRemoteDescription = true;
 
           for (final candidate in pendingCandidates) {
             try {
-              await _peerConnection?.addCandidate(candidate);
+              await peer.addCandidate(candidate);
               debugPrint('[ControllerWebRTC] Added queued receiver candidate');
             } catch (e) {
-              debugPrint('[ControllerWebRTC] Error adding queued receiver candidate: $e');
+              debugPrint(
+                '[ControllerWebRTC] Error adding queued receiver candidate: $e',
+              );
             }
           }
           pendingCandidates.clear();
 
-          _isConnected = true;
-          _isConnecting = false;
-          _startPingTimer();
-          notifyListeners();
+          _updateConnectionReadiness();
         },
         onSessionClosed: () {
-          disconnect();
+          if (_peerConnection == peer) disconnect();
         },
       );
     } catch (e) {
+      if (_disposed || generation != _connectionGeneration) return;
       debugPrint('[ControllerWebRTC] Connection failed: $e');
-      _errorMessage = e.toString();
-      _isConnecting = false;
-      _isConnected = false;
-      notifyListeners();
+      await _failConnection(e.toString());
     }
   }
 
@@ -256,7 +341,9 @@ class ControllerWebRtcSession extends ChangeNotifier {
       } else if (command is RemoteDimensionsCommand) {
         _remoteWidth = command.width;
         _remoteHeight = command.height;
-        debugPrint('[ControllerWebRTC] Remote dimensions: ${_remoteWidth}x$_remoteHeight');
+        debugPrint(
+          '[ControllerWebRTC] Remote dimensions: ${_remoteWidth}x$_remoteHeight',
+        );
         notifyListeners();
       } else if (command is RemoteChatReplyMessage) {
         _chatReplyController.add(command);
@@ -290,14 +377,16 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
   /// Send command over reliable DataChannel
   void sendCommand(RemoteCommand command) {
-    if (_commandsChannel != null && _commandsChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_commandsChannel != null &&
+        _commandsChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
       _commandsChannel!.send(RTCDataChannelMessage(command.encode()));
     }
   }
 
   /// Send chat message/command over chat DataChannel (or fallback to commands channel)
   void sendChatCommand(RemoteCommand command) {
-    if (_chatChannel != null && _chatChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_chatChannel != null &&
+        _chatChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
       _chatChannel!.send(RTCDataChannelMessage(command.encode()));
     } else {
       sendCommand(command);
@@ -324,17 +413,22 @@ class ControllerWebRtcSession extends ChangeNotifier {
   }) async {
     final bytes = await file.readAsBytes();
     final fileName = file.path.split(RegExp(r'[/\\]')).last;
-    final mediaId = 'media_${DateTime.now().millisecondsSinceEpoch}_${fileName.hashCode.abs()}';
+    final mediaId =
+        'media_${DateTime.now().millisecondsSinceEpoch}_${fileName.hashCode.abs()}';
     final messageId = 'msg_${DateTime.now().millisecondsSinceEpoch}';
 
     const chunkSize = 32 * 1024; // 32KB
     final totalChunks = (bytes.length / chunkSize).ceil();
 
-    debugPrint('[ControllerWebRTC] Sending $mediaType "$fileName" ($totalChunks chunks, ${bytes.length} bytes)');
+    debugPrint(
+      '[ControllerWebRTC] Sending $mediaType "$fileName" ($totalChunks chunks, ${bytes.length} bytes)',
+    );
 
     for (int i = 0; i < totalChunks; i++) {
       final start = i * chunkSize;
-      final end = (start + chunkSize < bytes.length) ? start + chunkSize : bytes.length;
+      final end = (start + chunkSize < bytes.length)
+          ? start + chunkSize
+          : bytes.length;
       final chunkBytes = bytes.sublist(start, end);
       final base64Data = base64Encode(chunkBytes);
 
@@ -364,7 +458,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
   /// Send pointer/drag over fast DataChannel
   void sendPointer(RemoteCommand command) {
-    if (_pointerChannel != null && _pointerChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_pointerChannel != null &&
+        _pointerChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
       _pointerChannel!.send(RTCDataChannelMessage(command.encode()));
     } else {
       sendCommand(command);
@@ -377,18 +472,36 @@ class ControllerWebRtcSession extends ChangeNotifier {
     sendCommand(RemoteTapCommand(x: normalizedX, y: normalizedY));
   }
 
-  void sendLongPress(double normalizedX, double normalizedY, {int durationMs = 700}) {
-    sendCommand(RemoteLongPressCommand(x: normalizedX, y: normalizedY, durationMs: durationMs));
+  void sendLongPress(
+    double normalizedX,
+    double normalizedY, {
+    int durationMs = 700,
+  }) {
+    sendCommand(
+      RemoteLongPressCommand(
+        x: normalizedX,
+        y: normalizedY,
+        durationMs: durationMs,
+      ),
+    );
   }
 
-  void sendSwipe(double startX, double startY, double endX, double endY, {int durationMs = 300}) {
-    sendCommand(RemoteSwipeCommand(
-      startX: startX,
-      startY: startY,
-      endX: endX,
-      endY: endY,
-      durationMs: durationMs,
-    ));
+  void sendSwipe(
+    double startX,
+    double startY,
+    double endX,
+    double endY, {
+    int durationMs = 300,
+  }) {
+    sendCommand(
+      RemoteSwipeCommand(
+        startX: startX,
+        startY: startY,
+        endX: endX,
+        endY: endY,
+        durationMs: durationMs,
+      ),
+    );
   }
 
   void sendKey(String key) {
@@ -415,7 +528,18 @@ class ControllerWebRtcSession extends ChangeNotifier {
     sendCommand(const RemoteResetCommand());
   }
 
-  Future<void> disconnect() async {
+  Future<void>? _disconnecting;
+
+  Future<void> disconnect() => _disconnecting ??= _disconnect().whenComplete(
+    () => _disconnecting = null,
+  );
+
+  Future<void> _disconnect() async {
+    _connectionGeneration++;
+    _connectionTimer?.cancel();
+    _connectionTimer = null;
+    _transportConnected = false;
+    _hasVideoFrame = false;
     _pingTimer?.cancel();
     _pingTimer = null;
 
@@ -423,21 +547,23 @@ class ControllerWebRtcSession extends ChangeNotifier {
       sendCommand(const RemoteDisconnectCommand());
     } catch (_) {}
 
+    final peer = _peerConnection;
+    _peerConnection = null;
     await signaling.disconnect();
 
     try {
       _chatChannel?.close();
       _commandsChannel?.close();
       _pointerChannel?.close();
-      await _peerConnection?.close();
-      await _peerConnection?.dispose();
+      await peer?.close();
+      await peer?.dispose();
     } catch (_) {}
 
     _peerConnection = null;
     _chatChannel = null;
     _commandsChannel = null;
     _pointerChannel = null;
-    videoRenderer.srcObject = null;
+    if (!_disposed) videoRenderer.srcObject = null;
 
     _isConnected = false;
     _isConnecting = false;
@@ -446,8 +572,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
   @override
   void dispose() {
-    disconnect();
-    videoRenderer.dispose();
+    _disposed = true;
+    disconnect().whenComplete(videoRenderer.dispose);
     _chatReplyController.close();
     _chatStatusController.close();
     super.dispose();

@@ -410,7 +410,8 @@ class Yad2MacHybridAutomationService {
     _stopLoginGate();
     _isPaused = false;
 
-    final phaseToResume = _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
+    final phaseToResume =
+        _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
     _pausedPhase = null;
     _processPhase(phaseToResume);
   }
@@ -818,7 +819,7 @@ class Yad2MacHybridAutomationService {
 
   Future<_StepActionResult> _actionDetectEntryForm() async {
     debugPrint('[Yad2-MacHybrid] 🔍 Testing OCR logic on the first screen...');
-    
+
     // Show the 'הפסק' floating button immediately before we start taking screenshots
     onFirstStepDetected?.call();
 
@@ -837,7 +838,9 @@ class Yad2MacHybridAutomationService {
           '======================================================================\n',
         );
       } else {
-        debugPrint('[Yad2-MacHybrid] ⚠️ UIContext or screenshot was null/empty.');
+        debugPrint(
+          '[Yad2-MacHybrid] ⚠️ UIContext or screenshot was null/empty.',
+        );
       }
     } else {
       debugPrint('[Yad2-MacHybrid] ⚠️ observeUI or ocrService is null.');
@@ -1774,8 +1777,14 @@ class Yad2MacHybridAutomationService {
       // For this macOS use-case, search for the relevant words in the OCR output,
       // generate their global coordinates and send the tap
       for (final alt in _splitAlternatives(targetText)) {
-        if (await toolOcrFindAndTap(alt, targetInstance: targetInstance, deltaY: deltaY)) {
-          debugPrint('[Yad2-MacHybrid] tapElement tapped "$alt" successfully via OCR');
+        if (await toolOcrFindAndTap(
+          alt,
+          targetInstance: targetInstance,
+          deltaY: deltaY,
+        )) {
+          debugPrint(
+            '[Yad2-MacHybrid] tapElement tapped "$alt" successfully via OCR',
+          );
           return true;
         }
       }
@@ -2018,14 +2027,14 @@ class Yad2MacHybridAutomationService {
     if (ctx == null) return false;
     final loc = await _findOcr(ctx, targetText, targetInstance);
     if (loc == null) return false;
-    
+
     // Transform physical OCR pixels to logical (css) pixels
     final cssX = loc.centerX / _devicePixelRatio;
     final cssY = (loc.centerY + deltaY) / _devicePixelRatio;
-    
+
     onTapPreview?.call(cssX, cssY);
     onAutomationFallback?.call('OCR', targetText);
-    
+
     // Send logical coordinates to native macOS layer
     await toolTapScreen(cssX, cssY);
     return true;
@@ -2479,10 +2488,7 @@ class Yad2MacHybridAutomationService {
   }) async {
     final cssX = (bounds['x'] as num).toDouble() + deltaX;
     final cssY = (bounds['y'] as num).toDouble() + deltaY;
-    onTapPreview?.call(
-      cssX,
-      cssY,
-    );
+    onTapPreview?.call(cssX, cssY);
     await toolTapScreen(cssX, cssY);
   }
 
@@ -2529,7 +2535,10 @@ class Yad2MacHybridAutomationService {
 
   DateTime? _lastDeadlockNotified;
 
-  Future<void> _notifyDeadlockInterventionRequired(String stepName, String details) async {
+  Future<void> _notifyDeadlockInterventionRequired(
+    String stepName,
+    String details,
+  ) async {
     final senderKey = whatsAppSenderKey?.trim();
     if (senderKey == null || senderKey.isEmpty) return;
 
@@ -2542,9 +2551,10 @@ class Yad2MacHybridAutomationService {
 
     try {
       final bool isP2p = senderKey.startsWith('p2p_');
-      final String remoteNotice = isP2p
-          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
-          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
+      final String remoteNotice =
+          isP2p
+              ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להשתלט על המכשיר ולסייע בהמשך הפרסום.'
+              : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי לסייע ולהמשיך את הפרסום.';
 
       final message =
           '⚠️ האוטומציה נתקעה ונדרשת התערבותך!\n'
@@ -2569,9 +2579,10 @@ class Yad2MacHybridAutomationService {
     }
     try {
       final bool isP2p = senderKey.startsWith('p2p_');
-      final String remoteNotice = isP2p
-          ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להזין את פרטי ההתחברות לחשבון יד2.'
-          : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי להזין את פרטי ההתחברות לחשבון יד2.';
+      final String remoteNotice =
+          isP2p
+              ? 'נא ללחוץ על כפתור השליטה מרחוק (Remote Control) במסך זה כדי להזין את פרטי ההתחברות לחשבון יד2.'
+              : 'נא להתחבר באמצעות פיצ׳ר השליטה מרחוק (Remote Control) באפליקציית השלט של פירסומוטו כדי להזין את פרטי ההתחברות לחשבון יד2.';
 
       final message =
           '⚠️ נדרשת התחברות לחשבון יד2!\n'

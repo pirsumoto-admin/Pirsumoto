@@ -145,6 +145,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        AutomationWebViewLifecycle.register(flutterEngine)
         // [WHATSAPP-DISABLED] WhatsApp auto-publish intent capture disabled.
         // WhatsAppAutoPublishStore.captureIntent(intent)
         // [WHATSAPP-DISABLED] WhatsApp MethodChannel and EventChannel registration disabled.
@@ -278,6 +279,24 @@ class MainActivity : FlutterActivity() {
             }
             if (call.method == "startRemoteCaptureService") {
                 RemoteControlCaptureService.start(context)
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "isRemoteCaptureRunning") {
+                result.success(RemoteControlCaptureService.isRunning)
+                return@setMethodCallHandler
+            }
+            if (call.method == "startScreenFrameRepeater") {
+                try {
+                    ScreenCaptureFrameRepeater.start(requireNotNull(call.argument<String>("trackId")))
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.error("FRAME_REPEATER_FAILED", e.message, null)
+                }
+                return@setMethodCallHandler
+            }
+            if (call.method == "stopScreenFrameRepeater") {
+                ScreenCaptureFrameRepeater.stop()
                 result.success(true)
                 return@setMethodCallHandler
             }
@@ -572,6 +591,27 @@ class MainActivity : FlutterActivity() {
 
                     val textVal = service.findNodeTextAfterTarget(rootNode!!, target, targetInstance, threshold, offset)
                     result.success(textVal)
+                }
+                "clearFocus" -> {
+                    fun clearFocused(node: android.view.accessibility.AccessibilityNodeInfo?): Boolean {
+                        if (node == null) return false
+                        if (node.isFocused) {
+                            node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLEAR_FOCUS)
+                            return true
+                        }
+                        for (i in 0 until node.childCount) {
+                            if (clearFocused(node.getChild(i))) return true
+                        }
+                        return false
+                    }
+                    val focused = rootNode?.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+                    var cleared = false
+                    if (focused != null) {
+                        cleared = focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLEAR_FOCUS)
+                    } else {
+                        cleared = clearFocused(rootNode)
+                    }
+                    result.success(cleared)
                 }
                 "pressBack" -> {
                     val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)

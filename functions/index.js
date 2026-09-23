@@ -997,26 +997,11 @@ if (typeof functions.http === 'function') {
 }
 
 
-// Data-only pushes let Android check the signed-in owner before showing vehicle data.
+// System-rendered pushes continue to display when the controller is suspended.
 const {onDocumentUpdated} = require('firebase-functions/v2/firestore');
-exports.publicationNotifications = onDocumentUpdated({document:'remote_chats/{deviceId}/requests/{requestId}',region:'me-west1'}, async event => {
-  const before=event.data.before.data(), after=event.data.after.data();
-  if (before.state===after.state || !['preparing','publishing','paused','stuck','canceling','canceled','failed','completed'].includes(after.state)) return;
-  const latest=(await event.data.after.ref.get()).data();
-  if (!latest || latest.revision!==after.revision || latest.archived) return;
-  const tokens=await db.collection('notification_tokens').where('ownerUid','==',after.ownerUid).get();
-  for (let i=0;i<tokens.docs.length;i+=500) {
-    const batch=tokens.docs.slice(i,i+500);
-    const result=await admin.messaging().sendEachForMulticast({
-      tokens:batch.map(d=>d.data().token),android:{priority:'high'},
-      data:{ownerUid:after.ownerUid,deviceId:event.params.deviceId,sessionId:event.params.requestId,
-        attemptId:after.attemptId,state:after.state,revision:String(after.revision),text:after.lastMessage || after.state},
-    });
-    await Promise.all(result.responses.map((r,index)=>
-      ['messaging/registration-token-not-registered','messaging/invalid-registration-token'].includes(r.error?.code)
-        ? batch[index].ref.delete() : Promise.resolve()));
-  }
-});
+const {sendPublicationNotification} = require('./publication-notifications');
+exports.publicationNotifications = onDocumentUpdated({document:'remote_chats/{deviceId}/requests/{requestId}',region:'me-west1'},
+  event => sendPublicationNotification(event, db, admin.messaging(), require('firebase-functions/logger')));
 
 const {onSchedule} = require('firebase-functions/v2/scheduler');
 exports.publicationMediaRetention = onSchedule({schedule:'every 24 hours',region:'me-west1',timeoutSeconds:540,maxInstances:1},

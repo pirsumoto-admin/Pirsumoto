@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'remote_protocol.dart';
 import 'webrtc_ice_config.dart';
 
 class RemoteWebRtcReceiver {
   RTCPeerConnection? _peerConnection;
+  final Future<RTCPeerConnection> Function(Map<String, dynamic>) _createPeer;
+  bool _closed = true;
   MediaStream? _screenStream;
   RTCDataChannel? _commandsChannel;
   RTCDataChannel? _pointerChannel;
@@ -19,12 +22,18 @@ class RemoteWebRtcReceiver {
     required this.onLocalCandidate,
     required this.onCommandReceived,
     required this.onConnectionStateChange,
-  });
+    Future<RTCPeerConnection> Function(Map<String, dynamic>)?
+    peerConnectionFactory,
+  }) : _createPeer =
+           peerConnectionFactory ?? ((config) => createPeerConnection(config));
 
-  RTCPeerConnectionState? get connectionState => _peerConnection?.connectionState;
+  RTCPeerConnectionState? get connectionState =>
+      _peerConnection?.connectionState;
 
   /// Default WebRTC configuration with Google STUN + GCP TURN
-  Map<String, dynamic> _buildRtcConfig({List<Map<String, dynamic>>? customIceServers}) {
+  Map<String, dynamic> _buildRtcConfig({
+    List<Map<String, dynamic>>? customIceServers,
+  }) {
     return {
       'iceServers': customIceServers ?? WebRtcIceConfig.defaultIceServers,
       'sdpSemantics': 'unified-plan',
@@ -45,9 +54,16 @@ class RemoteWebRtcReceiver {
     bool enableScreenCapture = true,
   }) async {
     await close();
+    _closed = false;
 
     final config = _buildRtcConfig(customIceServers: iceServers);
-    _peerConnection = await createPeerConnection(config);
+    final peer = await _createPeer(config);
+    if (_closed) {
+      await peer.close();
+      await peer.dispose();
+      throw StateError('Screen-sharing session ended during initialization');
+    }
+    _peerConnection = peer;
 
     // ICE Candidate handler
     _peerConnection!.onIceCandidate = (candidate) {
@@ -78,19 +94,22 @@ class RemoteWebRtcReceiver {
       // Start Screen Capture stream via MediaProjection with native aspect ratio
       try {
         _screenStream = await navigator.mediaDevices.getDisplayMedia({
-          'video': {
-            'width': width,
-            'height': height,
-            'frameRate': 30,
-          },
+          'video': {'width': width, 'height': height, 'frameRate': 30},
           'audio': false,
         });
 
         for (final track in _screenStream!.getVideoTracks()) {
           track.enabled = true;
           await _peerConnection!.addTrack(track, _screenStream!);
+          if (defaultTargetPlatform == TargetPlatform.android) {
+            await const MethodChannel(
+              'com.pirsumoto/accessibility',
+            ).invokeMethod('startScreenFrameRepeater', {'trackId': track.id});
+          }
         }
-        debugPrint('[ReceiverWebRTC] Screen video track added to PeerConnection ($width x $height)');
+        debugPrint(
+          '[ReceiverWebRTC] Screen video track added to PeerConnection ($width x $height)',
+        );
       } catch (e) {
         debugPrint('[ReceiverWebRTC] Error acquiring screen stream: $e');
         rethrow;
@@ -109,7 +128,9 @@ class RemoteWebRtcReceiver {
       if (command != null) {
         // Automatically respond to ping with pong for round-trip latency measurement
         if (command is RemotePingCommand) {
-          sendReply(RemotePongCommand(clientTimestamp: command.clientTimestamp));
+          sendReply(
+            RemotePongCommand(clientTimestamp: command.clientTimestamp),
+          );
         }
         onCommandReceived(command);
       }
@@ -142,14 +163,16 @@ class RemoteWebRtcReceiver {
 
   /// Send a command reply back to the controller (e.g. Pong or Dimensions)
   void sendReply(RemoteCommand command) {
-    if (_commandsChannel != null && _commandsChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_commandsChannel != null &&
+        _commandsChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
       _commandsChannel!.send(RTCDataChannelMessage(command.encode()));
     }
   }
 
   /// Send chat message/reply back to the controller
   void sendChatReply(RemoteCommand command) {
-    if (_chatChannel != null && _chatChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_chatChannel != null &&
+        _chatChannel!.state == RTCDataChannelState.RTCDataChannelOpen) {
       _chatChannel!.send(RTCDataChannelMessage(command.encode()));
     } else {
       sendReply(command);
@@ -192,10 +215,12 @@ class RemoteWebRtcReceiver {
 
   /// Add remote ICE candidate sent by controller
   Future<void> addCandidate(RTCIceCandidate candidate) async {
-    if (_peerConnection == null) return;
+    if (_closed) return;
 
-    if (!_hasRemoteDescription) {
-      debugPrint('[ReceiverWebRTC] Queuing ICE candidate until remote description set');
+    if (_peerConnection == null || !_hasRemoteDescription) {
+      debugPrint(
+        '[ReceiverWebRTC] Queuing ICE candidate until remote description set',
+      );
       _pendingCandidates.add(candidate);
       return;
     }
@@ -210,21 +235,46 @@ class RemoteWebRtcReceiver {
 
   /// Stop screen streaming and close WebRTC peer connection
   Future<void> close() async {
-    try {
-      _commandsChannel?.close();
-      _pointerChannel?.close();
-      _commandsChannel = null;
-      _pointerChannel = null;
+    _closed = true;
+    _hasRemoteDescription = false;
+    _pendingCandidates.clear();
+    final stream = _screenStream;
+    final peer = _peerConnection;
+    final channels = [_commandsChannel, _pointerChannel, _chatChannel];
+    _screenStream = null;
+    _peerConnection = null;
+    _commandsChannel = null;
+    _pointerChannel = null;
+    _chatChannel = null;
 
-      _screenStream?.getTracks().forEach((track) => track.stop());
-      await _screenStream?.dispose();
-      _screenStream = null;
+    // One failed disposal must not keep capture or another channel alive.
+    Future<void> release(Future<dynamic> Function() action) async {
+      try {
+        await action();
+      } catch (error) {
+        debugPrint('[ReceiverWebRTC] Cleanup failed: $error');
+      }
+    }
 
-      await _peerConnection?.close();
-      await _peerConnection?.dispose();
-      _peerConnection = null;
-    } catch (e) {
-      debugPrint('[ReceiverWebRTC] Error closing WebRTC: $e');
+    if (stream != null && defaultTargetPlatform == TargetPlatform.android) {
+      await release(
+        () => const MethodChannel(
+          'com.pirsumoto/accessibility',
+        ).invokeMethod('stopScreenFrameRepeater'),
+      );
+    }
+    for (final channel in channels) {
+      if (channel != null) await release(channel.close);
+    }
+    if (stream != null) {
+      for (final track in stream.getTracks()) {
+        await release(track.stop);
+      }
+      await release(stream.dispose);
+    }
+    if (peer != null) {
+      await release(peer.close);
+      await release(peer.dispose);
     }
   }
 }

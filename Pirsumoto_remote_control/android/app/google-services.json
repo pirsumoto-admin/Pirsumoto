@@ -26,6 +26,25 @@
     },
     {
       "client_info": {
+        "mobilesdk_app_id": "1:265879971574:android:993f53c586869d921aaed7",
+        "android_client_info": {
+          "package_name": "com.pirsumoto.remote.pirsumoto_remote_control"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAJndnuTu4nCktGpOWm9JhpUR56PB6k8Bk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:265879971574:android:910e7950b8af689f1aaed7",
         "android_client_info": {
           "package_name": "com.pirsumotoapp"

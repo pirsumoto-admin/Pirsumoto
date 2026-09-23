@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../services/automation_webview_session.dart';
 import '../../services/ocr_service.dart';
 import '../../services/ui_context.dart';
 // [WHATSAPP-DISABLED] WhatsApp text validation import disabled in yad2_screen.
@@ -135,6 +136,10 @@ class Yad2Screen extends StatefulWidget {
 
 class _Yad2ScreenState extends State<Yad2Screen> {
   late WebViewController _controller;
+  AutomationWebViewSession? _browserSession;
+  bool _webViewVisible = false;
+  bool _webViewClosed = false;
+  Future<void>? _browserInitialization;
   final GlobalKey _webViewKey = GlobalKey();
   dynamic
   _automationService; // Can be Yad2AutomationService or Yad2AccessibilityAutomationService
@@ -183,7 +188,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       },
       resume: () {
         _publicationPaused = false;
-        if (_publicationStopped) return;
+        if (_publicationStopped || _webViewClosed) return;
         _automationService?.resumeAutomation();
         if (mounted) {
           setState(() {
@@ -198,8 +203,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       },
       stop: () async {
         _publicationStopped = true;
-        if (_automationService != null) await _automationService.stopAndWait();
-        await _controller.loadRequest(Uri.parse('about:blank'));
+        await _closeBrowser();
         if (mounted)
           setState(() {
             _isPaused = true;
@@ -209,69 +213,135 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     );
     // Hide status bar + Android soft navigation bar for a full-screen WebView.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    _controller =
-        WebViewController()
-          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-          ..addJavaScriptChannel(
-            'updateShadowTree',
-            onMessageReceived: (JavaScriptMessage msg) {
-              try {
-                final data = jsonDecode(msg.message) as Map<String, dynamic>;
-                final completer = _axTreeCompleter;
-                if (completer != null && !completer.isCompleted) {
-                  completer.complete(data);
-                }
-              } catch (e) {
-                debugPrint('[Yad2Screen] AxTree parse error: $e');
-              }
-            },
-          )
-          ..setNavigationDelegate(
-            NavigationDelegate(
-              onPageFinished: (url) {
-                if (!_automationStarted || _isReloading) {
-                  _automationStarted = true;
-                  _isReloading = false;
-                  Future.delayed(const Duration(seconds: 2), _startAutomation);
-                }
-              },
-            ),
-          )
-          ..loadRequest(
-            //Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
-            Uri.parse(
-              'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
-            ),
-          );
+    _browserInitialization = _initializeBrowser();
+  }
+
+  Future<void> _initializeBrowser() async {
+    try {
+      _browserSession = await AutomationWebViewSession.open(
+        isCurrent:
+            () =>
+                mounted &&
+                !_publicationStopped &&
+                !_webViewClosed &&
+                FirebaseChatReceiver.isCurrent(
+                  widget.publishData.publicationIdentity,
+                ),
+        stop: _stopBrowserAutomation,
+        detach: _detachBrowser,
+        configure: _configureBrowser,
+      );
+      if (mounted && _browserSession != null && !_webViewClosed) {
+        setState(() => _webViewVisible = true);
+      }
+    } catch (error) {
+      debugPrint('[AutomationWebView] Startup failed: $error');
+      if (mounted) {
+        setState(() {
+          _automationError = true;
+          _statusMessage =
+              'לא ניתן לפתוח דפדפן חדש. יש לסגור את מסך הפרסום ולנסות שוב.';
+        });
+      }
+    }
+  }
+
+  Future<void> _stopBrowserAutomation() async {
+    _webViewClosed = true;
+    if (_automationService is Yad2AccessibilityAutomationService) {
+      await (_automationService as Yad2AccessibilityAutomationService)
+          .stopAndWait();
+    }
+    _automationService?.dispose();
+  }
+
+  Future<void> _detachBrowser() async {
+    if (mounted) {
+      setState(() {
+        _webViewVisible = false;
+        _showPauseButton = false;
+        _isLoginRequired = false;
+      });
+    }
+    // Let Flutter remove the platform view before native WebView.destroy().
+    await WidgetsBinding.instance.endOfFrame;
+  }
+
+  Future<void> _closeBrowser() async {
+    _webViewClosed = true;
+    await _browserInitialization;
+    await _browserSession?.close();
+  }
+
+  Future<void> _configureBrowser(WebViewController controller) async {
+    _controller = controller;
+    await _controller.addJavaScriptChannel(
+      'updateShadowTree',
+      onMessageReceived: (JavaScriptMessage msg) {
+        try {
+          final data = jsonDecode(msg.message) as Map<String, dynamic>;
+          final completer = _axTreeCompleter;
+          if (completer != null && !completer.isCompleted) {
+            completer.complete(data);
+          }
+        } catch (e) {
+          debugPrint('[Yad2Screen] AxTree parse error: $e');
+        }
+      },
+    );
+    await _controller.setNavigationDelegate(
+      NavigationDelegate(
+        onPageFinished: (url) {
+          if (!mounted ||
+              _webViewClosed ||
+              _publicationStopped ||
+              url == 'about:blank') {
+            return;
+          }
+          if (!_automationStarted || _isReloading) {
+            _automationStarted = true;
+            _isReloading = false;
+            Future.delayed(const Duration(seconds: 2), _startAutomation);
+          }
+        },
+      ),
+    );
+    await _controller.loadRequest(
+      //Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
+      Uri.parse(
+        'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
+      ),
+    );
 
     if (_controller.platform is AndroidWebViewController) {
-      (_controller.platform as AndroidWebViewController).setOnShowFileSelector((
-        FileSelectorParams params,
-      ) async {
-        debugPrint(
-          '[Yad2Screen] WebView requested file selector: ${params.mode}',
-        );
-        final picker = ImagePicker();
+      await (_controller.platform as AndroidWebViewController)
+          .setOnShowFileSelector((FileSelectorParams params) async {
+            debugPrint(
+              '[Yad2Screen] WebView requested file selector: ${params.mode}',
+            );
+            final picker = ImagePicker();
 
-        if (params.mode == FileSelectorMode.openMultiple) {
-          final List<XFile> images = await picker.pickMultiImage();
-          return images.map((e) => Uri.file(e.path).toString()).toList();
-        } else {
-          final XFile? image = await picker.pickImage(
-            source: ImageSource.gallery,
-          );
-          if (image != null) {
-            return [Uri.file(image.path).toString()];
-          }
-        }
-        return [];
-      });
+            if (params.mode == FileSelectorMode.openMultiple) {
+              final List<XFile> images = await picker.pickMultiImage();
+              return images.map((e) => Uri.file(e.path).toString()).toList();
+            } else {
+              final XFile? image = await picker.pickImage(
+                source: ImageSource.gallery,
+              );
+              if (image != null) {
+                return [Uri.file(image.path).toString()];
+              }
+            }
+            return [];
+          });
     }
   }
 
   @override
   void dispose() {
+    _webViewClosed = true;
     FirebaseChatReceiver.unbindControls(this);
+    _browserSession?.closeInBackground();
     _automationService?.dispose();
     WakelockPlus.disable(); // Ensure screen can sleep when leaving the automation screen
     // Maintain immersive full-screen mode when navigating away.
@@ -319,6 +389,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   /// Captures a screenshot + injects the Shadow AxTree extractor concurrently,
   /// returning a [UIContext] with both pieces of data for the automation service.
   Future<UIContext?> _observeUI() async {
+    if (_webViewClosed) return null;
     // Set up the completer before injecting JS so the callback can never beat us.
     _axTreeCompleter = Completer<Map<String, dynamic>>();
 
@@ -379,6 +450,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   }
 
   Future<void> _startAutomation() async {
+    if (!mounted || _webViewClosed || _publicationStopped) return;
     setState(() => _statusMessage = 'בודק הרשאות שמע...');
     try {
       if (await Permission.notification.status.isDenied) {
@@ -393,7 +465,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       debugPrint('[Yad2Screen] Error requesting audio permissions: $e');
     }
 
-    if (!mounted) return;
+    if (!mounted || _webViewClosed || _publicationStopped) return;
     final ocrService = OcrService();
     final devicePixelRatio = MediaQuery.of(context).devicePixelRatio;
 
@@ -418,27 +490,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         !FirebaseChatReceiver.isCurrent(widget.publishData.publicationIdentity))
       return;
     _transitioning = true;
-    _automationService?.stop();
-    try {
-      await _controller.loadRequest(Uri.parse('about:blank'));
-    } catch (e) {
-      debugPrint('[Yad2Screen] Error resetting webview controller: $e');
+    if (_automationService is Yad2AccessibilityAutomationService) {
+      await (_automationService as Yad2AccessibilityAutomationService)
+          .stopAndWait();
+    } else {
+      _automationService?.stop();
     }
-
-    // if (widget.whatsAppSenderKey != null &&
-    //     widget.whatsAppSenderKey!.trim().isNotEmpty) {
-    //   try {
-    //     await WhatsAppTextValidationService.dispatchReplyToSender(
-    //       senderKey: widget.whatsAppSenderKey!.trim(),
-    //       message:
-    //           'פרסום המודעה ביד2 הושלם בהצלחה! 🎉\n'
-    //           'מתחיל כעת בפרסום המודעה בפייסבוק מרקטפלייס...',
-    //     );
-    //   } catch (e) {
-    //     debugPrint(
-    //         '[Yad2Screen] Failed to send transition message: $e');
-    //   }
-    // }
 
     if (mounted) {
       await FirebaseChatReceiver.reportAutomationStatus(
@@ -447,6 +504,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         platform: 'yad2',
         text: '🎉 הפרסום ביד2 הושלם בהצלחה!',
       );
+      if (!mounted) return;
       setState(() {
         _automationComplete = true;
         _automationError = false;
@@ -499,9 +557,6 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           builder:
               (_) => FacebookScreen(
                 publishData: updatedPublishData,
-                // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey pass-through disabled.
-                // startedFromWhatsApp: widget.startedFromWhatsApp,
-                // whatsAppSenderKey: widget.whatsAppSenderKey,
               ),
         ),
       );
@@ -509,14 +564,14 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   }
 
   Future<void> _openPresetLoginDialog() async {
-    if (_isPresetLoginDialogOpen || !mounted) return;
+    if (_isPresetLoginDialogOpen || !mounted || _webViewClosed) return;
     _isPresetLoginDialogOpen = true;
     try {
       final shouldReload = await showPresetLoginDialog(
         context,
         isFromWebView: true,
       );
-      if (mounted && shouldReload == true) {
+      if (mounted && !_webViewClosed && shouldReload == true) {
         setState(() {
           _isLoginRequired = false;
           _isReloading = true;
@@ -543,6 +598,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   }
 
   void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
+    if (!mounted || _webViewClosed) return;
     if (_publicationStopped ||
         !FirebaseChatReceiver.isCurrent(widget.publishData.publicationIdentity))
       return;
@@ -971,10 +1027,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     return Scaffold(
       body: Stack(
         children: [
-          RepaintBoundary(
-            key: _webViewKey,
-            child: WebViewWidget(controller: _controller),
-          ),
+          if (_webViewVisible)
+            RepaintBoundary(
+              key: _webViewKey,
+              child: WebViewWidget(controller: _controller),
+            ),
           if (!_hideOverlayForStep) _buildStatusOverlay(),
           // Tap preview marker
           if (_tapMarkerX != null && _tapMarkerY != null)

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -9,10 +10,11 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:publication_protocol/publication_protocol.dart';
+
 import '../services/p2p_auto_publish_launcher.dart';
 import '../services/worker_backend.dart';
 
-/// The backend owns queue selection; this worker sees only its reserved request.
+/// The backend owns queue selection; the idle listener only signals availability.
 /// Firestore transactions fence callbacks by request, attempt and worker process.
 class DownloadedAttachment {
   final Uint8List bytes;
@@ -33,11 +35,15 @@ class FirebaseChatReceiver {
   String? _watchedRequestId;
   bool _paused = false;
   Map<String, String>? _preparedVehicle;
-  Future<void> poll() => _schedule(_tick);
+  Future<void> poll() => _requestTick();
   late final String _runId;
   static FirebaseChatReceiver? _instance;
-  StreamSubscription? _authSub, _requestsSub;
-  Timer? _timer;
+  StreamSubscription? _authSub, _requestsSub, _queueSub;
+  String? _queueOwner;
+  Timer? _timer, _recoveryTimer, _retryTimer;
+  Future<void>? _tickTask;
+  bool _tickAgain = false, _maintenancePending = false;
+  DateTime? _reportedExpiry;
   Future<void> _serial = Future.value();
   PublicationIdentity? _active, _takeoverPausedIdentity;
   String? _uid, _activeOwnerUid;
@@ -209,6 +215,7 @@ class FirebaseChatReceiver {
             FirebaseAuth.instance.authStateChanges().map((user) => user?.uid))
         .listen((uid) {
           _watchActive(null);
+          _stopWatchingQueue();
           _uid = uid;
           if (_active != null && uid != _activeOwnerUid) _pauseSafely();
           if (uid == null) {
@@ -216,10 +223,13 @@ class FirebaseChatReceiver {
             return;
           }
           if (uid == _activeOwnerUid) _watchActive(_active?.requestId);
-          unawaited(_schedule(_tick));
+          unawaited(_requestTick());
         });
     _timer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_leaseExpiry != null && DateTime.now().isAfter(_leaseExpiry!)) {
+      if (_leaseExpiry != null &&
+          DateTime.now().isAfter(_leaseExpiry!) &&
+          _reportedExpiry != _leaseExpiry) {
+        _reportedExpiry = _leaseExpiry;
         _pauseSafely();
         final id = _active;
         if (id != null)
@@ -231,8 +241,113 @@ class FirebaseChatReceiver {
             ),
           );
       }
-      unawaited(_schedule(_tick));
+      _maintainReservation();
     });
+    // Safety net for failed listeners, interrupted writes and expired foreign leases.
+    _recoveryTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      unawaited(_requestTick());
+    });
+  }
+
+  Future<void> _requestTick() {
+    if (_disposed) return Future.value();
+    _tickAgain = true;
+    // Coalesce events during slow network calls, without losing a later control.
+    return _tickTask ??= _schedule(() async {
+      try {
+        while (_tickAgain && !_disposed) {
+          _tickAgain = false;
+          await _tick();
+        }
+      } catch (_) {
+        _retryReconciliation();
+        rethrow;
+      } finally {
+        _tickTask = null;
+      }
+    });
+  }
+
+  void _retryReconciliation() {
+    if (_disposed || _retryTimer != null) return;
+    _retryTimer = Timer(const Duration(seconds: 10), () {
+      _retryTimer = null;
+      unawaited(_requestTick());
+    });
+  }
+
+  void _maintainReservation() {
+    if (_disposed ||
+        _active == null ||
+        _uid != _activeOwnerUid ||
+        _uid == null ||
+        _maintenancePending) {
+      return;
+    }
+    _maintenancePending = true;
+    unawaited(
+      _schedule(() async {
+        try {
+          if (_active == null || _uid == null || _uid != _activeOwnerUid) {
+            return;
+          }
+          await _heartbeat();
+          await _flushPendingReports();
+        } catch (_) {
+          _retryReconciliation();
+          rethrow;
+        } finally {
+          _maintenancePending = false;
+        }
+      }),
+    );
+  }
+
+  Future<void> _flushPendingReports() async {
+    while (_pendingReports.isNotEmpty) {
+      await _pendingReports.first();
+      _pendingReports.removeAt(0);
+    }
+  }
+
+  void _stopWatchingQueue() {
+    _queueOwner = null;
+    _queueSub?.cancel();
+    _queueSub = null;
+  }
+
+  void _watchQueue() {
+    final uid = _uid;
+    if (_disposed || uid == null || _active != null || _queueOwner == uid) {
+      return;
+    }
+    _stopWatchingQueue();
+    _queueOwner = uid;
+    _queueSub = _requests
+        .where('ownerUid', isEqualTo: uid)
+        .where('state', isEqualTo: 'queued')
+        .limit(1)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (_disposed ||
+                _uid != uid ||
+                _queueOwner != uid ||
+                _active != null) {
+              return;
+            }
+            if (snapshot.docs.isNotEmpty) {
+              onActivity?.call('queue_available');
+              unawaited(_requestTick());
+            }
+          },
+          onError: (Object error) {
+            if (_queueOwner != uid) return;
+            debugPrint('[PublicationWorker] Queue listener: $error');
+            _stopWatchingQueue();
+            _retryReconciliation();
+          },
+        );
   }
 
   void _watchActive(String? requestId) {
@@ -261,11 +376,14 @@ class FirebaseChatReceiver {
                 (control != null &&
                     control['attemptId'] == _active?.attemptId &&
                     control['id'] != data['appliedControlId'])) {
-              unawaited(_schedule(_tick));
+              unawaited(_requestTick());
             }
           },
           onError: (Object error) {
+            if (_disposed || _watchedRequestId != requestId) return;
             debugPrint('[PublicationWorker] Active listener: $error');
+            _watchActive(null);
+            _retryReconciliation();
           },
         );
   }
@@ -273,6 +391,9 @@ class FirebaseChatReceiver {
   void dispose() {
     _disposed = true;
     _timer?.cancel();
+    _recoveryTimer?.cancel();
+    _retryTimer?.cancel();
+    _stopWatchingQueue();
     _authSub?.cancel();
     _requestsSub?.cancel();
     _pauseSafely();
@@ -282,22 +403,23 @@ class FirebaseChatReceiver {
   Future<void> _tick() async {
     onActivity?.call('tick');
     if (_uid == null || (_active != null && _activeOwnerUid != _uid)) return;
+    final uid = _uid;
     final owner = await _firestore
         .collection('remote_control_devices')
         .doc(deviceId)
         .get(const GetOptions(source: Source.server));
-    if (owner.data()?['ownerUid'] != _uid) {
+    if (_disposed || _uid != uid) return;
+    if (owner.data()?['ownerUid'] != uid) {
+      _stopWatchingQueue();
       _pauseSafely();
       return;
     }
-    while (_pendingReports.isNotEmpty) {
-      await _pendingReports.first();
-      _pendingReports.removeAt(0);
-    }
+    await _flushPendingReports();
     final deviceData =
         (await _device.get(const GetOptions(source: Source.server))).data();
     final activeId = deviceData?['activeRequestId'] as String?;
     if (activeId != null) {
+      _stopWatchingQueue();
       final snap = await _requests
           .doc(activeId)
           .get(const GetOptions(source: Source.server));
@@ -417,7 +539,12 @@ class FirebaseChatReceiver {
               ? null
               : Map<String, dynamic>.from(result['request'] as Map);
     }
-    if (selected == null || _disposed) return;
+    if (_disposed) return;
+    if (selected == null) {
+      _watchQueue();
+      return;
+    }
+    _stopWatchingQueue();
     _active = PublicationIdentity(
       deviceId,
       selected['requestId'] as String,
@@ -442,6 +569,7 @@ class FirebaseChatReceiver {
     _takeoverPausedIdentity = null;
     _preparedVehicle = null;
     _leaseExpiry = null;
+    _reportedExpiry = null;
     _pause = null;
     _resume = null;
     _stop = null;
@@ -450,11 +578,21 @@ class FirebaseChatReceiver {
   }
 
   Future<void> _heartbeat() async {
+    onActivity?.call('heartbeat');
+    final id = _active, uid = _uid;
+    if (id == null || uid == null || uid != _activeOwnerUid) return;
     final expiry = DateTime.now().add(const Duration(seconds: 60));
     final held = await _firestore.runTransaction<bool>((tx) async {
+      final owner =
+          (await tx.get(
+            _firestore.collection('remote_control_devices').doc(deviceId),
+          )).data();
       final d = (await tx.get(_device)).data();
-      if (d?['workerRunId'] != _runId ||
-          d?['activeRequestId'] != _active?.requestId)
+      if (_uid != uid ||
+          owner?['ownerUid'] != uid ||
+          _active?.matches(id) != true ||
+          d?['workerRunId'] != _runId ||
+          d?['activeRequestId'] != id.requestId)
         return false;
       tx.update(_device, {'leaseUntil': Timestamp.fromDate(expiry)});
       return true;
@@ -646,6 +784,7 @@ class FirebaseChatReceiver {
         await report();
       } catch (_) {
         self._pendingReports.add(report);
+        self._retryReconciliation();
       }
     });
   }
@@ -746,7 +885,8 @@ class FirebaseChatReceiver {
       _paused = false;
       unawaited(_cleanupMedia(id));
       _clearActive();
-      // The next idle poll asks the backend to reserve one next request.
+      // Run after this operation finishes, never recursively inside its transaction.
+      unawaited(_requestTick());
     }
     return true;
   }

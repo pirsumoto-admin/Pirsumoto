@@ -32,9 +32,10 @@ flutter test
 # Run a single test file
 flutter test test/widget_test.dart
 
-# Platform builds
+# Platform builds & deployment
 flutter build apk --release
 ./scripts/deploy_release.sh -l    # Build release APK, install on device, and launch
+./scripts/deploy_site.sh          # Build and deploy pirsumoto-site to Firebase Hosting
 ```
 
 ## Architecture

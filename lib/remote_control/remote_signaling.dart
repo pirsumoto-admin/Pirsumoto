@@ -10,10 +10,8 @@ class RemoteSignalingService {
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sessionSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _candidatesSub;
 
-  RemoteSignalingService({
-    FirebaseFirestore? firestore,
-    required this.deviceId,
-  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+  RemoteSignalingService({FirebaseFirestore? firestore, required this.deviceId})
+    : _firestore = firestore ?? FirebaseFirestore.instance;
 
   DocumentReference<Map<String, dynamic>> get _sessionDoc =>
       _firestore.collection('remote_control_sessions').doc(deviceId);
@@ -26,34 +24,27 @@ class RemoteSignalingService {
 
   /// Set receiver state to IDLE, waiting for an incoming session request
   Future<void> setReceiverIdle({String? endingSessionId}) async {
-    try {
-      final doc = await _sessionDoc.get();
-      if (doc.exists) {
-        final data = doc.data();
-        final currentSessionId = data?['sessionId'] as String?;
-        final currentStatus = data?['status'] as String?;
-        // If a new session was already requested while terminating the old one, do not overwrite it!
-        if (currentStatus == 'requested' &&
-            currentSessionId != null &&
-            currentSessionId != endingSessionId) {
-          debugPrint('[ReceiverSignaling] Retaining new session $currentSessionId while closing $endingSessionId');
-          return;
-        }
+    // Compare and update atomically so teardown cannot erase a new request.
+    await _firestore.runTransaction((transaction) async {
+      final doc = await transaction.get(_sessionDoc);
+      final data = doc.data();
+      final currentSessionId = data?['sessionId'] as String?;
+      if (currentSessionId != null && currentSessionId != endingSessionId) {
+        return;
       }
-    } catch (e) {
-      debugPrint('[ReceiverSignaling] Error checking session doc before setReceiverIdle: $e');
+      transaction.set(_sessionDoc, {
+        'status': 'idle',
+        'deviceId': deviceId,
+        'updatedAt': FieldValue.serverTimestamp(),
+        'offer': null,
+        'answer': null,
+        'sessionId': null,
+        'controllerId': null,
+      }, SetOptions(merge: true));
+    });
+    if (endingSessionId != null) {
+      await _clearCandidates(forSessionId: endingSessionId);
     }
-
-    await _clearCandidates(forSessionId: endingSessionId);
-    await _sessionDoc.set({
-      'status': 'idle',
-      'deviceId': deviceId,
-      'updatedAt': FieldValue.serverTimestamp(),
-      'offer': null,
-      'answer': null,
-      'sessionId': null,
-      'controllerId': null,
-    }, SetOptions(merge: true));
   }
 
   /// Listen for incoming session requests when in IDLE
@@ -64,49 +55,67 @@ class RemoteSignalingService {
       String? controllerUid,
       RTCSessionDescription offer,
       String sessionType,
-    ) onSessionRequested,
+    )
+    onSessionRequested,
     required Function() onSessionTerminated,
+    void Function(Object error)? onError,
   }) {
     _sessionSub?.cancel();
-    debugPrint('[ReceiverSignaling] Listening for session requests on ${_sessionDoc.path}');
+    debugPrint(
+      '[ReceiverSignaling] Listening for session requests on ${_sessionDoc.path}',
+    );
     String? lastProcessedStatus;
-    _sessionSub = _sessionDoc.snapshots().listen((snapshot) {
-      if (!snapshot.exists) {
-        debugPrint('[ReceiverSignaling] Session doc does not exist yet');
-        return;
-      }
-      final data = snapshot.data();
-      if (data == null) return;
+    _sessionSub = _sessionDoc.snapshots().listen(
+      (snapshot) {
+        if (!snapshot.exists) {
+          debugPrint('[ReceiverSignaling] Session doc does not exist yet');
+          return;
+        }
+        final data = snapshot.data();
+        if (data == null) return;
 
-      final status = data['status'] as String?;
-      final sessionId = data['sessionId'] as String?;
-      final controllerId = data['controllerId'] as String?;
-      final controllerUid = data['controllerUid'] as String?;
-      final sessionType = data['sessionType'] as String? ?? 'remote_control';
-      final offerMap = data['offer'] as Map<String, dynamic>?;
+        final status = data['status'] as String?;
+        final sessionId = data['sessionId'] as String?;
+        final controllerId = data['controllerId'] as String?;
+        final controllerUid = data['controllerUid'] as String?;
+        final sessionType = data['sessionType'] as String? ?? 'remote_control';
+        final offerMap = data['offer'] as Map<String, dynamic>?;
 
-      if (status == lastProcessedStatus && status == 'closed') {
-        return;
-      }
-      lastProcessedStatus = status;
+        if (status == lastProcessedStatus && status == 'closed') {
+          return;
+        }
+        lastProcessedStatus = status;
 
-      debugPrint('[ReceiverSignaling] Snapshot update: status=$status, sessionId=$sessionId, controller=$controllerId, controllerUid=$controllerUid, sessionType=$sessionType');
-
-      if (status == 'requested' && sessionId != null && offerMap != null) {
-        debugPrint('[ReceiverSignaling] Valid offer detected! Triggering onSessionRequested');
-        final offer = RTCSessionDescription(
-          offerMap['sdp'] as String,
-          offerMap['type'] as String,
+        debugPrint(
+          '[ReceiverSignaling] Snapshot update: status=$status, sessionId=$sessionId, controller=$controllerId, controllerUid=$controllerUid, sessionType=$sessionType',
         );
-        _activeSessionId = sessionId;
-        onSessionRequested(sessionId, controllerId ?? 'unknown', controllerUid, offer, sessionType);
-      } else if (status == 'closed') {
-        debugPrint('[ReceiverSignaling] Session closed by remote party');
-        onSessionTerminated();
-      }
-    }, onError: (e) {
-      debugPrint('[ReceiverSignaling] Error in session snapshots stream: $e');
-    });
+
+        if (status == 'requested' && sessionId != null && offerMap != null) {
+          debugPrint(
+            '[ReceiverSignaling] Valid offer detected! Triggering onSessionRequested',
+          );
+          final offer = RTCSessionDescription(
+            offerMap['sdp'] as String,
+            offerMap['type'] as String,
+          );
+          _activeSessionId = sessionId;
+          onSessionRequested(
+            sessionId,
+            controllerId ?? 'unknown',
+            controllerUid,
+            offer,
+            sessionType,
+          );
+        } else if (status == 'closed') {
+          debugPrint('[ReceiverSignaling] Session closed by remote party');
+          onSessionTerminated();
+        }
+      },
+      onError: (e) {
+        debugPrint('[ReceiverSignaling] Error in session snapshots stream: $e');
+        onError?.call(e);
+      },
+    );
   }
 
   String? _activeSessionId;
@@ -117,16 +126,21 @@ class RemoteSignalingService {
   }
 
   /// Send SDP Answer back to controller
-  Future<void> sendAnswer(RTCSessionDescription answer, String sessionId) async {
-    _activeSessionId = sessionId;
-    await _sessionDoc.update({
-      'status': 'connected',
-      'sessionId': sessionId,
-      'answer': {
-        'sdp': answer.sdp,
-        'type': answer.type,
-      },
-      'connectedAt': FieldValue.serverTimestamp(),
+  Future<void> sendAnswer(
+    RTCSessionDescription answer,
+    String sessionId,
+  ) async {
+    await _firestore.runTransaction((transaction) async {
+      final snapshot = await transaction.get(_sessionDoc);
+      if (snapshot.data()?['sessionId'] != sessionId ||
+          snapshot.data()?['status'] != 'requested') {
+        throw StateError('Screen-sharing request was replaced or cancelled');
+      }
+      transaction.update(_sessionDoc, {
+        'status': 'connected',
+        'answer': {'sdp': answer.sdp, 'type': answer.type},
+        'connectedAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
@@ -142,12 +156,18 @@ class RemoteSignalingService {
   }
 
   /// Send local ICE Candidate generated by the receiver
-  Future<void> sendIceCandidate(RTCIceCandidate candidate, {String? explicitSessionId}) async {
+  Future<void> sendIceCandidate(
+    RTCIceCandidate candidate, {
+    String? explicitSessionId,
+  }) async {
     if (_isLoopbackOrInvalid(candidate.candidate)) {
-      debugPrint('[ReceiverSignaling] Dropping local loopback candidate: ${candidate.candidate}');
+      debugPrint(
+        '[ReceiverSignaling] Dropping local loopback candidate: ${candidate.candidate}',
+      );
       return;
     }
     final sid = explicitSessionId ?? _activeSessionId;
+    if (sid == null || sid != _activeSessionId) return;
     await _receiverCandidates.add({
       'sessionId': sid,
       'candidate': candidate.candidate,
@@ -162,12 +182,15 @@ class RemoteSignalingService {
     required Function(RTCIceCandidate candidate) onCandidate,
   }) {
     _candidatesSub?.cancel();
+    final sessionId = _activeSessionId;
+    if (sessionId == null) throw StateError('No active session');
     _candidatesSub = _controllerCandidates.snapshots().listen((snapshot) {
+      if (_activeSessionId != sessionId) return;
       for (final change in snapshot.docChanges) {
         if (change.type == DocumentChangeType.added) {
           final data = change.doc.data();
           if (data != null && data['candidate'] != null) {
-            if (_activeSessionId != null && data['sessionId'] != null && data['sessionId'] != _activeSessionId) {
+            if (data['sessionId'] != sessionId) {
               continue;
             }
             final candStr = data['candidate'] as String;
@@ -214,10 +237,13 @@ class RemoteSignalingService {
     } catch (_) {}
   }
 
-  void dispose() {
+  void stopListening() {
     _sessionSub?.cancel();
     _candidatesSub?.cancel();
     _sessionSub = null;
     _candidatesSub = null;
+    _activeSessionId = null;
   }
+
+  void dispose() => stopListening();
 }

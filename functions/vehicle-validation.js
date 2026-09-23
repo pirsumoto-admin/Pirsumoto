@@ -82,7 +82,7 @@ function extractExplicitFields(text, state) {
 function guidance(state, imageCount) {
   const missing = getMissingFields(state), errors = validateValues(state);
   if (!state.license_plate) return 'כדי להתחיל, שלח מספר רישוי בן 7 או 8 ספרות.';
-  if (missing.length || errors.length) return [...errors, ...(missing.length ? ['להשלמת פרטי הרכב:', ...missing.map(k => `• ${schema.labels[k]}`)] : [])].join('\n');
+  if (missing.length || errors.length) return [...errors, ...(missing.length ? ['להשלמת פרטי רכב חסרים:', ...missing.map(k => `• ${schema.labels[k]}`)] : [])].join('\n');
   return imageCount > 0 ? '✅ הפרטים מוכנים. לחץ על ״פרסם עכשיו״ להוספה לתור.' : '✅ הפרטים מלאים. צרף לפחות תמונה אחת כדי לפרסם.';
 }
 module.exports = {extractExplicitFields, schema, normalizeHebrewDigits, normalizeHand, extractPlate, sanitizeFields, getMissingFields, validateValues, guidance};

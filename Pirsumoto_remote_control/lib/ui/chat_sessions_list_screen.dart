@@ -179,9 +179,9 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
       AppColors.primaryAction,
     ),
     ChatSessionStatus.running => (
-      AppColors.primarySoft,
-      AppColors.primary,
-      AppColors.primaryAction,
+      AppColors.successSoft,
+      AppColors.success,
+      AppColors.success,
     ),
     ChatSessionStatus.paused => (
       AppColors.warningSoft,

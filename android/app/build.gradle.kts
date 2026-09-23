@@ -68,6 +68,14 @@ flutter {
     source = "../.."
 }
 
+dependencies {
+    // flutter_webrtc supplies this at runtime; expose its frame API to our
+    // static-screen repeater (same SDK version as flutter_webrtc).
+    compileOnly("io.github.webrtc-sdk:android:150.7871.01")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("io.github.webrtc-sdk:android:150.7871.01")
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)

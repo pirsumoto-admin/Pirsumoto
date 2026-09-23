@@ -1,23 +1,19 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:easy_localization/easy_localization.dart' hide TextDirection;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:image_picker/image_picker.dart';
+import '../../services/automation_webview_session.dart';
 
-enum PresetPlatform {
-  yad2,
-  facebook,
-}
+enum PresetPlatform { yad2, facebook }
 
 class PresetLoginScreen extends StatefulWidget {
   final PresetPlatform platform;
 
-  const PresetLoginScreen({
-    super.key,
-    required this.platform,
-  });
+  const PresetLoginScreen({super.key, required this.platform});
 
   @override
   State<PresetLoginScreen> createState() => _PresetLoginScreenState();
@@ -25,6 +21,9 @@ class PresetLoginScreen extends StatefulWidget {
 
 class _PresetLoginScreenState extends State<PresetLoginScreen> {
   late final WebViewController _controller;
+  AutomationWebViewSession? _browserSession;
+  bool _webViewVisible = false;
+  bool _webViewClosed = false;
   double _loadingProgress = 0.0;
   bool _isLoading = true;
   String _currentUrl = '';
@@ -61,7 +60,12 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
     }
   }
 
-  String _trText(BuildContext context, String key, {required String he, required String en}) {
+  String _trText(
+    BuildContext context,
+    String key, {
+    required String he,
+    required String en,
+  }) {
     final isEn = context.locale.languageCode == 'en';
     final fallback = isEn ? en : he;
     final val = tr(key);
@@ -92,18 +96,41 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
   void initState() {
     super.initState();
     WakelockPlus.enable();
+    unawaited(_initializeBrowser());
+  }
 
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted);
+  Future<void> _initializeBrowser() async {
+    try {
+      _browserSession = await AutomationWebViewSession.open(
+        auxiliary: true,
+        isCurrent: () => mounted && !_webViewClosed,
+        stop: () async {
+          _webViewClosed = true;
+        },
+        detach: () async {
+          if (mounted) setState(() => _webViewVisible = false);
+          await WidgetsBinding.instance.endOfFrame;
+        },
+        configure: _configureBrowser,
+      );
+      if (mounted && _browserSession != null && !_webViewClosed) {
+        setState(() => _webViewVisible = true);
+      }
+    } catch (error) {
+      debugPrint('[PresetLogin] Browser startup failed: $error');
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
+  Future<void> _configureBrowser(WebViewController controller) async {
     if (widget.platform == PresetPlatform.facebook) {
-      controller.setUserAgent(_kDesktopUserAgent);
+      await controller.setUserAgent(_kDesktopUserAgent);
     }
 
-    controller.setNavigationDelegate(
+    await controller.setNavigationDelegate(
       NavigationDelegate(
         onProgress: (int progress) {
-          if (mounted) {
+          if (mounted && !_webViewClosed) {
             setState(() {
               _loadingProgress = progress / 100.0;
               _isLoading = progress < 100;
@@ -111,7 +138,7 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
           }
         },
         onPageStarted: (String url) {
-          if (mounted) {
+          if (mounted && !_webViewClosed) {
             setState(() {
               _currentUrl = url;
               _isLoading = true;
@@ -119,7 +146,7 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
           }
         },
         onPageFinished: (String url) {
-          if (mounted) {
+          if (mounted && !_webViewClosed) {
             setState(() {
               _currentUrl = url;
               _isLoading = false;
@@ -136,14 +163,18 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
     if (Platform.isAndroid && controller.platform is AndroidWebViewController) {
       final androidController = controller.platform as AndroidWebViewController;
       AndroidWebViewController.enableDebugging(true);
-      androidController.setMediaPlaybackRequiresUserGesture(false);
-      androidController.setOnShowFileSelector((FileSelectorParams params) async {
+      await androidController.setMediaPlaybackRequiresUserGesture(false);
+      await androidController.setOnShowFileSelector((
+        FileSelectorParams params,
+      ) async {
         final picker = ImagePicker();
         if (params.mode == FileSelectorMode.openMultiple) {
           final List<XFile> images = await picker.pickMultiImage();
           return images.map((e) => Uri.file(e.path).toString()).toList();
         } else {
-          final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+          final XFile? image = await picker.pickImage(
+            source: ImageSource.gallery,
+          );
           if (image != null) {
             return [Uri.file(image.path).toString()];
           }
@@ -153,16 +184,19 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
     }
 
     _controller = controller;
-    _controller.loadRequest(Uri.parse(_initialUrl));
+    await _controller.loadRequest(Uri.parse(_initialUrl));
   }
 
   @override
   void dispose() {
+    _webViewClosed = true;
+    _browserSession?.closeInBackground();
     WakelockPlus.disable();
     super.dispose();
   }
 
   void _loadUrl(String url) {
+    if (!_webViewVisible || _webViewClosed) return;
     _controller.loadRequest(Uri.parse(url));
   }
 
@@ -193,7 +227,8 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
       context,
       'preset_login.login_notice',
       he: 'אם אינך מחובר, התחבר כעת כדי שהעוגיות יישמרו לאוטומציה.',
-      en: 'Please log in if prompted so session cookies are saved for automation.',
+      en:
+          'Please log in if prompted so session cookies are saved for automation.',
     );
 
     return Scaffold(
@@ -208,17 +243,17 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
         ),
         title: Text(
           title,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-          ),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           overflow: TextOverflow.ellipsis,
         ),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: reloadTooltip,
-            onPressed: () => _controller.reload(),
+            onPressed:
+                _webViewVisible && !_webViewClosed
+                    ? () => _controller.reload()
+                    : null,
           ),
           IconButton(
             icon: const Icon(Icons.close),
@@ -242,19 +277,12 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
             color: Colors.grey.shade100,
             child: Row(
               children: [
-                Icon(
-                  Icons.info_outline,
-                  size: 18,
-                  color: _themeColor,
-                ),
+                Icon(Icons.info_outline, size: 18, color: _themeColor),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     loginNotice,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey.shade800,
-                    ),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade800),
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -282,7 +310,10 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
           ),
           // WebView
           Expanded(
-            child: WebViewWidget(controller: _controller),
+            child:
+                _webViewVisible
+                    ? WebViewWidget(controller: _controller)
+                    : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -307,10 +338,7 @@ class _PresetLoginScreenState extends State<PresetLoginScreen> {
                   _currentUrl.isEmpty ? _initialUrl : _currentUrl,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey.shade600,
-                  ),
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                 ),
               ),
               const SizedBox(width: 12),

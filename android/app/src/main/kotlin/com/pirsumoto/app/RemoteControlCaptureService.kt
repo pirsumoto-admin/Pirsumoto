@@ -79,14 +79,20 @@ class RemoteControlCaptureService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            ForegroundServiceNotifications.track(NOTIFICATION_ID, notification)
             isRunning = true
             Log.i(TAG, "RemoteControlCaptureService started in foreground")
         } catch (e: Exception) {
+            ForegroundServiceNotifications.forget(NOTIFICATION_ID)
+            isRunning = false
             Log.e(TAG, "Failed to startForeground: ${e.message}", e)
+            stopSelf()
         }
     }
 
     private fun stopCaptureForeground() {
+        ScreenCaptureFrameRepeater.stop()
+        ForegroundServiceNotifications.forget(NOTIFICATION_ID)
         isRunning = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -98,6 +104,8 @@ class RemoteControlCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        ScreenCaptureFrameRepeater.stop()
+        ForegroundServiceNotifications.forget(NOTIFICATION_ID)
         isRunning = false
         super.onDestroy()
     }
@@ -106,9 +114,14 @@ class RemoteControlCaptureService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("פרסומוטו - שליטה מרחוק פעילה")
             .setContentText("שיקוף מסך ושליטה פעילים מול הבקר")
-            .setSmallIcon(R.mipmap.launcher_icon)
+            .setSmallIcon(R.drawable.ic_pirsumoto_notification)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setDeleteIntent(ForegroundServiceNotifications.dismissalIntent(this, NOTIFICATION_ID))
             .build()
     }
 

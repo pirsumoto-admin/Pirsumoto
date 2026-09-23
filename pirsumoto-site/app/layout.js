@@ -8,8 +8,8 @@ const heebo = Heebo({
 });
 
 export const metadata = {
-  title: 'מחירוטו - פתרון קצה לקליטה ופרסום רכבים למגרשים',
-  description: 'מערכת פנימית לניהול מלאי, טיב תמונות, ופרסום אוטומטי של רכבים ליד2, קארוויז ואתרי המגרש.',
+  title: 'פרסומוטו (Pirsumoto) [Patent Pending] - פתרון קצה לקליטה ופרסום רכבים למגרשים',
+  description: 'פתרון מוגן בבקשת פטנט (Patent Pending): מכשיר אוטומציה מנוהל MDM הפועל תחת פרטי המשתמש מהמשרד/הבית, בשילוב אפליקציית Pirsumoto Relay ושליטת Human-in-the-Loop מלאה.',
 };
 
 export default function RootLayout({ children }) {

@@ -1,7 +1,5 @@
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
-import 'package:publication_protocol/publication_protocol.dart';
-import 'worker_backend.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -226,7 +224,7 @@ class _StepValidation {
     this.selectedAfterLabel,
     this.selectedAfterOffset = 1,
     this.nextMarker,
-    this.timeout = const Duration(seconds: 4),
+    this.timeout = const Duration(seconds: 2),
     this.custom,
   });
 }
@@ -385,14 +383,90 @@ class Yad2AccessibilityAutomationService {
     }
   }
 
-  static Future<void> showToast(String message) async {
+  static Future<void> showToast(
+    String message, {
+    int chunkDelayMs = 3500,
+  }) async {
     try {
       if (Platform.isAndroid) {
-        await _channel.invokeMethod('showToast', {'message': message});
+        final cleanMsg = message.trim();
+        if (cleanMsg.isEmpty) return;
+
+        // If short enough and single line, show directly
+        if (cleanMsg.length <= 70 && !cleanMsg.contains('\n')) {
+          await _channel.invokeMethod('showToast', {'message': cleanMsg});
+          return;
+        }
+
+        final chunks = _splitIntoToastChunks(cleanMsg, maxChunkSize: 70);
+        for (int i = 0; i < chunks.length; i++) {
+          final prefix =
+              chunks.length > 1 ? '(${i + 1}/${chunks.length}) ' : '';
+          await _channel.invokeMethod('showToast', {
+            'message': '$prefix${chunks[i]}',
+          });
+          if (i < chunks.length - 1) {
+            await Future.delayed(Duration(milliseconds: chunkDelayMs));
+          }
+        }
       }
     } catch (e) {
       debugPrint('[Yad2-A11y] Error showing toast: $e');
     }
+  }
+
+  static List<String> _splitIntoToastChunks(
+    String text, {
+    int maxChunkSize = 70,
+  }) {
+    final List<String> chunks = [];
+    final lines = text.split('\n');
+    String currentChunk = '';
+
+    for (final rawLine in lines) {
+      final line = rawLine.trim();
+      if (line.isEmpty) continue;
+
+      final words = line.split(RegExp(r'\s+'));
+      for (final word in words) {
+        if (word.isEmpty) continue;
+
+        if (word.length > maxChunkSize) {
+          if (currentChunk.isNotEmpty) {
+            chunks.add(currentChunk);
+            currentChunk = '';
+          }
+          for (int i = 0; i < word.length; i += maxChunkSize) {
+            final end =
+                (i + maxChunkSize < word.length)
+                    ? i + maxChunkSize
+                    : word.length;
+            chunks.add(word.substring(i, end));
+          }
+          continue;
+        }
+
+        if (currentChunk.isEmpty) {
+          currentChunk = word;
+        } else if ((currentChunk.length + 1 + word.length) <= maxChunkSize) {
+          currentChunk += ' $word';
+        } else {
+          chunks.add(currentChunk);
+          currentChunk = word;
+        }
+      }
+
+      if (currentChunk.isNotEmpty) {
+        chunks.add(currentChunk);
+        currentChunk = '';
+      }
+    }
+
+    if (currentChunk.isNotEmpty) {
+      chunks.add(currentChunk);
+    }
+
+    return chunks.isEmpty ? [text] : chunks;
   }
 
   bool get isPaused => _isPaused;
@@ -412,6 +486,7 @@ class Yad2AccessibilityAutomationService {
     _isPaused = true;
     _currentPhase = null;
     _pausedPhase = null;
+    if (identical(activeInstance, this)) activeInstance = null;
     // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
     // unawaited(_updateWhatsAppPublishingFlag(false));
   }
@@ -553,7 +628,8 @@ class Yad2AccessibilityAutomationService {
     _started = true;
     _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Starting optimized Accessibility automation');
-    // _hasNotifiedCompletion = false;
+    onFirstStepDetected?.call();
+    onToggleOverlayVisibility?.call(true);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WakelockPlus.enable();
     // [WHATSAPP-DISABLED] _updateWhatsAppPublishingFlag disabled.
@@ -837,15 +913,11 @@ class Yad2AccessibilityAutomationService {
           phase: phase,
           goal: 'Select hand value.',
           action:
-              () => _selectOpenOption(
-                hand,
-                selectedValue: hand.split('|').first,
-                closeAfterSelect: true,
-              ),
+              () =>
+                  _selectOpenOption(hand, selectedValue: hand.split('|').first),
           validation: _StepValidation(
             selectedValue: hand.split('|').first,
             selectedAfterLabel: 'יד*|יד',
-            timeout: const Duration(seconds: 6),
           ),
         );
       case AutomationPhase.phase8:
@@ -853,7 +925,7 @@ class Yad2AccessibilityAutomationService {
           phase: phase,
           goal: 'Open current ownership dropdown.',
           action: () async {
-            await _scrollDown(0.22);
+            await _scrollDown(0.22, accessibilityOnly: true);
             return _openDropdownByLabel(
               'בעלות נוכחית',
               skipToPhase:
@@ -877,7 +949,6 @@ class Yad2AccessibilityAutomationService {
               () => _selectOpenOption(
                 ownership,
                 selectedValue: formData.currentOwnership.trim(),
-                closeAfterSelect: true,
               ),
           validation: _StepValidation(
             selectedValue: formData.currentOwnership.trim(),
@@ -923,7 +994,6 @@ class Yad2AccessibilityAutomationService {
               ownership,
               selectedValue: formData.previousOwnership.trim(),
               targetInstance: targetInstance,
-              closeAfterSelect: true,
             );
           },
           validation: _StepValidation(
@@ -938,7 +1008,6 @@ class Yad2AccessibilityAutomationService {
           action: _actionEnterKilometers,
           validation: _StepValidation(
             mustContain: _nonEmpty(formData.kilometers, fallback: 'קילומטראז'),
-            timeout: const Duration(seconds: 3),
           ),
         );
       case AutomationPhase.phase13:
@@ -951,11 +1020,10 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase14:
         return _AutomationStepSpec(
           phase: phase,
-          goal: 'Submit additional-info section.',
+          goal: 'Generate, save and submit the vehicle description.',
           action: _actionSubmitAdditionalInfo,
-          validation: const _StepValidation(
-            mustContain: 'פרטים', //'ישוב*|יישוב|ישוב|עיר',
-            timeout: Duration(seconds: 10),
+          validation: _StepValidation(
+            custom: () => _isElementPresent('מחיר|סכום מינימלי|סכום'),
           ),
         );
       case AutomationPhase.phase15:
@@ -963,20 +1031,18 @@ class Yad2AccessibilityAutomationService {
           phase: phase,
           goal: 'Select city autocomplete value.',
           action: _actionSelectCity,
-          validation: _StepValidation(
-            selectedValue: _city,
-            selectedAfterLabel: 'ישוב*|יישוב|ישוב|עיר',
-            timeout: const Duration(seconds: 8),
-          ),
+          validation: _StepValidation(custom: () => _isElementPresent(_city)),
         );
       case AutomationPhase.phase16:
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Enter price and submit price section.',
           action: _actionEnterPrice,
-          validation: const _StepValidation(
-            nextMarker: 'תמונות|העלאת תמונות|הוספת תמונות|תמונות הרכב|המשך',
-            timeout: Duration(seconds: 10),
+          validation: _StepValidation(
+            custom:
+                () => _isElementPresent(
+                  'תמונות|העלאת תמונות|הוספת תמונות|תמונות הרכב',
+                ),
           ),
         );
       case AutomationPhase.phase17:
@@ -984,9 +1050,8 @@ class Yad2AccessibilityAutomationService {
           phase: phase,
           goal: 'Upload photos when available and continue.',
           action: _actionUploadPhotosAndContinue,
-          validation: const _StepValidation(
-            nextMarker: 'פרסום|תשלום|סיום|המודעה|המשך|לשלב הבא',
-            timeout: Duration(seconds: 8),
+          validation: _StepValidation(
+            custom: () => _isElementPresent(_termsLabel),
           ),
         );
       case AutomationPhase.phase18:
@@ -1013,44 +1078,107 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionDetectEntryForm() async {
+    // Show the "הפסק" button and overlay before starting detection
+    onFirstStepDetected?.call();
+    onToggleOverlayVisibility?.call(true);
+
     bool loginDetected = false;
-    final detected = await _retryUntil(
-      () async {
-        if (await _isElementPresent('חיפוש')) return true;
-        if (await _dismissKnownPopups()) return false;
-        if (await _checkIsLoginScreen()) {
-          loginDetected = true;
-          return true;
+    const resetTargets = 'התחלה מחדש|להתחיל מחדש|התחל מחדש';
+
+    // 5 attempts is the stop condition if neither license input nor התחלה מחדש is found
+    for (int attempt = 1; attempt <= 5; attempt++) {
+      if (_inputBlocked) {
+        return const _StepActionResult.failure('Action cancelled.');
+      }
+
+      debugPrint(
+        '[Yad2-A11y] Inspecting entry form & initial popups (attempt $attempt/5)...',
+      );
+
+      // 1. Check for login screen
+      if (await _checkIsLoginScreen()) {
+        loginDetected = true;
+        break;
+      }
+
+      // 2. Check Option A: Is the license plate input (000-00-000 or input before חיפוש) found?
+      // If found -> immediately exit the 5 tries and continue to license filling logic!
+      final hasLicenseInput = await _isLicenseInputPresent();
+      if (hasLicenseInput) {
+        debugPrint(
+          '[Yad2-A11y] ✅ License plate input detected — no popup exists, exiting 5 tries and starting license filling.',
+        );
+        return const _StepActionResult.success();
+      }
+
+      // 3. Check Option B: Is "התחלה מחדש" popup found?
+      // If found -> immediately exit the 5 tries, click on "התחלה מחדש", wait for reset, and continue to license filling!
+      final hasResetPopup = await _isElementPresent(resetTargets);
+      if (hasResetPopup) {
+        debugPrint(
+          '[Yad2-A11y] ⚠️ Detected "$resetTargets" popup — clicking to reset and proceeding to license filling.',
+        );
+
+        bool dismissed = await toolFindElementAndTap(resetTargets);
+        if (!dismissed) {
+          for (final alt in _splitAlternatives(resetTargets)) {
+            if (await toolFindAndTapJs(alt)) {
+              onAutomationFallback?.call('JavaScript', alt);
+              dismissed = true;
+              break;
+            }
+          }
         }
-        return false;
-      },
-      timeout: const Duration(milliseconds: 1000),
-      pollInterval: const Duration(milliseconds: 500),
-    );
+        if (dismissed) {
+          debugPrint(
+            '[Yad2-A11y] Reset popup clicked — waiting for page reset and starting license filling...',
+          );
+
+          await _waitForUiSettle(const Duration(milliseconds: 1500));
+          return const _StepActionResult.success();
+        }
+      }
+
+      // 4. Check for any other known info popups (e.g. 'הבנתי', 'עדכנתי', etc.)
+      if (await _dismissKnownPopups()) {
+        await _waitForUiSettle(const Duration(milliseconds: 1000));
+        if (await _isLicenseInputPresent()) {
+          return const _StepActionResult.success();
+        }
+      }
+
+      if (attempt < 5) {
+        await Future.delayed(const Duration(seconds: 1));
+      }
+    }
 
     if (loginDetected) {
-      // [WHATSAPP-DISABLED] _notifyLoginRequired disabled.
-      // await _notifyLoginRequired();
       _startLoginGate();
       return const _StepActionResult.failure('Login required.');
     }
 
-    if (!detected) {
-      return const _StepActionResult.failure('Yad2 entry form not found.');
-    }
-    onFirstStepDetected?.call();
-    return const _StepActionResult.success();
+    // Stop condition reached after 5 attempts where none of the 2 options were found
+
+    return const _StepActionResult.failure('Yad2 entry form not found.');
   }
 
   Future<_StepActionResult> _actionEnterLicenseAndSearch() async {
     await Future.delayed(const Duration(milliseconds: 800));
-    // Best-effort reset-popup dismissal — single attempt, exactly like the
-    // original. A "resume existing publication" dialog may appear; if so, tap
-    // start-over. Do NOT poll for it: on a fresh start it never shows and
-    // polling would stall the flow for seconds.
-    if (await toolFindElementAndTap('התחלה מחדש|מחדש')) {
+    // Best-effort reset-popup dismissal — check Accessibility tree first, JS fallback as last resort
+    const resetTarget = 'התחלה מחדש|מחדש|להתחיל מחדש|התחל מחדש';
+    bool dismissedReset = await toolFindElementAndTap(resetTarget);
+    if (!dismissedReset) {
+      for (final alt in _splitAlternatives(resetTarget)) {
+        if (await toolFindAndTapJs(alt)) {
+          onAutomationFallback?.call('JavaScript', alt);
+          dismissedReset = true;
+          break;
+        }
+      }
+    }
+    if (dismissedReset) {
       debugPrint('[Yad2-A11y] Reset popup found — tapped start-over.');
-      await Future.delayed(const Duration(milliseconds: 800));
+      await _waitForUiSettle(const Duration(milliseconds: 1200));
     }
     final license = _nonEmpty(formData.licenseNumber, fallback: '5211639');
     final entered = await _retryUntil(
@@ -1124,7 +1252,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionSelectColorAndShade() async {
-    await _scrollDown(0.2);
+    await _scrollDown(0.2, accessibilityOnly: true);
     final color = _nonEmpty(formData.color, fallback: 'כחול');
     final shade = _nonEmpty(formData.shade, fallback: color);
     final colorSelected = await _selectOpenOption(color, selectedValue: color);
@@ -1165,7 +1293,7 @@ class Yad2AccessibilityAutomationService {
           }
           return tapSmart(option, targetInstance: instanceToUse);
         }),
-        timeout: const Duration(seconds: 6),
+        timeout: const Duration(seconds: 2),
       ),
     );
     if (!tapped) {
@@ -1201,7 +1329,7 @@ class Yad2AccessibilityAutomationService {
   Future<_StepActionResult> _actionWarranties() async {
     await _fetchSettingsIfNeeded();
     if (_warranties.isEmpty) return const _StepActionResult.success();
-    await _scrollDown(0.2);
+    await _scrollDown(0.2, accessibilityOnly: true);
 
     final durationCounts = <String, int>{};
     final battery =
@@ -1229,7 +1357,7 @@ class Yad2AccessibilityAutomationService {
         if (duration == null || duration.isEmpty) continue;
         final instance = (durationCounts[duration] ?? 0) + 1;
         durationCounts[duration] = instance;
-        await _scrollDown(0.1);
+        await _scrollDown(0.1, accessibilityOnly: true);
 
         final selected = await selectDropdownSmart(
           label: _getWarrantyDropdownLabel(warranty),
@@ -1255,7 +1383,7 @@ class Yad2AccessibilityAutomationService {
   }) async {
     if (fetchSettings) await _fetchSettingsIfNeeded();
     if (values.isEmpty) return const _StepActionResult.success();
-    await _scrollDown(0.2);
+    await _scrollDown(0.2, accessibilityOnly: true);
     for (final value in values) {
       final tapped = await _runOnce(
         'list:$value',
@@ -1272,7 +1400,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionOpenHandDropdown() async {
-    await _scrollDown(0.2);
+    await _scrollDown(0.2, accessibilityOnly: true);
     final existing = await toolGetNodeTextAfter('יד*|יד', offset: 2);
     if (existing != null && existing.trim().isNotEmpty) {
       debugPrint('[Yad2-A11y] Hand is already filled: $existing');
@@ -1284,7 +1412,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionEnterKilometers() async {
-    await _scrollDown(0.1);
+    await _scrollDown(0.1, accessibilityOnly: true);
     final km = _nonEmpty(formData.kilometers, fallback: '0');
     final entered = await _retryUntil(
       () => _performWithPopupHandling(() async {
@@ -1293,22 +1421,24 @@ class Yad2AccessibilityAutomationService {
         await toolEnterTextAtFocusedJs(km);
         return true;
       }),
-      timeout: const Duration(seconds: 8),
+      timeout: const Duration(seconds: 3),
     );
     if (!entered) {
       return const _StepActionResult.failure('Kilometers field not found.');
     }
     await _dismissKeyboard();
-    await _scrollDown(0.3);
+    await _scrollDown(0.3, accessibilityOnly: true);
+
     return const _StepActionResult.success();
   }
 
   Future<_StepActionResult> _actionDisability() async {
     if (!formData.handicapped) return const _StepActionResult.success();
     await _retryUntil(
-      () => _performWithPopupHandling(() => tapSmart('מותאם לנכים|נכים|נכה')),
+      () => toolFindElementAndTap('מותאם לנכים|נכים|נכה'),
       timeout: const Duration(seconds: 4),
     );
+
     return const _StepActionResult.success();
   }
 
@@ -1352,7 +1482,10 @@ class Yad2AccessibilityAutomationService {
       'טיפים למילוי תיאור מוצלח',
       'הוספת תיאור לרכב',
     };
-    if (uiExcludedLabels.contains(trimmed)) return false;
+    if (uiExcludedLabels.contains(trimmed) ||
+        trimmed.startsWith('זה המקום לתאר')) {
+      return false;
+    }
     return true;
   }
 
@@ -1368,289 +1501,100 @@ class Yad2AccessibilityAutomationService {
     return clean;
   }
 
-  Future<String> _extractVehicleDescriptionText() async {
-    String text = '';
+  static const _descriptionMarkers = [
+    'פרטים חשובים על הרכב',
+    'זה המקום לתאר',
+    'מה חשוב לך שידעו',
+    'תיאור הרכב',
+  ];
+  static const _nextStepLabel = 'לשלב הבא|שלב הבא';
+  static const _priceLabel = 'מחיר|סכום מינימלי|סכום';
 
-    // 1. Access fresh accessibility tree and print it to log
-    final treeStr = await _readTreeString();
-    debugPrint('====================================================');
-    debugPrint(
-      '🌲 [Yad2-A11y] Fresh Accessibility Tree Dump at _extractVehicleDescriptionText:',
-    );
-    if (treeStr != null && treeStr.trim().isNotEmpty) {
-      for (final line in treeStr.split('\n')) {
-        debugPrint(line);
-      }
-    } else {
-      debugPrint('[Yad2-A11y] Accessibility tree was null or empty.');
-    }
-    debugPrint('====================================================');
-
-    if (treeStr != null && treeStr.isNotEmpty) {
-      final nodes = _parseA11yTree(treeStr);
-      debugPrint(
-        '[Yad2-A11y] Parsed ${nodes.length} nodes from accessibility tree.',
+  static bool _isDescriptionMarker(_A11yTreeNode node) =>
+      _descriptionMarkers.any(
+        (label) =>
+            node.text.trim().startsWith(label) ||
+            node.desc.trim().startsWith(label),
       );
 
-      // Priority 1: Check target labels (e.g. "סוג הרכב", "פרטים חשובים על הרכב")
-      const targetLabels = [
-        'סוג הרכב',
-        'פרטים חשובים על הרכב',
-        'זה המקום לתאר',
-        'מה חשוב לך שידעו',
-        'תיאור הרכב',
-        'תיאור',
-      ];
-      for (int i = 0; i < nodes.length; i++) {
-        final n = nodes[i];
-        final matchesLabel = targetLabels.any(
-          (lbl) => n.text.trim() == lbl || n.desc.trim() == lbl,
-        );
-        if (matchesLabel) {
-          debugPrint(
-            '[Yad2-A11y] Matched label node at index $i: "${n.text.isNotEmpty ? n.text : n.desc}"',
-          );
-          // Look ahead in subsequent nodes for the value
-          for (
-            int offset = 1;
-            offset <= 6 && (i + offset) < nodes.length;
-            offset++
-          ) {
-            final nextNode = nodes[i + offset];
-            if (isValidExtractedDescription(nextNode.text)) {
-              text = nextNode.text.trim();
-              debugPrint(
-                '[Yad2-A11y] Found description at offset +$offset after label: "$text"',
-              );
-              return _saveAndReturnDescription(text);
-            }
-            if (isValidExtractedDescription(nextNode.desc)) {
-              text = nextNode.desc.trim();
-              debugPrint(
-                '[Yad2-A11y] Found description in desc at offset +$offset after label: "$text"',
-              );
-              return _saveAndReturnDescription(text);
-            }
-          }
-        }
-        // Also check composite container starting with "סוג הרכב "
-        if (n.text.startsWith('סוג הרכב ') && n.text.length > 12) {
-          final candidate = n.text.replaceFirst('סוג הרכב', '').trim();
-          if (isValidExtractedDescription(candidate)) {
-            text = candidate;
-            debugPrint(
-              '[Yad2-A11y] Found vehicle description in composite container: "$text"',
-            );
-            return _saveAndReturnDescription(text);
-          }
-        }
+  // Only read the editable description beside its label. Vehicle summaries,
+  // hints, city values and arbitrary long page text are not descriptions.
+  @visibleForTesting
+  static String descriptionFromAccessibilityTree(String tree) {
+    final nodes = _parseA11yTree(tree);
+    var inDescription = false;
+    for (final node in nodes) {
+      if (_isDescriptionMarker(node)) inDescription = true;
+      if (!inDescription) continue;
+      if (_splitAlternatives(_nextStepLabel).contains(node.text.trim()) ||
+          _splitAlternatives(_nextStepLabel).contains(node.desc.trim())) {
+        break;
       }
-
-      // Priority 2: Check EditText / textarea nodes directly
-      for (final node in nodes) {
-        final isEditText = node.className.toLowerCase().contains('edittext');
-        if (isEditText) {
-          debugPrint(
-            '[Yad2-A11y] Inspecting EditText node: text="${node.text}" desc="${node.desc}"',
-          );
-          if (isValidExtractedDescription(node.text)) {
-            text = node.text.trim();
-            debugPrint(
-              '[Yad2-A11y] Found description in EditText text: "$text"',
-            );
-            return _saveAndReturnDescription(text);
-          }
-          if (isValidExtractedDescription(node.desc)) {
-            text = node.desc.trim();
-            debugPrint(
-              '[Yad2-A11y] Found description in EditText desc: "$text"',
-            );
-            return _saveAndReturnDescription(text);
-          }
-        }
+      final className = node.className.toLowerCase();
+      if (!className.contains('edittext') && !className.contains('textarea')) {
+        continue;
       }
-
-      // Priority 3: Any node with valid description (e.g. inside dialog / modal preview)
-      for (final node in nodes) {
-        if (isValidExtractedDescription(node.text)) {
-          text = node.text.trim();
-          debugPrint('[Yad2-A11y] Found description in node text: "$text"');
-          return _saveAndReturnDescription(text);
-        }
-        if (isValidExtractedDescription(node.desc)) {
-          text = node.desc.trim();
-          debugPrint('[Yad2-A11y] Found description in node desc: "$text"');
-          return _saveAndReturnDescription(text);
-        }
-      }
-    }
-
-    // Priority 4: Accessibility channel fallback (findNodeTextAfterTarget)
-    try {
-      for (final offset in [1, 2, 3]) {
-        final a11yText = await _channel
-            .invokeMethod<String>('findNodeTextAfterTarget', {
-              'target': 'פרטים חשובים על הרכב|זה המקום לתאר|מה חשוב לך שידעו',
-              'targetInstance': 1,
-              'threshold': 0.75,
-              'offset': offset,
-            });
-        if (a11yText != null && isValidExtractedDescription(a11yText)) {
-          text = a11yText.trim();
-          debugPrint(
-            '[Yad2-A11y] Extracted description via findNodeTextAfterTarget (offset: $offset): "$text"',
-          );
-          return _saveAndReturnDescription(text);
-        }
-      }
-    } catch (e) {
-      debugPrint(
-        '[Yad2-A11y] Error extracting description via findNodeTextAfterTarget: $e',
-      );
-    }
-
-    // Fallback: Computer Vision and LLM Validation
-    if (text.isEmpty) {
-      debugPrint(
-        '[Yad2-A11y] 🔄 Accessibility tree yielded no description. Falling back to Computer Vision & LLM validation...',
-      );
-      text = await _extractDescriptionViaVisionAndLlm();
-    }
-
-    return _saveAndReturnDescription(text);
-  }
-
-  Future<String> _extractDescriptionViaVisionAndLlm() async {
-    try {
-      debugPrint(
-        '[Yad2-A11y] 📷 Capturing fresh UI context / screenshot for Computer Vision...',
-      );
-      final ctx = await _observeUIFresh();
-      if (ctx == null || ctx.screenshot.isEmpty) {
-        debugPrint(
-          '[Yad2-A11y] UI screenshot not available for Computer Vision.',
-        );
-        return '';
-      }
-
-      String ocrText = '';
-      if (ocrService != null) {
-        debugPrint(
-          '[Yad2-A11y] 🔍 Running Google Cloud Vision OCR on screenshot...',
-        );
-        final fullOcr = await ocrService!.extractFullText(ctx.screenshot);
-        if (fullOcr != null && fullOcr.trim().isNotEmpty) {
-          ocrText = fullOcr.trim();
-          debugPrint('====================================================');
-          debugPrint('📷 [Yad2-A11y] Computer Vision (OCR) Extracted Text:');
-          for (final line in ocrText.split('\n')) {
-            debugPrint(line);
-          }
-          debugPrint('====================================================');
-        }
-      }
-
-      // Send to LLM for validation & extraction
-      debugPrint(
-        '[Yad2-A11y] 🤖 Calling LLM to validate and extract vehicle description...',
-      );
-      final llmResult = await _extractDescriptionWithLlm(
-        ocrText: ocrText.isNotEmpty ? ocrText : null,
-        screenshot: ctx.screenshot,
-      );
-
-      if (llmResult != null && isValidExtractedDescription(llmResult)) {
-        debugPrint(
-          '[Yad2-A11y] ✅ LLM validated & extracted description: "$llmResult"',
-        );
-        return llmResult;
-      }
-    } catch (e) {
-      debugPrint(
-        '[Yad2-A11y] Error during Computer Vision & LLM validation fallback: $e',
-      );
+      // The text is the field value; contentDescription may be its prompt.
+      return isValidExtractedDescription(node.text) ? node.text.trim() : '';
     }
     return '';
   }
 
-  Future<String?> _extractDescriptionWithLlm({
-    String? ocrText,
-    Uint8List? screenshot,
-  }) async {
-    try {
-      final response = await WorkerBackend.post({
-        'action': 'extract_description',
-        'ocrText': ocrText,
-        if (screenshot != null && (ocrText == null || ocrText.isEmpty))
-          'imageBase64': base64Encode(screenshot),
-      });
-      final text = response['text']?.toString().trim();
-      return text == null || text == 'NONE' ? null : text;
-    } catch (e) {
-      debugPrint('[Yad2] Description extraction unavailable: $e');
-      return null;
-    }
+  Future<bool> _isDescriptionStep() async {
+    final tree = await _readTreeString();
+    return tree != null && _parseA11yTree(tree).any(_isDescriptionMarker);
+  }
+
+  Future<String> _extractVehicleDescriptionText() async {
+    final tree = await _readTreeString();
+    final text = tree == null ? '' : descriptionFromAccessibilityTree(tree);
+    return _saveAndReturnDescription(text);
   }
 
   Future<_StepActionResult> _actionSubmitAdditionalInfo() async {
-    await _scrollDown(0.35);
-
-    // 3. Dismiss any known popups like "עדכנתי, בואו נמשיך"
+    // A successful submit is retained across a pause/retry. Never let this
+    // action use the price page's identically named next button.
     await _dismissKnownPopups();
-    await Future.delayed(const Duration(milliseconds: 1500));
+    await Future.delayed(const Duration(milliseconds: 500));
 
-    final submitted = await _retryUntil(
-      () => _performWithPopupHandling(() => tapSmart('לשלב הבא|שלב הבא|לשלב')),
-      timeout: const Duration(seconds: 8),
+    if (_completedPhaseActions.contains('description:submit')) {
+      return const _StepActionResult.success();
+    }
+    // if (!await _isDescriptionStep() && await _isElementPresent(_priceLabel)) {
+    //   return isValidExtractedDescription(extractedDescription)
+    //       ? const _StepActionResult.success()
+    //       : const _StepActionResult.failure(
+    //         'Already on price step without a captured vehicle description.',
+    //       );
+    // }
+
+    await Future<void>.delayed(const Duration(seconds: 5));
+
+    await _extractVehicleDescriptionText();
+
+    await _scrollDown(0.35, accessibilityOnly: true);
+
+    await toolFindElementAndTap(_nextStepLabel);
+
+    final submitted = await _runOnce(
+      'description:submit',
+      () => _retryUntil(() async {
+        if (!await _isDescriptionStep()) {
+          debugPrint('Description step label not found.');
+          await _scrollDown(0.05, accessibilityOnly: true);
+          return _isElementPresent(_priceLabel);
+        }
+        return toolFindElementAndTap(_nextStepLabel);
+      }),
     );
-    if (!submitted) {
-      return const _StepActionResult.failure(
-        'Additional-info submit not found.',
-      );
-    }
 
-    await Future.delayed(const Duration(milliseconds: 900));
-    try {
-      stdout.write('\x1B[2J\x1B[0;0H');
-    } catch (_) {}
-    debugPrint('\x1B[2J\x1B[0;0H');
-
-    String desc = await _extractVehicleDescriptionText();
-
-    // showToast('Yad2 field1: $lastExtractedDescription');
-
-    if (await _dismissKnownPopups()) {
-      await _scrollDown(0.2);
-      // 1. First, check if a dialog/popup is presenting the additional info BEFORE dismissing it!
-      String desc = await _extractVehicleDescriptionText();
-      // 2. If formData has a pre-existing description and Yad2 has none, enter it into Yad2
-      final hasPreExistingDesc =
-          formData.description.trim().isNotEmpty &&
-          isValidExtractedDescription(formData.description);
-      if (!isValidExtractedDescription(desc) && hasPreExistingDesc) {
-        await toolEnterTextAtFocusedJs(formData.description.trim());
-        // showToast('Yad2 field2: $lastExtractedDescription');
-      }
-
-      try {
-        stdout.write('\x1B[2J\x1B[0;0H');
-      } catch (_) {}
-      debugPrint('\x1B[2J\x1B[0;0H');
-
-      debugPrint(
-        '[Yad2-A11y] Injecting pre-existing description into Yad2 field: $desc',
-      );
-
-      await _retryUntil(
-        () => tapSmart('לשלב הבא|שלב הבא|לשלב'),
-        timeout: const Duration(seconds: 5),
-      );
-    }
-    return const _StepActionResult.success();
+    return submitted
+        ? const _StepActionResult.success()
+        : const _StepActionResult.failure('Description submit not found.');
   }
 
   Future<_StepActionResult> _actionSelectCity() async {
-    await _scrollDown(0.1);
+    await _scrollDown(0.1, accessibilityOnly: true);
     final city = _city;
     final typed = city.length > 1 ? city.substring(0, city.length - 1) : city;
     final label = 'ישוב*|יישוב|ישוב|עיר';
@@ -1669,7 +1613,7 @@ class Yad2AccessibilityAutomationService {
     }
 
     final fieldTapped = await _retryUntil(
-      () => _performWithPopupHandling(() => toolTapNodeAfter(label)),
+      () => toolTapNodeAfter(label),
       timeout: const Duration(seconds: 8),
     );
     if (!fieldTapped) {
@@ -1679,12 +1623,14 @@ class Yad2AccessibilityAutomationService {
     var current = '';
     for (final rune in typed.runes) {
       current += String.fromCharCode(rune);
-      await toolEnterTextAtFocusedJs(current);
+      if (!await toolEnterTextAtFocused(current)) {
+        return const _StepActionResult.failure('City text entry failed.');
+      }
       await Future.delayed(const Duration(milliseconds: 280));
     }
 
     final picked = await _retryUntil(
-      () => _performWithPopupHandling(() => tapSmart(city)),
+      () => toolFindElementAndTap(city),
       timeout: const Duration(seconds: 8),
     );
     if (!picked) {
@@ -1696,29 +1642,37 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionEnterPrice() async {
+    if (_completedPhaseActions.contains('price:submit')) {
+      return const _StepActionResult.success();
+    }
     final price = _nonEmpty(formData.price, fallback: '80000');
-    final entered = await _retryUntil(
-      () => _performWithPopupHandling(() async {
-        if (!await toolTapNodeAfter('מחיר|סכום מינימלי|סכום', offset: 1)) {
-          return false;
-        }
-        await Future.delayed(const Duration(milliseconds: 500));
-        await toolEnterTextAtFocusedJs(price);
-        return true;
+    final entered = await _runOnce(
+      'price:enter',
+      () => _retryUntil(() async {
+        if (await _isDescriptionStep()) return false;
+        if (!await toolTapNodeAfter(_priceLabel)) return false;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        // Native text-entry success is the gate. Reading the node after the
+        // label can return stale text or a wrapper, causing repeated entry.
+        return toolEnterTextAtFocused(price);
       }),
-      timeout: const Duration(seconds: 8),
     );
     if (!entered) {
-      return const _StepActionResult.failure('Price field not found.');
+      return const _StepActionResult.failure(
+        'Price field could not be filled.',
+      );
     }
 
-    await _dismissKeyboard();
-    await _scrollDown(0.5);
-    final submitted = await _retryUntil(
-      () => _performWithPopupHandling(
-        () => tapSmart('לשלב הבא|שלב הבא|לשלב|המשך'),
-      ),
-      timeout: const Duration(seconds: 8),
+    // Retrying a missing next button must not send Back again after the
+    // keyboard has already closed.
+    await _runOnce('price:dismiss-keyboard', () async {
+      await _dismissKeyboard();
+      return true;
+    });
+    await _scrollDown(0.5, accessibilityOnly: true);
+    final submitted = await _runOnce(
+      'price:submit',
+      () => _retryUntil(() => toolFindElementAndTap(_nextStepLabel)),
     );
     return submitted
         ? const _StepActionResult.success()
@@ -1728,16 +1682,20 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionUploadPhotosAndContinue() async {
+    if (_completedPhaseActions.contains('photos:submit')) {
+      return const _StepActionResult.success();
+    }
     final uploaded = await _runOnce('upload-images', _injectImagesIfAny);
     if (!uploaded) {
       debugPrint('[Yad2-A11y] Continuing without image injection.');
     }
-    await _scrollDown(0.75);
-    final submitted = await _retryUntil(
-      () => _performWithPopupHandling(
-        () => tapSmart('לשלב הבא|שלב הבא|המשך|לשלב'),
+    await _scrollDown(0.75, accessibilityOnly: true);
+    final submitted = await _runOnce(
+      'photos:submit',
+      () => _retryUntil(
+        () => toolFindElementAndTap(_nextStepLabel),
+        timeout: const Duration(seconds: 10),
       ),
-      timeout: const Duration(seconds: 10),
     );
     return submitted
         ? const _StepActionResult.success()
@@ -1759,7 +1717,7 @@ class Yad2AccessibilityAutomationService {
           if (await tapSmart(label)) return true;
           return false;
         }),
-        timeout: const Duration(seconds: 6),
+        timeout: const Duration(seconds: 4),
       ),
     );
     if (!opened) return false;
@@ -1771,7 +1729,7 @@ class Yad2AccessibilityAutomationService {
         () => _performWithPopupHandling(
           () => tapSmart(value, targetInstance: valueInstance),
         ),
-        timeout: const Duration(seconds: 6),
+        timeout: const Duration(seconds: 4),
       ),
     );
     if (!selected) return false;
@@ -1784,19 +1742,44 @@ class Yad2AccessibilityAutomationService {
     return true;
   }
 
+  static const _termsLabel = 'יצירת איש קשר חדש';
+
   bool _termsSubmitted = false;
   bool _termsCheckboxAttempted = false;
   Future<_StepActionResult> _actionTermsAgreement() async {
     if (_termsSubmitted) return const _StepActionResult.success();
-    const termsText = 'קראתי ואישרתי את התקנון';
+    const termsMarker = 'יצירת איש קשר חדש';
 
-    // 1. Detect and tap checkbox (node before text "קראתי ואישרתי את התקנון" or text itself)
     final tappedCheckbox =
         !_termsCheckboxAttempted &&
         await _performWithPopupHandling(() async {
-          final nodeBefore = await toolTapNodeBefore(termsText);
-          _termsCheckboxAttempted = nodeBefore || await tapSmart(termsText);
-          return _termsCheckboxAttempted;
+          final treeStr = await _readTreeString();
+          if (treeStr != null && treeStr.isNotEmpty) {
+            final hasTerms = treeStr.contains(termsMarker);
+            if (hasTerms) {
+              final nodes = _parseA11yTree(treeStr);
+              final checkboxNode = nodes.cast<_A11yTreeNode?>().firstWhere(
+                (node) =>
+                    node != null &&
+                    (node.className == 'android.widget.CheckBox' ||
+                        node.className.endsWith('.CheckBox') ||
+                        node.className.contains('CheckBox')),
+                orElse: () => null,
+              );
+
+              if (checkboxNode != null &&
+                  checkboxNode.centerX != null &&
+                  checkboxNode.centerY != null) {
+                await _tapBounds({
+                  'x': checkboxNode.centerX!,
+                  'y': checkboxNode.centerY!,
+                });
+                _termsCheckboxAttempted = true;
+                return true;
+              }
+            }
+          }
+          return false;
         });
 
     if (tappedCheckbox) {
@@ -1857,16 +1840,24 @@ class Yad2AccessibilityAutomationService {
     double deltaY = 0,
     bool allowJsFallback = true,
     bool allowOcrFallbackOverride = true,
+    int a11yRetries = 2,
   }) async {
     if (_inputBlocked) return false;
-    if (await toolFindElementAndTap(
-      targetText,
-      targetInstance: targetInstance,
-      deltaY: deltaY,
-    )) {
-      return true;
+    // 1. Accessibility Tree first (with retry)
+    for (var i = 0; i < a11yRetries; i++) {
+      if (await toolFindElementAndTap(
+        targetText,
+        targetInstance: targetInstance,
+        deltaY: deltaY,
+      )) {
+        return true;
+      }
+      if (i < a11yRetries - 1) {
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
     }
 
+    // 2. JavaScript fallback as last resort
     if (allowJsFallback) {
       for (final alt in _splitAlternatives(targetText)) {
         if (await toolFindAndTapJs(alt, targetInstance: targetInstance)) {
@@ -1877,6 +1868,7 @@ class Yad2AccessibilityAutomationService {
       }
     }
 
+    // 3. OCR fallback only if explicitly enabled
     if (allowOcrFallbackOverride &&
         allowOcrFallback &&
         ocrService != null &&
@@ -1897,26 +1889,25 @@ class Yad2AccessibilityAutomationService {
     int targetInstance = 1,
     double deltaY = 0,
     double threshold = 0.82,
+    int maxReads = 4,
   }) async {
     if (_inputBlocked) return false;
     debugPrint(
       '[Yad2-A11y] Tool tapElement("$targetText", instance=$targetInstance)',
     );
     try {
-      // Match the original exactly: resolve the label bounds and dispatch a real
-      // coordinate gesture tap. We deliberately do NOT use a semantic
-      // ACTION_CLICK here — web/React dropdown options (e.g. the Yad2 month
-      // list) accept ACTION_CLICK and report success but never fire their real
-      // onClick, so the value would not actually get selected. _getStableBounds
-      // re-reads until the coordinates settle, avoiding a tap landing mid-anim.
       final bounds = await _getStableBounds('findAndGetBounds', {
         'target': targetText,
         'targetInstance': targetInstance,
         'threshold': threshold,
-      });
-      if (bounds == null) return false;
-      await _tapBounds(bounds, deltaX: 0, deltaY: deltaY);
-      return true;
+      }, maxReads: maxReads);
+
+      if (bounds != null) {
+        debugPrint('[aric] Found bounds: $bounds');
+        await _tapBounds(bounds, deltaX: 0, deltaY: deltaY);
+        return true;
+      }
+      return false;
     } catch (e) {
       debugPrint('[Yad2-A11y] tapElement failed: $e');
       return false;
@@ -2238,7 +2229,10 @@ class Yad2AccessibilityAutomationService {
           final ok = await _dismissKnownPopups();
           return Yad2ToolResult(ok, ok ? 'popup dismissed' : 'no popup');
         case Yad2ToolName.scrollDown:
-          await _scrollDown((call.args['percent'] as num?)?.toDouble() ?? 0.5);
+          await _scrollDown(
+            (call.args['percent'] as num?)?.toDouble() ?? 0.5,
+            accessibilityOnly: true,
+          );
           return const Yad2ToolResult(true, 'scrolled');
         case Yad2ToolName.pressBack:
           final ok = await toolPressBack();
@@ -2344,6 +2338,16 @@ class Yad2AccessibilityAutomationService {
 
   Future<bool> _tryRecovery(_AutomationStepSpec spec, String reason) async {
     debugPrint('[Yad2-A11y] Recovery gate for ${spec.phase.name}: $reason');
+
+    // These steps own their next-button ordering. Generic recovery could
+    // bypass description capture, price entry, or the required terms checkbox.
+    if (spec.phase == AutomationPhase.phase14 ||
+        spec.phase == AutomationPhase.phase15 ||
+        spec.phase == AutomationPhase.phase16 ||
+        spec.phase == AutomationPhase.phase17 ||
+        spec.phase == AutomationPhase.phase18) {
+      return false;
+    }
 
     if (await _dismissKnownPopups()) return true;
 
@@ -2484,6 +2488,25 @@ class Yad2AccessibilityAutomationService {
     return loc;
   }
 
+  Future<bool> _isLicenseInputPresent() async {
+    // 1. Check if placeholder text is in tree
+    if (await _isElementPresent(
+      '00-000-00|000-00-000|0000000|00000000|מספר רכב',
+    )) {
+      return true;
+    }
+    // 2. Check if an editable input exists directly before the "חיפוש" button
+    try {
+      final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
+        'findInputBeforeAndGetBounds',
+        {'target': 'חיפוש'},
+      );
+      return bounds != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _isElementPresent(
     String target, {
     int targetInstance = 1,
@@ -2510,19 +2533,16 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> _dismissKnownPopups() async {
-    const popupTexts = [
-      'הבנתי',
-      'עדכנתי, בואו נמשיך',
-      'עדכנתי, בוא נמשיך',
-      'עדכנתי בואו נמשיך',
-      'אולי אחר כך',
-    ];
-    for (final text in popupTexts) {
-      if (await toolFindElementAndTap(text, deltaY: -15)) {
-        debugPrint('[Yad2-A11y] Dismissed popup: $text');
-        await Future.delayed(const Duration(milliseconds: 1000));
-        return true;
-      }
+    const popupPattern =
+        'הבנתי|התחלה מחדש|להתחיל מחדש|התחל מחדש|עדכנתי, בואו נמשיך|'
+        'עדכנתי, בוא נמשיך|עדכנתי בואו נמשיך|בואו נמשיך|אולי אחר כך|'
+        'סגור|סגירה|ביטול|סגירת חלון';
+
+    // Single fast 1-read check to avoid waiting if no popup is displayed
+    if (await toolFindElementAndTap(popupPattern, maxReads: 1)) {
+      debugPrint('[Yad2-A11y] Dismissed popup via Accessibility tree');
+      await Future.delayed(const Duration(milliseconds: 600));
+      return true;
     }
     return false;
   }
@@ -2557,7 +2577,10 @@ class Yad2AccessibilityAutomationService {
     return false;
   }
 
-  Future<void> _scrollDown(double percent) async {
+  Future<void> _scrollDown(
+    double percent, {
+    bool accessibilityOnly = false,
+  }) async {
     if (_inputBlocked) return;
     try {
       await _automationChannel.invokeMethod('scrollNode', {
@@ -2567,7 +2590,11 @@ class Yad2AccessibilityAutomationService {
     } catch (e) {
       debugPrint('[Yad2-A11y] Scroll failed: $e');
     }
-    await _waitForScrollSettle();
+    if (accessibilityOnly) {
+      await _waitForUiSettle(const Duration(milliseconds: 700));
+    } else {
+      await _waitForScrollSettle();
+    }
   }
 
   Future<void> _waitForScrollSettle({
@@ -2612,7 +2639,13 @@ class Yad2AccessibilityAutomationService {
         method,
         args,
       );
-      if (bounds == null) return null;
+      if (bounds == null) {
+        if (i < maxReads - 1) {
+          await Future.delayed(const Duration(milliseconds: 250));
+          continue;
+        }
+        return null;
+      }
       if (previous != null) {
         final dx = ((bounds['x'] as num) - (previous['x'] as num)).abs();
         final dy = ((bounds['y'] as num) - (previous['y'] as num)).abs();
@@ -2647,31 +2680,33 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _dismissKeyboard() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    await toolPressBack();
+    // Attempt to clear focus natively using AccessibilityService
+    try {
+      final cleared = await _automationChannel.invokeMethod<bool>('clearFocus');
+      if (cleared == true) {
+        debugPrint('[Yad2-A11y] Successfully cleared focus natively.');
+      }
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Error calling clearFocus: $e');
+    }
     await Future.delayed(const Duration(milliseconds: 500));
   }
 
   Future<bool> _checkIsLoginScreen() async {
-    try {
-      final res = await controller.runJavaScriptReturningResult('''
-        (function() {
-          var hasPassword = document.querySelector('input[type="password"]') !== null;
-          var text = document.body ? document.body.innerText : '';
-          return hasPassword || text.includes('התחברות') || text.includes('כניסה לאזור האישי') || text.includes('אימייל/מספר טלפון');
-        })()
-      ''');
-      if (res == true || res == 'true') return true;
-    } catch (_) {}
-
     const keywords = [
       'התחברות',
       'כניסה לאזור',
+      'כניסה לאזור האישי',
+      'כניסה באמצעות',
       'דוא"ל',
       'סיסמה',
       'הרשמה',
       'כניסה',
       'התחבר',
+      'אימייל/מספר טלפון',
+      'שם משתמש',
+      'Password',
+      'מספר נייד או אימייל',
     ];
     for (final keyword in keywords) {
       if (await _isElementPresent(keyword)) return true;
@@ -3099,27 +3134,53 @@ class _A11yTreeNode {
   final String text;
   final String desc;
   final bool isClickable;
+  final double? centerX;
+  final double? centerY;
 
   const _A11yTreeNode({
     required this.className,
     required this.text,
     required this.desc,
     required this.isClickable,
+    this.centerX,
+    this.centerY,
   });
 }
 
 List<_A11yTreeNode> _parseA11yTree(String treeStr) {
   final nodes = <_A11yTreeNode>[];
   final regex = RegExp(
-    r'\[([^\]]+)\]\s+text="([\s\S]*?)"\s+desc="([\s\S]*?)"\s+clickable=(true|false)',
+    r'\[([^\]]+)\]\s+text="([\s\S]*?)"\s+desc="([\s\S]*?)"\s+clickable=(true|false)(?:\s+bounds=Rect\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\))?',
   );
   for (final match in regex.allMatches(treeStr)) {
+    double? cx;
+    double? cy;
+    final leftStr = match.group(5);
+    final topStr = match.group(6);
+    final rightStr = match.group(7);
+    final bottomStr = match.group(8);
+    if (leftStr != null &&
+        topStr != null &&
+        rightStr != null &&
+        bottomStr != null) {
+      final left = double.tryParse(leftStr);
+      final top = double.tryParse(topStr);
+      final right = double.tryParse(rightStr);
+      final bottom = double.tryParse(bottomStr);
+      if (left != null && top != null && right != null && bottom != null) {
+        cx = (left + right) / 2.0;
+        cy = (top + bottom) / 2.0;
+      }
+    }
+
     nodes.add(
       _A11yTreeNode(
         className: match.group(1) ?? '',
         text: match.group(2) ?? '',
         desc: match.group(3) ?? '',
         isClickable: match.group(4) == 'true',
+        centerX: cx,
+        centerY: cy,
       ),
     );
   }

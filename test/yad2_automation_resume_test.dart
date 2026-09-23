@@ -75,6 +75,7 @@ class _Automation extends Yad2AccessibilityAutomationService {
     double deltaY = 0,
     bool allowJsFallback = true,
     bool allowOcrFallbackOverride = true,
+    int a11yRetries = 2,
   }) async {
     if (isPaused) return false;
     if (text == 'חיפוש') {
@@ -143,7 +144,24 @@ void main() {
             call.method == 'checkAutomationWindow'
                 ? true
                 : <String, Object>{'x': 100.0, 'y': 100.0};
-    messenger.setMockMethodCallHandler(channel, (call) => native(call));
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      // The entry phase now probes these labels through accessibility too.
+      // Generic bounds must not make the fake form look like a login screen.
+      final target = (call.arguments as Map?)?['target'];
+      if (call.method == 'findAndGetBounds' &&
+          [
+            'התחברות',
+            'כניסה לאזור',
+            'דוא"ל',
+            'סיסמה',
+            'הרשמה',
+            'כניסה',
+            'התחבר',
+          ].contains(target)) {
+        return null;
+      }
+      return native(call);
+    });
     service = _Automation(
       onPhaseError: (phase, error) => errors.add((phase, error)),
     );

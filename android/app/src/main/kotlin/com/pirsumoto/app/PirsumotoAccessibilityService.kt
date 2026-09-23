@@ -207,7 +207,8 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val node: AccessibilityNodeInfo,
         val label: String,
         val bounds: Rect,
-        val score: Double
+        val score: Double,
+        val priorityIndex: Int = Int.MAX_VALUE
     )
 
     fun normalizeHebrew(s: String): String {
@@ -242,7 +243,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         if (s1.isEmpty() && s2.isEmpty()) return 1.0
         if (s1.isEmpty() || s2.isEmpty()) return 0.0
 
-        // Allow exact matches or substrings with high scores
+        // Allow exact matches
         if (s1 == s2) return 1.0
 
         // Match exact text ignoring whitespace (e.g. "השכרה/החכר" vs "השכרה / החכר")
@@ -250,11 +251,18 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val clean2 = s2.replace("\\s".toRegex(), "")
         if (clean1.isNotEmpty() && clean1 == clean2) return 1.0
 
-        if (s1.contains(s2) || s2.contains(s1)) return 0.95
-
-        // Fast fail: if length difference is too big, it won't meet the threshold
         val maxLength = max(s1.length, s2.length)
         val minLength = min(s1.length, s2.length)
+
+        // Substring match: only consider it a strong match if the shorter string is at least 60% of the longer string
+        // or if s1 contains the full multi-word phrase s2 (where s2 is at least 6 characters)
+        if (minLength.toDouble() / maxLength >= 0.6) {
+            if (s1.contains(s2) || s2.contains(s1)) return 0.95
+        } else if (s1.contains(s2) && s2.length >= 6) {
+            return 0.90
+        }
+
+        // Fast fail: if length difference is too big, it won't meet the threshold
         if (minLength.toDouble() / maxLength < 0.5) return 0.0
 
         val distance = getLevenshteinDistance(s1, s2)
@@ -275,10 +283,13 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         for (label in labels) {
             val normalizedLabel = normalizeHebrew(label)
             var bestScore = 0.0
-            for (normalizedTarget in normalizedTargetList) {
+            var bestPriority = Int.MAX_VALUE
+            for (i in normalizedTargetList.indices) {
+                val normalizedTarget = normalizedTargetList[i]
                 val score = similarity(normalizedLabel, normalizedTarget)
                 if (score > bestScore) {
                     bestScore = score
+                    bestPriority = i
                 }
             }
 
@@ -298,7 +309,8 @@ class PirsumotoAccessibilityService : AccessibilityService() {
                             node = node,
                             label = label,
                             bounds = rect,
-                            score = bestScore
+                            score = bestScore,
+                            priorityIndex = bestPriority
                         )
                     )
                 }
@@ -334,7 +346,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
         // If fast path found matches, return immediately to save full tree traversal
         if (matches.isNotEmpty()) {
-            matches.sortByDescending { it.score }
+            matches.sortWith(compareBy<Match> { it.priorityIndex }.thenByDescending { it.score })
             return matches
         }
 
@@ -350,8 +362,8 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         }
 
         visit(root)
-        // Sort matches by descending score
-        matches.sortByDescending { it.score }
+        // Sort matches by priority first, then descending score
+        matches.sortWith(compareBy<Match> { it.priorityIndex }.thenByDescending { it.score })
         return matches
     }
 

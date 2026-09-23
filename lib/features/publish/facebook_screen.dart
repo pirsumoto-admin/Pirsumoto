@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import '../../services/automation_webview_session.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
 import '../../services/facebook_automation_service.dart';
 // [WHATSAPP-DISABLED] WhatsApp text validation import disabled in facebook_screen.
@@ -59,6 +60,10 @@ class FacebookScreen extends StatefulWidget {
 
 class _FacebookScreenState extends State<FacebookScreen> {
   late WebViewController _controller;
+  AutomationWebViewSession? _browserSession;
+  bool _webViewVisible = false;
+  bool _webViewClosed = false;
+  Future<void>? _browserInitialization;
   FacebookAutomationService? _service;
 
   String _statusMessage = 'טוען פייסבוק...';
@@ -75,6 +80,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
   bool _publicationStopped = false;
   bool _publicationPaused = false;
+  bool _finishing = false;
 
   @override
   void initState() {
@@ -89,14 +95,13 @@ class _FacebookScreenState extends State<FacebookScreen> {
       },
       resume: () {
         _publicationPaused = false;
-        if (_publicationStopped) return;
+        if (_publicationStopped || _webViewClosed) return;
         _service?.resumeAutomation();
         if (mounted) setState(() => _isPaused = false);
       },
       stop: () async {
         _publicationStopped = true;
-        if (_service != null) await _service!.stopAndWait();
-        await _controller.loadRequest(Uri.parse('about:blank'));
+        await _closeBrowser();
         if (mounted)
           setState(() {
             _isPaused = true;
@@ -107,32 +112,94 @@ class _FacebookScreenState extends State<FacebookScreen> {
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    _controller =
-        WebViewController()
-          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-          ..setUserAgent(_kDesktopUserAgent)
-          ..setNavigationDelegate(
-            NavigationDelegate(
-              onPageFinished: (url) {
-                debugPrint('[FB-Screen] onPageFinished: $url');
-                if (!_automationStarted) {
-                  _automationStarted = true;
-                  Future.delayed(const Duration(seconds: 2), _startAutomation);
-                }
-              },
-              onWebResourceError: (error) {
-                debugPrint(
-                  '[FB-Screen] WebResourceError: ${error.description}',
-                );
-              },
-            ),
-          )
-          ..loadRequest(Uri.parse(_kFacebookVehicleUrl));
+    _browserInitialization = _initializeBrowser();
+  }
+
+  Future<void> _initializeBrowser() async {
+    try {
+      _browserSession = await AutomationWebViewSession.open(
+        isCurrent:
+            () =>
+                mounted &&
+                !_publicationStopped &&
+                !_webViewClosed &&
+                FirebaseChatReceiver.isCurrent(
+                  widget.publishData?.publicationIdentity,
+                ),
+        stop: _stopBrowserAutomation,
+        detach: _detachBrowser,
+        configure: _configureBrowser,
+      );
+      if (mounted && _browserSession != null && !_webViewClosed) {
+        setState(() => _webViewVisible = true);
+      }
+    } catch (error) {
+      debugPrint('[AutomationWebView] Startup failed: $error');
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _statusMessage =
+              'לא ניתן לפתוח דפדפן חדש. יש לסגור את מסך הפרסום ולנסות שוב.';
+        });
+      }
+    }
+  }
+
+  Future<void> _stopBrowserAutomation() async {
+    _webViewClosed = true;
+    await _service?.stopAndWait();
+    _service?.dispose();
+  }
+
+  Future<void> _detachBrowser() async {
+    if (mounted) {
+      setState(() {
+        _webViewVisible = false;
+        _showControls = false;
+        _isLoginRequired = false;
+      });
+    }
+    // Let Flutter remove the platform view before native WebView.destroy().
+    await WidgetsBinding.instance.endOfFrame;
+  }
+
+  Future<void> _closeBrowser() async {
+    _webViewClosed = true;
+    await _browserInitialization;
+    await _browserSession?.close();
+  }
+
+  Future<void> _configureBrowser(WebViewController controller) async {
+    _controller = controller;
+    await _controller.setUserAgent(_kDesktopUserAgent);
+    await _controller.setNavigationDelegate(
+      NavigationDelegate(
+        onPageFinished: (url) {
+          if (!mounted ||
+              _webViewClosed ||
+              _publicationStopped ||
+              url == 'about:blank') {
+            return;
+          }
+          debugPrint('[FB-Screen] onPageFinished: $url');
+          if (!_automationStarted) {
+            _automationStarted = true;
+            Future.delayed(const Duration(seconds: 2), _startAutomation);
+          }
+        },
+        onWebResourceError: (error) {
+          debugPrint('[FB-Screen] WebResourceError: ${error.description}');
+        },
+      ),
+    );
+    await _controller.loadRequest(Uri.parse(_kFacebookVehicleUrl));
   }
 
   @override
   void dispose() {
+    _webViewClosed = true;
     FirebaseChatReceiver.unbindControls(this);
+    _browserSession?.closeInBackground();
     _service?.dispose();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -143,6 +210,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
   Future<void> _startAutomation() async {
     if (!mounted ||
+        _webViewClosed ||
         _publicationStopped ||
         !FirebaseChatReceiver.isCurrent(
           widget.publishData?.publicationIdentity,
@@ -152,6 +220,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
     // Check if a11y permission is available (Android only)
     final hasPermission = await FacebookAutomationService.checkPermission();
+    if (!mounted || _webViewClosed || _publicationStopped) return;
     if (!hasPermission && mounted) {
       FirebaseChatReceiver.reportAutomationStatus(
         identity: widget.publishData?.publicationIdentity,
@@ -166,7 +235,9 @@ class _FacebookScreenState extends State<FacebookScreen> {
   }
 
   void _buildAndStartService() {
-    if (_publicationStopped ||
+    if (!mounted ||
+        _webViewClosed ||
+        _publicationStopped ||
         !FirebaseChatReceiver.isCurrent(
           widget.publishData?.publicationIdentity,
         ))
@@ -227,38 +298,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
           if (mounted) setState(() => _statusMessage = '');
         });
       },
-      onAutomationComplete: (success) {
-        if (success) {
-          FirebaseChatReceiver.reportAutomationStatus(
-            identity: widget.publishData?.publicationIdentity,
-            statusType: 'platform_completed',
-            platform: 'facebook',
-            text: '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!',
-          );
-        } else {
-          FirebaseChatReceiver.reportAutomationStatus(
-            identity: widget.publishData?.publicationIdentity,
-            statusType: 'stuck',
-            text: '⚠️ האוטומציה בפייסבוק נכשלה',
-          );
-        }
-        if (!mounted) return;
-        setState(() {
-          _isComplete = true;
-          _hasError = !success;
-          _statusMessage =
-              success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
-        });
-
-        if (success && widget.publishData != null) {
-          unawaited(
-            DBService().saveListingFromPublishData(
-              widget.publishData!,
-              platform: 'facebook',
-            ),
-          );
-        }
-      },
+      onAutomationComplete: _finishAutomation,
     );
 
     setState(() => _statusMessage = 'מתחיל אוטומציה...');
@@ -269,6 +309,38 @@ class _FacebookScreenState extends State<FacebookScreen> {
     );
     if (_publicationPaused) _service!.pauseAutomation();
     _service!.startAutomation();
+  }
+
+  Future<void> _finishAutomation(bool success) async {
+    if (_finishing) return;
+    _finishing = true;
+    await _closeBrowser();
+    if (success && widget.publishData != null) {
+      unawaited(DBService().saveListingFromPublishData(
+        widget.publishData!, platform: 'facebook',
+      ));
+    }
+    if (mounted) {
+      setState(() {
+        _isComplete = true;
+        _hasError = !success;
+        _statusMessage = success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
+      });
+      // Commit PopScope before navigating, and navigate before reporting the
+      // terminal status, which can immediately launch the next queued vehicle.
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+    }
+    await FirebaseChatReceiver.reportAutomationStatus(
+      identity: widget.publishData?.publicationIdentity,
+      statusType: success ? 'platform_completed' : 'stuck',
+      platform: success ? 'facebook' : null,
+      text: success
+          ? '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!'
+          : '⚠️ האוטומציה בפייסבוק נכשלה',
+    );
   }
 
   void _showA11yPermissionDialog() {
@@ -355,7 +427,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
         body: Stack(
           children: [
             // WebView
-            WebViewWidget(controller: _controller),
+            if (_webViewVisible) WebViewWidget(controller: _controller),
 
             // Status bar overlay
             _buildStatusBar(),
@@ -605,7 +677,9 @@ class _FacebookScreenState extends State<FacebookScreen> {
                               context,
                               isFromWebView: true,
                             );
-                            if (mounted && shouldReload == true) {
+                            if (mounted &&
+                                !_webViewClosed &&
+                                shouldReload == true) {
                               try {
                                 await _controller.reload();
                               } catch (_) {}
@@ -676,34 +750,37 @@ class _FacebookScreenState extends State<FacebookScreen> {
       top: 0,
       left: 0,
       right: 0,
-      child: Container(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          MediaQuery.of(context).padding.top + 12,
-          16,
-          12,
-        ),
-        color: bg,
-        child: Row(
-          children: [
-            Icon(icon, color: Colors.white, size: 20),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                _statusMessage,
-                style: const TextStyle(color: Colors.white, fontSize: 14),
-                textAlign: TextAlign.right,
-              ),
-            ),
-            if (_isComplete || _hasError)
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text(
-                  'סגור',
-                  style: TextStyle(color: Colors.white),
+      child: IgnorePointer(
+        ignoring: !_isComplete && !_hasError,
+        child: Container(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            MediaQuery.of(context).padding.top + 12,
+            16,
+            12,
+          ),
+          color: bg,
+          child: Row(
+            children: [
+              Icon(icon, color: Colors.white, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _statusMessage,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  textAlign: TextAlign.right,
                 ),
               ),
-          ],
+              if (_isComplete || _hasError)
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text(
+                    'סגור',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

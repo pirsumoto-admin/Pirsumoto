@@ -90,6 +90,9 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="mediaProjection" />
+        <receiver
+            android:name=".ForegroundNotificationDismissedReceiver"
+            android:exported="false" />
         <!-- [WHATSAPP-DISABLED] WhatsAppNotificationListenerService intercepted WhatsApp notifications.
              Disabled: main app no longer listens to WhatsApp notifications.
         <service

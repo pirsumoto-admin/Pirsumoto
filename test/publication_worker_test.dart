@@ -1,12 +1,31 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:crypto/crypto.dart';
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pirsumoto/remote_control/firebase_chat_receiver.dart';
 import 'package:publication_protocol/publication_protocol.dart';
+
+class _InterruptibleFirestore extends FakeFirebaseFirestore {
+  bool failTransactions = false;
+
+  @override
+  Future<T> runTransaction<T>(
+    TransactionHandler<T> transactionHandler, {
+    Duration timeout = const Duration(seconds: 30),
+    int maxAttempts = 5,
+  }) {
+    if (failTransactions) return Future.error(StateError('Connection lost'));
+    return super.runTransaction(
+      transactionHandler,
+      timeout: timeout,
+      maxAttempts: maxAttempts,
+    );
+  }
+}
 
 const vehicle = <String, String>{
   'license_plate': '1234567',
@@ -30,7 +49,7 @@ const vehicle = <String, String>{
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  late FakeFirebaseFirestore db;
+  late _InterruptibleFirestore db;
   late StreamController<String?> owners;
   late FirebaseChatReceiver worker;
   late Directory temp;
@@ -39,6 +58,7 @@ void main() {
   late int resumes;
   late List<String> activity;
   late Future<DownloadedAttachment> Function(String) download;
+  late Future<Map<String, dynamic>?> Function(String) claim;
   final bytes = Uint8List.fromList([1, 2, 3, 4]);
   DocumentReference<Map<String, dynamic>> request(String id) =>
       db.doc('remote_chats/device/requests/$id');
@@ -104,8 +124,19 @@ void main() {
     await worker.poll();
   }
 
+  // Wait for event-driven behavior without manually polling the worker.
+  Future<void> waitFor(bool Function() ready, {int seconds = 2}) async {
+    final deadline = DateTime.now().add(Duration(seconds: seconds));
+    while (!ready()) {
+      if (DateTime.now().isAfter(deadline)) {
+        fail('Worker did not reach expected state');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
+
   setUp(() async {
-    db = FakeFirebaseFirestore();
+    db = _InterruptibleFirestore();
     owners = StreamController<String?>.broadcast(sync: true);
     temp = await Directory.systemTemp.createTemp('publication_test');
     launches = [];
@@ -114,10 +145,11 @@ void main() {
     resumes = 0;
     activity = [];
     download = (_) async => DownloadedAttachment(bytes, '1');
+    claim = claimNext;
     await db.doc('remote_control_devices/device').set({'ownerUid': 'owner'});
     worker = FirebaseChatReceiver(
       firestore: db,
-      claimNext: claimNext,
+      claimNext: (runId) => claim(runId),
       onActivity: (event) => activity.add(event),
       deviceId: 'device',
       ownerChanges: owners.stream,
@@ -145,6 +177,158 @@ void main() {
     await owners.close();
     await temp.delete(recursive: true);
   });
+
+  test(
+    'idle enqueue and completed publication advance without polling',
+    () async {
+      await settle();
+      activity.clear();
+      await enqueue('a', 1);
+      await waitFor(() => launches.length == 1);
+      expect(activity, contains('queue_available'));
+      await enqueue('b', 2);
+      final id = launches.first;
+      await FirebaseChatReceiver.reportAutomationStatus(
+        identity: id,
+        statusType: 'platform_completed',
+        platform: 'yad2',
+        text: 'Yad2 done',
+      );
+      expect(launches.length, 1);
+      await FirebaseChatReceiver.reportAutomationStatus(
+        identity: id,
+        statusType: 'platform_completed',
+        platform: 'facebook',
+        text: 'Done',
+      );
+      await waitFor(() => launches.length == 2);
+      expect(launches.map((id) => id.requestId), ['a', 'b']);
+    },
+  );
+
+  test('cancel drains the engine before event-driven handoff', () async {
+    await enqueue('a', 1);
+    await waitFor(() => launches.length == 1);
+    await enqueue('b', 2);
+    final entered = Completer<void>(), drained = Completer<void>();
+    stop = () {
+      entered.complete();
+      return drained.future;
+    };
+    await request('a').update({
+      'state': 'canceling',
+      'control': {
+        'id': 'cancel',
+        'command': 'cancel',
+        'attemptId': 'attempt_a',
+      },
+    });
+    await entered.future.timeout(const Duration(seconds: 2));
+    expect(launches.length, 1);
+    drained.complete();
+    await waitFor(() => launches.length == 2);
+    expect((await request('a').get()).data()?['state'], 'canceled');
+  });
+
+  test(
+    'idle listener is detached on sign-out and restored on sign-in',
+    () async {
+      await settle();
+      owners.add(null);
+      activity.clear();
+      await enqueue('a', 1);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(launches, isEmpty);
+      expect(activity, isEmpty);
+      owners.add('owner');
+      await waitFor(() => launches.length == 1);
+    },
+  );
+
+  test('slow reconciliation coalesces repeated requests', () async {
+    await settle();
+    final entered = Completer<void>(), release = Completer<void>();
+    var calls = 0;
+    claim = (_) async {
+      calls++;
+      if (calls == 1) {
+        entered.complete();
+        await release.future;
+      }
+      return null;
+    };
+    final first = worker.poll();
+    await entered.future;
+    final repeated = List.generate(100, (_) => worker.poll());
+    release.complete();
+    await Future.wait([first, ...repeated]);
+    expect(calls, 2, reason: 'Only one follow-up pass is needed');
+  });
+
+  test(
+    'active heartbeat renews the lease without full reconciliation',
+    () async {
+      await enqueue('a', 1);
+      await settle();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final before =
+          (await db.doc('remote_chats/device').get()).data()?['leaseUntil']
+              as Timestamp;
+      activity.clear();
+      await waitFor(() => activity.contains('heartbeat'), seconds: 12);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final after =
+          (await db.doc('remote_chats/device').get()).data()?['leaseUntil']
+              as Timestamp;
+      expect(after.compareTo(before), greaterThan(0));
+      expect(activity, isNot(contains('tick')));
+      expect(activity, isNot(contains('claim')));
+      expect(launches.length, 1);
+    },
+  );
+
+  test('failed claim retries without another Firestore change', () async {
+    await settle();
+    var calls = 0;
+    claim = (runId) async {
+      calls++;
+      if (calls == 1) throw StateError('temporary connection failure');
+      return claimNext(runId);
+    };
+    await enqueue('a', 1);
+    await waitFor(() => launches.length == 1, seconds: 12);
+    expect(calls, 2);
+    expect(launches.single.requestId, 'a');
+  });
+
+  test(
+    'failed completion report is retried before advancing the queue',
+    () async {
+      await enqueue('a', 1);
+      await settle();
+      await enqueue('b', 2);
+      final id = launches.first;
+      await FirebaseChatReceiver.reportAutomationStatus(
+        identity: id,
+        statusType: 'platform_completed',
+        platform: 'yad2',
+        text: 'Yad2 done',
+      );
+      db.failTransactions = true;
+      await FirebaseChatReceiver.reportAutomationStatus(
+        identity: id,
+        statusType: 'platform_completed',
+        platform: 'facebook',
+        text: 'Done',
+      );
+      expect((await request('a').get()).data()?['state'], 'publishing');
+      expect(launches.length, 1);
+      db.failTransactions = false;
+      await waitFor(() => launches.length == 2, seconds: 12);
+      expect((await request('a').get()).data()?['state'], 'completed');
+      expect(launches.map((id) => id.requestId), ['a', 'b']);
+    },
+  );
 
   test(
     'FIFO queue stays reserved through Yad2 and pause, releases after Facebook',

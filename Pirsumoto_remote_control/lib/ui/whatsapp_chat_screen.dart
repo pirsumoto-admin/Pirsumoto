@@ -24,6 +24,9 @@ import 'chat_session_manager.dart';
 import '../database/sqlite_database_helper.dart';
 import '../services/remote_validation_service.dart';
 import '../services/vehicle_data_service.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/agent_config_service.dart';
 
 class WhatsAppChatScreen extends StatefulWidget {
   final String deviceId;
@@ -348,6 +351,27 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       if (!_sameAccount || !mounted) return;
       final saved = await SqliteDatabaseHelper.instance.getSession(_sessionId);
       if (saved == null) throw StateError('יש להשלים את פרטי הרכב');
+      
+      if (saved.vehicleData.containsKey('color')) {
+        final rawColor = saved.vehicleData['color']!;
+        final allowedColors = AgentConfigService.instance.allowedColors;
+        String matchedColor = '';
+        if (allowedColors.contains(rawColor)) {
+          matchedColor = rawColor;
+        } else {
+          final colorPart = rawColor.split(' ').first.trim();
+          if (allowedColors.contains(colorPart)) {
+            matchedColor = colorPart;
+          } else {
+            matchedColor = await _matchColorWithLlm(rawColor, allowedColors);
+          }
+        }
+        if (matchedColor.isNotEmpty && matchedColor != rawColor) {
+           saved.vehicleData['color'] = matchedColor;
+           await ChatSessionManager.saveSession(saved);
+        }
+      }
+
       await ChatSessionManager.startPublication(widget.deviceId, saved);
       await _refreshSession();
     } catch (e) {
@@ -355,6 +379,106 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
+  }
+
+  Future<String> _matchColorWithLlm(
+    String rawColor,
+    List<String> allowedColors,
+  ) async {
+    try {
+      await AgentConfigService.instance.checkAndUpdateConfigIfNeeded();
+      final prefs = await SharedPreferences.getInstance();
+      final apiKey =
+          prefs.getString('anthropic_api_key') ??
+          const String.fromEnvironment('ANTHROPIC_API_KEY', defaultValue: '');
+
+      if (apiKey.isEmpty) {
+        return _fallbackColorMatch(rawColor, allowedColors);
+      }
+
+      final prompt = AgentConfigService.defaultColorMatchingPromptTemplate
+          .replaceAll('{raw_color}', rawColor)
+          .replaceAll('{allowed_colors}', allowedColors.join(', '));
+
+      final body = jsonEncode({
+        'model': 'gpt-5.6-luna',
+        'max_completion_tokens': 512,
+        'reasoning_effort': 'low',
+        'messages': [
+          {'role': 'user', 'content': prompt},
+        ],
+      });
+
+      final response = await http.post(
+        Uri.parse('https://api.openai.com/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: body,
+      );
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        final contentText =
+            (decoded['content'] as List?)
+                ?.whereType<Map>()
+                .where((c) => c['type'] == 'text')
+                .map((c) => c['text'] as String)
+                .join(' ')
+                .trim() ??
+            '';
+
+        final cleanResult = contentText.trim().replaceAll(
+          RegExp(r'[^\u0590-\u05FF]'),
+          '',
+        );
+        for (final allowed in allowedColors) {
+          if (cleanResult == allowed ||
+              allowed.contains(cleanResult) ||
+              cleanResult.contains(allowed)) {
+            return allowed;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[WhatsAppChat] LLM color matching error: $e');
+    }
+
+    return _fallbackColorMatch(rawColor, allowedColors);
+  }
+
+  String _fallbackColorMatch(String rawColor, List<String> allowedColors) {
+    final norm = rawColor.toLowerCase();
+    if (norm.contains('כסף') ||
+        norm.contains('אפור') ||
+        norm.contains('עכבר')) {
+      return 'אפור';
+    }
+    if (norm.contains('זהב') ||
+        norm.contains('צהוב') ||
+        norm.contains('נחושת')) {
+      return 'צהוב';
+    }
+    if (norm.contains('פנינה') ||
+        norm.contains('שנהב') ||
+        norm.contains('שמנת') ||
+        norm.contains('קרם')) {
+      return 'לבן';
+    }
+    if (norm.contains('תכלת') ||
+        norm.contains('כחול') ||
+        norm.contains('טורקיז')) {
+      return 'כחול';
+    }
+    if (norm.contains('בורדו') || norm.contains('אדום')) return 'אדום';
+    if (norm.contains('חום') || norm.contains('בז')) return 'חום';
+    if (norm.contains('ירוק')) return 'ירוק';
+    if (norm.contains('כתום')) return 'כתום';
+    if (norm.contains('סגול')) return 'סגול';
+    if (norm.contains('ורוד')) return 'ורוד';
+    if (norm.contains('שחור')) return 'שחור';
+    return allowedColors.first;
   }
 
   void _initAudioPlayerListeners() {

@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 class ControllerSignalingClient {
   final FirebaseFirestore _firestore;
+  final FirebaseAuth? auth;
   final String deviceId;
   final String controllerId;
 
@@ -14,6 +15,7 @@ class ControllerSignalingClient {
 
   ControllerSignalingClient({
     FirebaseFirestore? firestore,
+    this.auth,
     required this.deviceId,
     required this.controllerId,
   }) : _firestore = firestore ?? FirebaseFirestore.instance;
@@ -27,6 +29,15 @@ class ControllerSignalingClient {
   CollectionReference<Map<String, dynamic>> get _receiverCandidates =>
       _sessionDoc.collection('receiver_candidates');
 
+  /// Establish identity before setLocalDescription starts emitting ICE candidates.
+  Future<void> prepareSession(String sessionId) async {
+    await _sessionSub?.cancel();
+    await _candidatesSub?.cancel();
+    _sessionSub = null;
+    _candidatesSub = null;
+    _activeSessionId = sessionId;
+  }
+
   /// Initiate session by sending SDP offer to receiver document
   Future<void> requestSession({
     required String sessionId,
@@ -35,13 +46,16 @@ class ControllerSignalingClient {
     required Function(RTCSessionDescription answer) onAnswerReceived,
     required Function() onSessionClosed,
   }) async {
-    _activeSessionId = sessionId;
-    await _clearCandidates();
+    if (_activeSessionId != sessionId) {
+      throw StateError('Prepare the session before creating the local offer');
+    }
 
     // Write session request first
     try {
-      debugPrint('[ControllerSignaling] Writing session request to ${_sessionDoc.path} with sessionId=$sessionId, sessionType=$sessionType...');
-      final currentUser = FirebaseAuth.instance.currentUser;
+      debugPrint(
+        '[ControllerSignaling] Writing session request to ${_sessionDoc.path} with sessionId=$sessionId, sessionType=$sessionType...',
+      );
+      final currentUser = (auth ?? FirebaseAuth.instance).currentUser;
       await _sessionDoc.set({
         'status': 'requested',
         'sessionId': sessionId,
@@ -49,56 +63,77 @@ class ControllerSignalingClient {
         'controllerUid': currentUser?.uid,
         'controllerEmail': currentUser?.email,
         'sessionType': sessionType,
-        'offer': {
-          'sdp': offer.sdp,
-          'type': offer.type,
-        },
+        'offer': {'sdp': offer.sdp, 'type': offer.type},
         'answer': null,
         'requestedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
-      debugPrint('[ControllerSignaling] Successfully wrote session request to Firestore!');
+      debugPrint(
+        '[ControllerSignaling] Successfully wrote session request to Firestore!',
+      );
     } catch (e) {
-      debugPrint('[ControllerSignaling] FAILED to write session request to Firestore: $e');
+      debugPrint(
+        '[ControllerSignaling] FAILED to write session request to Firestore: $e',
+      );
       rethrow;
     }
 
+    if (_activeSessionId != sessionId) return;
+
     // Listen to receiver document for SDP answer and status changes for THIS session
     _sessionSub?.cancel();
-    debugPrint('[ControllerSignaling] Listening for session updates on ${_sessionDoc.path} for sessionId=$sessionId');
-    _sessionSub = _sessionDoc.snapshots().listen((snapshot) {
-      if (!snapshot.exists) {
-        debugPrint('[ControllerSignaling] Document ${_sessionDoc.path} does not exist');
-        return;
-      }
-      final data = snapshot.data();
-      if (data == null) return;
+    debugPrint(
+      '[ControllerSignaling] Listening for session updates on ${_sessionDoc.path} for sessionId=$sessionId',
+    );
+    bool answerDelivered = false;
+    _sessionSub = _sessionDoc.snapshots().listen(
+      (snapshot) {
+        if (_activeSessionId != sessionId) return;
+        if (!snapshot.exists) {
+          debugPrint(
+            '[ControllerSignaling] Document ${_sessionDoc.path} does not exist',
+          );
+          return;
+        }
+        final data = snapshot.data();
+        if (data == null) return;
 
-      final docSessionId = data['sessionId'] as String?;
-      if (docSessionId != sessionId) {
-        debugPrint('[ControllerSignaling] Ignoring snapshot from different sessionId: $docSessionId (current: $sessionId)');
-        return;
-      }
+        final docSessionId = data['sessionId'] as String?;
+        if (docSessionId != sessionId) {
+          debugPrint(
+            '[ControllerSignaling] Ignoring snapshot from different sessionId: $docSessionId (current: $sessionId)',
+          );
+          return;
+        }
 
-      final status = data['status'] as String?;
-      final answerMap = data['answer'] as Map<String, dynamic>?;
-      debugPrint('[ControllerSignaling] Snapshot update for $sessionId: status=$status, hasAnswer=${answerMap != null}');
-
-      if (status == 'connected' && answerMap != null) {
-        debugPrint('[ControllerSignaling] Received connected answer! Invoking onAnswerReceived');
-        final answer = RTCSessionDescription(
-          answerMap['sdp'] as String,
-          answerMap['type'] as String,
+        final status = data['status'] as String?;
+        final answerMap = data['answer'] as Map<String, dynamic>?;
+        debugPrint(
+          '[ControllerSignaling] Snapshot update for $sessionId: status=$status, hasAnswer=${answerMap != null}',
         );
-        onAnswerReceived(answer);
-      } else if (status == 'closed') {
-        debugPrint('[ControllerSignaling] Session closed remotely');
-        _sessionSub?.cancel();
-        _sessionSub = null;
-        onSessionClosed();
-      }
-    }, onError: (e) {
-      debugPrint('[ControllerSignaling] ERROR in session snapshot listener: $e');
-    });
+
+        if (status == 'connected' && answerMap != null && !answerDelivered) {
+          answerDelivered = true;
+          debugPrint(
+            '[ControllerSignaling] Received connected answer! Invoking onAnswerReceived',
+          );
+          final answer = RTCSessionDescription(
+            answerMap['sdp'] as String,
+            answerMap['type'] as String,
+          );
+          onAnswerReceived(answer);
+        } else if (status == 'closed') {
+          debugPrint('[ControllerSignaling] Session closed remotely');
+          _sessionSub?.cancel();
+          _sessionSub = null;
+          onSessionClosed();
+        }
+      },
+      onError: (e) {
+        debugPrint(
+          '[ControllerSignaling] ERROR in session snapshot listener: $e',
+        );
+      },
+    );
   }
 
   String? _activeSessionId;
@@ -119,12 +154,15 @@ class ControllerSignalingClient {
     required Function(RTCIceCandidate candidate) onCandidate,
   }) {
     _candidatesSub?.cancel();
+    final sessionId = _activeSessionId;
+    if (sessionId == null) throw StateError('No prepared session');
     _candidatesSub = _receiverCandidates.snapshots().listen((snapshot) {
+      if (_activeSessionId != sessionId) return;
       for (final change in snapshot.docChanges) {
         if (change.type == DocumentChangeType.added) {
           final data = change.doc.data();
           if (data != null && data['candidate'] != null) {
-            if (_activeSessionId != null && data['sessionId'] != null && data['sessionId'] != _activeSessionId) {
+            if (data['sessionId'] != sessionId) {
               continue;
             }
             final candStr = data['candidate'] as String;
@@ -144,14 +182,23 @@ class ControllerSignalingClient {
   }
 
   /// Send controller local ICE candidate
-  Future<void> sendIceCandidate(RTCIceCandidate candidate) async {
+  Future<void> sendIceCandidate(
+    RTCIceCandidate candidate, {
+    String? sessionId,
+  }) async {
+    final candidateSessionId = sessionId ?? _activeSessionId;
+    if (candidateSessionId == null || candidateSessionId != _activeSessionId) {
+      return;
+    }
     try {
       if (_isLoopbackOrInvalid(candidate.candidate)) {
-        debugPrint('[ControllerSignaling] Dropping local loopback candidate: ${candidate.candidate}');
+        debugPrint(
+          '[ControllerSignaling] Dropping local loopback candidate: ${candidate.candidate}',
+        );
         return;
       }
       await _controllerCandidates.add({
-        'sessionId': _activeSessionId,
+        'sessionId': candidateSessionId,
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
         'sdpMLineIndex': candidate.sdpMLineIndex,
@@ -169,35 +216,43 @@ class ControllerSignalingClient {
     _candidatesSub?.cancel();
     _candidatesSub = null;
 
+    final sessionId = _activeSessionId;
+    _activeSessionId = null;
+    if (sessionId == null) return;
     try {
-      final doc = await _sessionDoc.get();
-      final currentStatus = doc.data()?['status'] as String?;
-      if (currentStatus != 'closed' && currentStatus != 'idle') {
-        await _sessionDoc.update({
-          'status': 'closed',
-          'closedAt': FieldValue.serverTimestamp(),
-        });
-      }
-      await _clearCandidates();
+      await _firestore.runTransaction((transaction) async {
+        final doc = await transaction.get(_sessionDoc);
+        final data = doc.data();
+        if (data?['sessionId'] == sessionId &&
+            data?['status'] != 'closed' &&
+            data?['status'] != 'idle') {
+          transaction.update(_sessionDoc, {
+            'status': 'closed',
+            'closedAt': FieldValue.serverTimestamp(),
+          });
+        }
+      });
+      await _clearCandidates(sessionId);
     } catch (e) {
       debugPrint('[ControllerSignaling] Error disconnecting: $e');
     }
   }
 
-  Future<void> _clearCandidates() async {
+  Future<void> _clearCandidates(String sessionId) async {
     try {
       final cDocs = await _controllerCandidates.get();
       for (final doc in cDocs.docs) {
-        await doc.reference.delete();
+        if (doc.data()['sessionId'] == sessionId) await doc.reference.delete();
       }
       final rDocs = await _receiverCandidates.get();
       for (final doc in rDocs.docs) {
-        await doc.reference.delete();
+        if (doc.data()['sessionId'] == sessionId) await doc.reference.delete();
       }
     } catch (_) {}
   }
 
   void dispose() {
+    _activeSessionId = null;
     _sessionSub?.cancel();
     _candidatesSub?.cancel();
     _sessionSub = null;

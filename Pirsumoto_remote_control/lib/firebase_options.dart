@@ -23,7 +23,7 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyAJndnuTu4nCktGpOWm9JhpUR56PB6k8Bk',
-    appId: '1:265879971574:android:92ee7b76d2636b8d1aaed7',
+    appId: '1:265879971574:android:993f53c586869d921aaed7',
     messagingSenderId: '265879971574',
     projectId: 'car-publisher',
     storageBucket: 'car-publisher.firebasestorage.app',

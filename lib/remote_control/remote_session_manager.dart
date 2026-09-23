@@ -17,6 +17,16 @@ class RemoteSessionManager extends ChangeNotifier {
   );
 
   final RemoteSignalingService signaling;
+  final FirebaseAuth _auth;
+  final FirebaseFirestore _firestore;
+  Timer? _listenerRetry;
+  String? _listeningOwnerUid;
+  bool _disposed = false;
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
 
   RemoteSessionInfo _sessionInfo = const RemoteSessionInfo();
   RemoteSessionInfo get sessionInfo => _sessionInfo;
@@ -34,9 +44,10 @@ class RemoteSessionManager extends ChangeNotifier {
   Future<void> _incomingRequests = Future.value();
   Future<void>? _termination;
   bool _authorizedSession(int generation) =>
+      !_disposed &&
       generation == _sessionGeneration &&
       _sessionOwnerUid != null &&
-      FirebaseAuth.instance.currentUser?.uid == _sessionOwnerUid;
+      _auth.currentUser?.uid == _sessionOwnerUid;
   String? get modelName => _modelName;
   StreamSubscription<User?>? _authSub;
 
@@ -44,7 +55,12 @@ class RemoteSessionManager extends ChangeNotifier {
   Future<void> Function()? onAutomationPauseRequested;
   VoidCallback? onAutomationResumeRequested;
 
-  RemoteSessionManager({required this.signaling});
+  RemoteSessionManager({
+    required this.signaling,
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+  }) : _auth = auth ?? FirebaseAuth.instance,
+       _firestore = firestore ?? FirebaseFirestore.instance;
 
   /// Initialize and enter IDLE state listening for incoming remote connections
   Future<void> startListening() async {
@@ -87,51 +103,62 @@ class RemoteSessionManager extends ChangeNotifier {
       debugPrint('[RemoteSessionManager] Could not get device info: $e');
     }
 
-    // Register device in Firestore and keep updated on Auth state changes
-    await _registerDeviceInFirestore(status: 'idle');
-    _authSub?.cancel();
-    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
-      debugPrint(
-        '[RemoteSessionManager] Auth state changed for user: ${user?.email}',
-      );
+    // Authentication can arrive after app startup. A failed idle transaction
+    // must never prevent us from subscribing to incoming offers.
+    await _authSub?.cancel();
+    if (_disposed) return;
+    _listeningOwnerUid = null;
+    _authSub = _auth.authStateChanges().listen((user) {
+      if (_disposed) return;
+      if (user != null && _listeningOwnerUid == user.uid) return;
+      _listeningOwnerUid = user?.uid;
+      _listenerRetry?.cancel();
+      signaling.stopListening();
       if (_sessionOwnerUid != null && _sessionOwnerUid != user?.uid) {
         unawaited(terminateSession(error: 'Authentication changed'));
       }
-      _registerDeviceInFirestore();
+      if (user == null) {
+        _updateState(_sessionInfo.copyWith(state: RemoteSessionState.offline));
+        return;
+      }
+      _listenForSessions(user.uid);
+      unawaited(_registerDeviceInFirestore(status: 'idle'));
     });
+  }
 
-    try {
-      await signaling.setReceiverIdle();
-      signaling.listenForIncomingSession(
-        onSessionRequested: _handleIncomingSession,
-        onSessionTerminated: _handleSessionTerminatedRemotely,
-      );
+  void _listenForSessions(String ownerUid) {
+    if (_disposed || _auth.currentUser?.uid != ownerUid) return;
+    signaling.listenForIncomingSession(
+      onSessionRequested: _handleIncomingSession,
+      onSessionTerminated: _handleSessionTerminatedRemotely,
+      onError: (error) {
+        if (_disposed || _auth.currentUser?.uid != ownerUid) return;
+        debugPrint('[RemoteSessionManager] Session listener failed: $error');
+        _listenerRetry?.cancel();
+        _listenerRetry = Timer(const Duration(seconds: 5), () {
+          _listenForSessions(ownerUid);
+        });
+      },
+    );
+    if (_sessionOwnerUid == null) {
       _updateState(
         _sessionInfo.copyWith(
           state: RemoteSessionState.idle,
           inputOwner: InputOwner.automation,
         ),
       );
-      debugPrint(
-        '[RemoteSessionManager] Receiver is IDLE and listening for session requests',
-      );
-    } catch (e) {
-      _updateState(
-        _sessionInfo.copyWith(
-          state: RemoteSessionState.offline,
-          lastError: e.toString(),
-        ),
-      );
-      debugPrint('[RemoteSessionManager] Error entering IDLE: $e');
     }
+    debugPrint(
+      '[RemoteSessionManager] Listening for session requests on device ${signaling.deviceId}',
+    );
   }
 
   /// Register or update device record in Firestore
   Future<void> _registerDeviceInFirestore({String? status}) async {
     try {
-      final user = FirebaseAuth.instance.currentUser;
+      final user = _auth.currentUser;
       if (user == null) return;
-      final docRef = FirebaseFirestore.instance
+      final docRef = _firestore
           .collection('remote_control_devices')
           .doc(signaling.deviceId);
 
@@ -145,13 +172,13 @@ class RemoteSessionManager extends ChangeNotifier {
       if (status != null) {
         data['status'] = status;
       }
-      await FirebaseFirestore.instance.runTransaction((tx) async {
+      await _firestore.runTransaction((tx) async {
         final existing = (await tx.get(docRef)).data();
         if (existing?['ownerUid'] != null &&
             existing?['ownerUid'] != user.uid) {
           throw StateError('Device ID belongs to another account');
         }
-        if (FirebaseAuth.instance.currentUser?.uid != user.uid) return;
+        if (_auth.currentUser?.uid != user.uid) return;
         tx.set(docRef, data, SetOptions(merge: true));
       });
       debugPrint(
@@ -197,7 +224,7 @@ class RemoteSessionManager extends ChangeNotifier {
     // Legacy chat-only offers must not trigger foregrounding, capture, or takeover.
     if (sessionType != 'remote_control') return;
     await _termination;
-    final currentUser = FirebaseAuth.instance.currentUser;
+    final currentUser = _auth.currentUser;
     if (currentUser == null ||
         controllerUid == null ||
         controllerUid != currentUser.uid) {
@@ -221,11 +248,11 @@ class RemoteSessionManager extends ChangeNotifier {
       await terminateSession();
     }
 
-    final registered = await FirebaseFirestore.instance
+    final registered = await _firestore
         .collection('remote_control_devices')
         .doc(signaling.deviceId)
         .get(const GetOptions(source: Source.server));
-    if (FirebaseAuth.instance.currentUser?.uid != controllerUid ||
+    if (_auth.currentUser?.uid != controllerUid ||
         registered.data()?['ownerUid'] != controllerUid)
       return;
     _sessionType = sessionType;
@@ -290,6 +317,16 @@ class RemoteSessionManager extends ChangeNotifier {
 
       // Start Android MediaProjection foreground service
       await _channel.invokeMethod('startRemoteCaptureService');
+      bool captureReady = false;
+      for (var attempt = 0; attempt < 50; attempt++) {
+        if (!_authorizedSession(generation)) return;
+        captureReady =
+            await _channel.invokeMethod<bool>('isRemoteCaptureRunning') == true;
+        if (captureReady) break;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (!captureReady)
+        throw StateError('Screen capture foreground service did not start');
       if (!_authorizedSession(generation)) {
         await _channel.invokeMethod('stopRemoteCaptureService');
         return;
@@ -319,11 +356,6 @@ class RemoteSessionManager extends ChangeNotifier {
         controllerId: controllerId,
       );
 
-      // Start listening to controller candidates immediately so none are dropped
-      signaling.listenToRemoteCandidates(
-        onCandidate: (candidate) => _webrtc?.addCandidate(candidate),
-      );
-
       await receiver.initializePeerConnection(
         width: _screenWidth,
         height: _screenHeight,
@@ -334,6 +366,13 @@ class RemoteSessionManager extends ChangeNotifier {
         await receiver.close();
         return;
       }
+      // Firestore replays existing candidates after the peer is ready.
+      signaling.listenToRemoteCandidates(
+        onCandidate: (candidate) {
+          if (_authorizedSession(generation)) receiver.addCandidate(candidate);
+        },
+      );
+
       // Create SDP answer and send via Firestore
       final answer = await receiver.handleOffer(offer);
       if (!_authorizedSession(generation)) return;
@@ -597,6 +636,8 @@ class RemoteSessionManager extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _listenerRetry?.cancel();
     _authSub?.cancel();
     _registerDeviceInFirestore(status: 'offline');
     signaling.dispose();
