@@ -9,6 +9,7 @@ import 'remote_protocol.dart';
 import 'remote_signaling.dart';
 import 'remote_webrtc_receiver.dart';
 import 'remote_chat_receiver.dart';
+import 'firebase_chat_receiver.dart';
 import '../services/whatsapp_text_validation_service.dart';
 
 class RemoteSessionManager extends ChangeNotifier {
@@ -19,6 +20,8 @@ class RemoteSessionManager extends ChangeNotifier {
   final RemoteSignalingService signaling;
   final FirebaseAuth _auth;
   final FirebaseFirestore _firestore;
+  final RemoteWebRtcReceiverFactory _createReceiver;
+  final bool Function() _isAutomationRunning;
   Timer? _listenerRetry;
   String? _listeningOwnerUid;
   bool _disposed = false;
@@ -59,8 +62,14 @@ class RemoteSessionManager extends ChangeNotifier {
     required this.signaling,
     FirebaseAuth? auth,
     FirebaseFirestore? firestore,
+    RemoteWebRtcReceiverFactory? receiverFactory,
+    bool Function()? isAutomationRunning,
   }) : _auth = auth ?? FirebaseAuth.instance,
-       _firestore = firestore ?? FirebaseFirestore.instance;
+       _firestore = firestore ?? FirebaseFirestore.instance,
+       _createReceiver = receiverFactory ?? RemoteWebRtcReceiver.new,
+       _isAutomationRunning =
+           isAutomationRunning ??
+           (() => FirebaseChatReceiver.isPublishingActive);
 
   /// Initialize and enter IDLE state listening for incoming remote connections
   Future<void> startListening() async {
@@ -272,7 +281,7 @@ class RemoteSessionManager extends ChangeNotifier {
     signaling.setActiveSessionId(sessionId);
 
     try {
-      await onAutomationPauseRequested?.call();
+      // Viewing leaves automation running; only explicit takeover pauses it.
       if (!_authorizedSession(generation)) return;
       // Ensure app is in the foreground so Android allows MediaProjection capture token initialization
       try {
@@ -280,6 +289,11 @@ class RemoteSessionManager extends ChangeNotifier {
           'isAppInForeground',
         );
         if (inForeground != true) {
+          if (_isAutomationRunning()) {
+            throw StateError(
+              'Cannot bring projection to the foreground while automation is running',
+            );
+          }
           debugPrint(
             '[RemoteSessionManager] App is in background. Bringing to foreground for screen capture...',
           );
@@ -299,6 +313,7 @@ class RemoteSessionManager extends ChangeNotifier {
         debugPrint(
           '[RemoteSessionManager] Error checking/bringing app to foreground: $e',
         );
+        if (_isAutomationRunning()) rethrow;
       }
 
       if (!_authorizedSession(generation)) return;
@@ -333,7 +348,7 @@ class RemoteSessionManager extends ChangeNotifier {
       }
 
       // Initialize WebRTC receiver
-      final receiver = RemoteWebRtcReceiver(
+      final receiver = _createReceiver(
         onLocalCandidate:
             (candidate) => signaling.sendIceCandidate(
               candidate,
@@ -495,13 +510,32 @@ class RemoteSessionManager extends ChangeNotifier {
             command.owner == 'automation'
                 ? InputOwner.automation
                 : InputOwner.remoteHuman;
+        if (newOwner == _sessionInfo.inputOwner) return;
         if (newOwner == InputOwner.automation) {
+          // Lower projection work before allowing automation to resume.
+          try {
+            await _webrtc?.setInteractive(false);
+          } catch (error) {
+            // Never leave automation paused because video cannot be throttled.
+            // Closing capture first removes the expensive stream before resume.
+            await terminateSession(
+              error: 'Could not lower projection load: $error',
+            );
+            return;
+          }
+          if (!_authorizedSession(generation)) return;
+          _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
           onAutomationResumeRequested?.call();
         } else {
           await onAutomationPauseRequested?.call();
+          if (!_authorizedSession(generation)) {
+            onAutomationResumeRequested?.call();
+            return;
+          }
+          _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
+          // A quality upgrade failure must not prevent manual control.
+          await _webrtc?.setInteractive(true);
         }
-        if (!_authorizedSession(generation)) return;
-        _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
       } else if (command is RemoteDisconnectCommand) {
         await terminateSession();
       } else if (command is RemoteResetCommand) {
@@ -578,6 +612,7 @@ class RemoteSessionManager extends ChangeNotifier {
     _failureGraceTimer = null;
 
     final endingSessionId = _sessionInfo.activeSessionId;
+    final wasControlling = _sessionInfo.inputOwner == InputOwner.remoteHuman;
 
     _updateState(
       _sessionInfo.copyWith(
@@ -600,6 +635,9 @@ class RemoteSessionManager extends ChangeNotifier {
         } catch (_) {}
       }
 
+      // Capture is stopped. Network cleanup must not delay automation resuming.
+      if (wasControlling) onAutomationResumeRequested?.call();
+
       // Update signaling - retain new session request if one arrived during teardown!
       await signaling.setReceiverIdle(endingSessionId: endingSessionId);
 
@@ -614,7 +652,6 @@ class RemoteSessionManager extends ChangeNotifier {
         ),
       );
 
-      onAutomationResumeRequested?.call();
       await _registerDeviceInFirestore(status: 'idle');
       debugPrint('[RemoteSessionManager] Cleaned up and returned to IDLE');
     } catch (e) {

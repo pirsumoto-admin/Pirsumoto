@@ -2,6 +2,7 @@ package com.pirsumoto.app
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.cloudwebrtc.webrtc.FlutterWebRTCPlugin
 import com.cloudwebrtc.webrtc.video.LocalVideoTrack
 import org.webrtc.VideoFrame
@@ -36,10 +37,12 @@ object ScreenCaptureFrameRepeater {
     ) :
         LocalVideoTrack.ExternalVideoFrameProcessing, Runnable {
         private val lock = Any()
+        private val frameCache = ScreenFrameTextureCache()
         private var cached: VideoFrame? = null
         private var replay: VideoFrame? = null
         private var capturedAtNs = 0L
         private var stopped = false
+        private var cacheFailed = false
 
         fun start() {
             track.addProcessor(this)
@@ -48,18 +51,26 @@ object ScreenCaptureFrameRepeater {
 
         override fun onFrame(frame: VideoFrame): VideoFrame {
             synchronized(lock) {
-                if (stopped || frame === replay) return frame
-                // Never retain a SurfaceTexture buffer: doing so blocks new captures.
-                // I420 owns CPU memory independently of the capture texture.
-                val buffer = frame.buffer.toI420() ?: return frame
+                if (stopped || cacheFailed || frame === replay) return frame
+                // Release before copying so an unused GPU texture can be reused.
+                // Never retain the capture texture or read it back to the CPU.
                 cached?.release()
-                cached = VideoFrame(buffer, frame.rotation, frame.timestampNs)
+                cached = null
+                try {
+                    cached = frameCache.copy(frame)
+                } catch (error: RuntimeException) {
+                    // A device-specific GL failure must not stop live video.
+                    cacheFailed = true
+                    Log.w("ScreenFrameRepeater", "Disabling static-frame cache", error)
+                }
                 capturedAtNs = nowNs()
             }
             return frame
         }
 
-        override fun run() {
+        override fun run() = frameCache.onCaptureThread { repeatFrame() }
+
+        private fun repeatFrame() {
             val frame = synchronized(lock) {
                 if (stopped) return
                 val last = cached
@@ -74,6 +85,7 @@ object ScreenCaptureFrameRepeater {
                 try {
                     // Uses the same source/encoder as real frames; no extra capture or UI.
                     // Do not hold lock here: the plugin takes its processor lock first.
+                    frameCache.prepareReplay()
                     track.onFrameCaptured(frame)
                 } finally {
                     synchronized(lock) { replay = null }
@@ -91,6 +103,7 @@ object ScreenCaptureFrameRepeater {
                 cached?.release()
                 cached = null
             }
+            frameCache.close()
         }
     }
 }

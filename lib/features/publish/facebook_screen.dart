@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../services/automation_webview_session.dart';
 import '../../services/yad2_automation_service.dart' show VehiclePublishData;
@@ -27,7 +28,7 @@ import '../../remote_control/firebase_chat_receiver.dart';
 //   Phase 5  enterPrice     – input[aria-label*="Price"]
 //   Phase 6  enterTitle     – textarea[aria-label*="Description"]
 //   Phase 7  selectCondition– [role="radio"] "Used"
-//   Phase 8  uploadPhotos   – input[type="file"] via DataTransfer base64
+//   Phase 8  uploadPhotos   – accessibility tap and Android native file chooser
 //   Phase 9  publish        – button "Next" → button "Publish"
 // ---------------------------------------------------------------------------
 
@@ -192,6 +193,21 @@ class _FacebookScreenState extends State<FacebookScreen> {
         },
       ),
     );
+    // Install before navigation: a native tap opens WebChromeClient's chooser,
+    // which must return the automation's file URIs to the page.
+    final platform = _controller.platform;
+    if (platform is AndroidWebViewController) {
+      await platform.setOnShowFileSelector((params) async {
+        if (_webViewClosed || _publicationStopped || _publicationPaused) {
+          return const <String>[];
+        }
+        debugPrint('[FB-Screen] Native file chooser requested: ${params.mode}');
+        return _service?.handleNativeImageChooser(
+              allowMultiple: params.mode == FileSelectorMode.openMultiple,
+            ) ??
+            const <String>[];
+      });
+    }
     await _controller.loadRequest(Uri.parse(_kFacebookVehicleUrl));
   }
 

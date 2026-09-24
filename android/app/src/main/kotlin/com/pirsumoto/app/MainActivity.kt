@@ -324,13 +324,15 @@ class MainActivity : FlutterActivity() {
                 return@setMethodCallHandler
             }
             if (call.method == "getDeviceInfo") {
+                val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: ""
                 result.success(mapOf(
                     "model" to Build.MODEL,
                     "manufacturer" to Build.MANUFACTURER,
                     "brand" to Build.BRAND,
                     "device" to Build.DEVICE,
                     "product" to Build.PRODUCT,
-                    "sdkInt" to Build.VERSION.SDK_INT
+                    "sdkInt" to Build.VERSION.SDK_INT,
+                    "androidId" to androidId
                 ))
                 return@setMethodCallHandler
             }

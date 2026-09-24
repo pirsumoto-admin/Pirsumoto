@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome car mark derived from the Pirsumoto vehicle logo. Transparent
+     background and window/wheel cutouts remain legible at status-bar size. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M3,7C3,6.45 3.45,6 4,6H13.5L17.5,10L21.2,11C22.25,11.28 23,12.22 23,13.3V16H20.85C20.4,14.28 18.85,13 17,13C15.15,13 13.6,14.28 13.15,16H9.85C9.4,14.28 7.85,13 6,13C4.15,13 2.6,14.28 2.15,16H1V10H3ZM5,8V10H9V8ZM11,8V10H14.7L12.7,8ZM9,17A3,3 0,1 0,3 17A3,3 0,1 0,9 17ZM7.5,17A1.5,1.5 0,1 0,4.5 17A1.5,1.5 0,1 0,7.5 17ZM20,17A3,3 0,1 0,14 17A3,3 0,1 0,20 17ZM18.5,17A1.5,1.5 0,1 0,15.5 17A1.5,1.5 0,1 0,18.5 17Z" />
+</vector>

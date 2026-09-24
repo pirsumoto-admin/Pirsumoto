@@ -38,8 +38,24 @@ class RemoteControlReceiverService {
 
     try {
       final prefs = await SharedPreferences.getInstance();
+      
+      String? androidId;
+      if (Platform.isAndroid) {
+        try {
+          final info = await const MethodChannel('com.pirsumoto/accessibility')
+              .invokeMapMethod<String, dynamic>('getDeviceInfo');
+          if (info != null && info['androidId'] != null) {
+            final id = info['androidId'] as String;
+            if (id.isNotEmpty) androidId = 'android_$id';
+          }
+        } catch (e) {
+          debugPrint('[RemoteControlReceiver] Failed to get androidId: $e');
+        }
+      }
+
       _deviceId =
           explicitDeviceId ??
+          androidId ??
           prefs.getString(_prefDeviceIdKey) ??
           'android_${List.generate(16, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
 

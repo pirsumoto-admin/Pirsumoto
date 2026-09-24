@@ -306,12 +306,6 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         },
       ),
     );
-    await _controller.loadRequest(
-      //Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
-      Uri.parse(
-        'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
-      ),
-    );
 
     if (_controller.platform is AndroidWebViewController) {
       await (_controller.platform as AndroidWebViewController)
@@ -319,6 +313,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             debugPrint(
               '[Yad2Screen] WebView requested file selector: ${params.mode}',
             );
+            final automation = _automationService;
+            if (automation is Yad2AccessibilityAutomationService) {
+              return automation.handleNativeImageChooser(
+                allowMultiple: params.mode == FileSelectorMode.openMultiple,
+              );
+            }
             final picker = ImagePicker();
 
             if (params.mode == FileSelectorMode.openMultiple) {
@@ -335,6 +335,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             return [];
           });
     }
+    await _controller.loadRequest(
+      //Uri.parse('https://www.yad2.co.il/publish-ad?cat=vehicles'),
+      Uri.parse(
+        'https://plus.yad2.co.il/publish-ad?cat=vehicles&subCat=cars&isTrader=true&skipCache=true',
+      ),
+    );
   }
 
   @override

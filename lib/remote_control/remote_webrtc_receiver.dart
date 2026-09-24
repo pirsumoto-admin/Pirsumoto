@@ -4,11 +4,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'remote_protocol.dart';
 import 'webrtc_ice_config.dart';
+import 'remote_video_budget.dart';
+
+typedef RemoteWebRtcReceiverFactory =
+    RemoteWebRtcReceiver Function({
+      required Function(RTCIceCandidate candidate) onLocalCandidate,
+      required Function(RemoteCommand command) onCommandReceived,
+      required Function(RTCPeerConnectionState state) onConnectionStateChange,
+    });
 
 class RemoteWebRtcReceiver {
   RTCPeerConnection? _peerConnection;
   final Future<RTCPeerConnection> Function(Map<String, dynamic>) _createPeer;
   bool _closed = true;
+  bool _hasScreenCapture = false;
+  bool _frameRepeaterRunning = false;
+  int _captureWidth = 1080;
+  int _captureHeight = 2400;
   MediaStream? _screenStream;
   RTCDataChannel? _commandsChannel;
   RTCDataChannel? _pointerChannel;
@@ -55,6 +67,9 @@ class RemoteWebRtcReceiver {
   }) async {
     await close();
     _closed = false;
+    _hasScreenCapture = enableScreenCapture;
+    _captureWidth = width;
+    _captureHeight = height;
 
     final config = _buildRtcConfig(customIceServers: iceServers);
     final peer = await _createPeer(config);
@@ -105,6 +120,7 @@ class RemoteWebRtcReceiver {
             await const MethodChannel(
               'com.pirsumoto/accessibility',
             ).invokeMethod('startScreenFrameRepeater', {'trackId': track.id});
+            _frameRepeaterRunning = true;
           }
         }
         debugPrint(
@@ -128,6 +144,10 @@ class RemoteWebRtcReceiver {
       if (command != null) {
         // Automatically respond to ping with pong for round-trip latency measurement
         if (command is RemotePingCommand) {
+          // Controllers only start pinging after a video frame was rendered.
+          // The bootstrap cache is no longer needed: remove all copying/replay
+          // work from the live capture path while automation is running.
+          unawaited(_stopFrameRepeater());
           sendReply(
             RemotePongCommand(clientTimestamp: command.clientTimestamp),
           );
@@ -210,7 +230,43 @@ class RemoteWebRtcReceiver {
       'optional': const <dynamic>[],
     });
     await _peerConnection!.setLocalDescription(answer);
+    // Apply real sender limits; Android getDisplayMedia ignores width/fps hints.
+    if (_hasScreenCapture) await setInteractive(false);
     return answer;
+  }
+
+  Future<void> setInteractive(bool interactive) async {
+    final peer = _peerConnection;
+    if (_closed || peer == null || !_hasScreenCapture) return;
+    final senders = await peer.getSenders();
+    var applied = false;
+    for (final sender in senders) {
+      if (_closed || _peerConnection != peer) return;
+      if (sender.track?.kind != 'video') continue;
+      await RemoteVideoBudget.apply(
+        sender,
+        width: _captureWidth,
+        height: _captureHeight,
+        interactive: interactive,
+      );
+      applied = true;
+    }
+    if (!applied) {
+      throw StateError('Screen capture has no video sender to limit');
+    }
+  }
+
+  Future<void> _stopFrameRepeater() async {
+    if (!_frameRepeaterRunning) return;
+    _frameRepeaterRunning = false;
+    try {
+      await const MethodChannel(
+        'com.pirsumoto/accessibility',
+      ).invokeMethod('stopScreenFrameRepeater');
+    } catch (error) {
+      _frameRepeaterRunning = true;
+      debugPrint('[ReceiverWebRTC] Could not release bootstrap cache: $error');
+    }
   }
 
   /// Add remote ICE candidate sent by controller
@@ -256,13 +312,8 @@ class RemoteWebRtcReceiver {
       }
     }
 
-    if (stream != null && defaultTargetPlatform == TargetPlatform.android) {
-      await release(
-        () => const MethodChannel(
-          'com.pirsumoto/accessibility',
-        ).invokeMethod('stopScreenFrameRepeater'),
-      );
-    }
+    await _stopFrameRepeater();
+    _hasScreenCapture = false;
     for (final channel in channels) {
       if (channel != null) await release(channel.close);
     }

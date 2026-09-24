@@ -1,5 +1,6 @@
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
+import 'native_image_upload_request.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -481,6 +482,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   void dispose() {
+    _cancelImageUpload();
     _scheduler.invalidate();
     _stopped = true;
     _isPaused = true;
@@ -552,6 +554,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   void stop() {
+    _cancelImageUpload();
     _scheduler.invalidate();
     _stopped = true;
     debugPrint('[Yad2-A11y] Stop requested');
@@ -567,6 +570,7 @@ class Yad2AccessibilityAutomationService {
 
   void pauseAutomation() {
     if (_stopped) return;
+    _cancelImageUpload();
     _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Pause requested');
     _isPaused = true;
@@ -1668,7 +1672,9 @@ class Yad2AccessibilityAutomationService {
     }
     final uploaded = await _runOnce('upload-images', _injectImagesIfAny);
     if (!uploaded) {
-      debugPrint('[Yad2-A11y] Continuing without image injection.');
+      return const _StepActionResult.failure(
+        'Native image selection failed. Check the upload control and image files.',
+      );
     }
     await _scrollDown(0.75, accessibilityOnly: true);
     final submitted = await _runOnce(
@@ -2689,68 +2695,80 @@ class Yad2AccessibilityAutomationService {
     return warranty;
   }
 
+  NativeImageUploadRequest? _imageUploadRequest;
+
+  void _cancelImageUpload() {
+    _imageUploadRequest?.cancel();
+    _imageUploadRequest = null;
+  }
+
+  /// Called by AndroidWebViewController's native onShowFileChooser bridge.
+  /// Empty responses cancel unsolicited, expired, or paused chooser requests.
+  List<String> handleNativeImageChooser({required bool allowMultiple}) {
+    if (_inputBlocked) return const [];
+    return _imageUploadRequest?.select(allowMultiple: allowMultiple) ?? const [];
+  }
+
   Future<bool> _injectImagesIfAny() async {
     var images = formData.images;
-    if (images == null || images.isEmpty) return false;
     final expectedCount = formData.expectedImageCount;
-    if (expectedCount != null && expectedCount == 0) {
-      return false;
+    if (expectedCount == 0) return true;
+    if (images == null || images.isEmpty) {
+      return expectedCount == null || expectedCount <= 0;
     }
-    if (expectedCount != null &&
-        expectedCount > 0 &&
-        images.length > expectedCount) {
+    if (expectedCount != null && expectedCount > 0) {
+      if (images.length < expectedCount) return false;
       images = images.sublist(images.length - expectedCount.toInt());
     }
-    final base64Files = <Map<String, String>>[];
-    for (var i = 0; i < images.length; i++) {
-      final path = images[i];
-      if (path.isEmpty) continue;
+    if (!Platform.isAndroid || _inputBlocked) return false;
+
+    // The native WebView reads local files itself; no base64 or DOM injection.
+    for (final path in images) {
       try {
-        final file = File(path);
-        if (!await file.exists()) continue;
-        final bytes = await file.readAsBytes();
-        final ext = path.split('.').last.toLowerCase();
-        final mimeType =
-            (ext == 'jpg' || ext == 'jpeg') ? 'image/jpeg' : 'image/png';
-        base64Files.add({
-          'base64': 'data:$mimeType;base64,${base64Encode(bytes)}',
-          'filename': 'photo_${i + 1}.$ext',
-          'contentType': mimeType,
-        });
+        if (path.isEmpty ||
+            !await File(path).exists() ||
+            await File(path).length() == 0) {
+          return false;
+        }
       } catch (e) {
-        debugPrint('[Yad2-A11y] Image read failed for $path: $e');
+        debugPrint('[Yad2-A11y] Image unavailable: $e');
+        return false;
       }
     }
-    if (base64Files.isEmpty) return false;
-
     if (_inputBlocked) return false;
-    final jsonFiles = jsonEncode(base64Files);
-    final result = await controller.runJavaScriptReturningResult('''
-      (function() {
-        var filesArray = $jsonFiles;
-        var fileInput = document.querySelector('input[type="file"]')
-          || document.querySelector('input[accept*="image"]')
-          || document.querySelector('input[name*="file"]')
-          || document.querySelector('input[id*="file"]');
-        if (!fileInput) return 'no_input';
-        var container = new DataTransfer();
-        for (var k = 0; k < filesArray.length; k++) {
-          var item = filesArray[k];
-          var byteString = atob(item.base64.split(',')[1] || item.base64);
-          var ab = new ArrayBuffer(byteString.length);
-          var ia = new Uint8Array(ab);
-          for (var i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
-          var file = new File([new Blob([ab], { type: item.contentType })], item.filename, { type: item.contentType });
-          container.items.add(file);
-        }
-        fileInput.files = container.files;
-        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        return 'ok';
-      })()
-    ''');
-    debugPrint('[Yad2-A11y] Image injection result: $result');
-    await Future.delayed(const Duration(seconds: 3));
-    return result.toString().contains('ok');
+    final request = NativeImageUploadRequest(images);
+    _imageUploadRequest = request;
+    try {
+      // Arm before tapping: onShowFileChooser may fire before the tap returns.
+      // Match the actual upload control, not a similar photos-section heading.
+      const uploadLabels = 'לחיצה להעלאת תמונה|העלאת תמונה';
+      var tapped = await toolFindElementAndTap(
+        uploadLabels,
+        threshold: 1.0,
+        maxReads: 2,
+      );
+      if (!tapped && !_inputBlocked) {
+        await _scrollDown(0.5, accessibilityOnly: true);
+        tapped = await toolFindElementAndTap(
+          uploadLabels,
+          threshold: 1.0,
+          maxReads: 2,
+        );
+      }
+      if (!tapped || _inputBlocked) return false;
+      final selected = await request.wait();
+      if (!selected || _inputBlocked) return false;
+      debugPrint('[Yad2-A11y] Images returned through Android file chooser');
+      // Allow the site's normal upload handler to process the native selection.
+      await Future<void>.delayed(const Duration(seconds: 3));
+      return !_inputBlocked;
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Native image upload failed: $e');
+      return false;
+    } finally {
+      request.cancel();
+      if (identical(_imageUploadRequest, request)) _imageUploadRequest = null;
+    }
   }
 
   // [WHATSAPP-DISABLED] _notifyAutomationComplete sent WA message on completion. Disabled.

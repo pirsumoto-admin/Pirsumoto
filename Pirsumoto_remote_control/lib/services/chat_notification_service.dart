@@ -51,7 +51,7 @@ class ChatNotificationService with WidgetsBindingObserver {
     if (_notificationsInitialized) return;
     await _localNotifications.initialize(
       settings: const InitializationSettings(
-        android: AndroidInitializationSettings('ic_status_notification'),
+        android: AndroidInitializationSettings('ic_pirsumoto_notification'),
         iOS: DarwinInitializationSettings(
           requestAlertPermission: false,
           requestBadgePermission: false,
@@ -409,7 +409,7 @@ class ChatNotificationService with WidgetsBindingObserver {
           channelDescription: channelDesc,
           importance: Importance.high,
           priority: Priority.high,
-          icon: 'ic_status_notification',
+          icon: 'ic_pirsumoto_notification',
         ),
         iOS: DarwinNotificationDetails(),
       ),

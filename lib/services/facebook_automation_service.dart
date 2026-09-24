@@ -1,5 +1,6 @@
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
+import 'native_image_upload_request.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -28,7 +29,7 @@ import 'yad2_accessibility_automation_service_optimized.dart'
 //   Phase 5  – Enter price      : input[placeholder*="price" / aria-label*="Price"]
 //   Phase 6  – Enter title/desc : textarea or contenteditable for listing title
 //   Phase 7  – Condition        : [role="radio"] for "Used" vehicle condition
-//   Phase 8  – Upload photos    : input[type="file"] via DataTransfer base64
+//   Phase 8  – Upload photos    : accessibility tap and Android native file chooser
 //   Phase 9  – Publish          : button[text="Publish"|"Next"] click chain
 // ---------------------------------------------------------------------------
 
@@ -256,7 +257,22 @@ class FacebookAutomationService {
     }
   }
 
+  NativeImageUploadRequest? _imageUploadRequest;
+
+  void _cancelImageUpload() {
+    _imageUploadRequest?.cancel();
+    _imageUploadRequest = null;
+  }
+
+  /// Called by AndroidWebViewController's native onShowFileChooser bridge.
+  List<String> handleNativeImageChooser({required bool allowMultiple}) {
+    if (_inputBlocked) return const [];
+    return _imageUploadRequest?.select(allowMultiple: allowMultiple) ??
+        const [];
+  }
+
   void stop() {
+    _cancelImageUpload();
     _scheduler.invalidate();
     _stopped = true;
     debugPrint('[FB-A11y] 🛑 Stop requested');
@@ -270,6 +286,7 @@ class FacebookAutomationService {
   }
 
   void dispose() {
+    _cancelImageUpload();
     _scheduler.invalidate();
     _stopped = true;
     stop();
@@ -279,6 +296,7 @@ class FacebookAutomationService {
   }
 
   void pauseAutomation() {
+    _cancelImageUpload();
     _scheduler.invalidate();
     debugPrint('[FB-A11y] ⏸️ Pause requested');
     _stopLoginGate();
@@ -731,13 +749,13 @@ class FacebookAutomationService {
   }
 
   Future<void> toolTapScreen(double x, double y) async {
-    if (_stopped || _isPaused) return;
+    if (_inputBlocked) throw StateError('Automation paused before tap');
     debugPrint('[FB-A11y] 🖱️ toolTapScreen($x, $y)');
-    try {
-      await _automationChannel.invokeMethod('tapScreen', {'x': x, 'y': y});
-    } catch (e) {
-      debugPrint('[FB-A11y] TapScreen error: $e');
-    }
+    final tapped = await _automationChannel.invokeMethod<bool>('tapScreen', {
+      'x': x,
+      'y': y,
+    });
+    if (tapped != true) throw StateError('Native tap was not completed');
   }
 
   Future<bool> toolFindElementAndTap(
@@ -746,18 +764,22 @@ class FacebookAutomationService {
     double deltaY = 0,
     double threshold = 0.82,
     bool preferEditable = false,
+    bool preferClickable = false,
   }) async {
     if (_stopped || _isPaused) return false;
     debugPrint(
       '[FB-A11y] 🔍 toolFindElementAndTap("$targetText", instance=$targetInstance, preferEditable=$preferEditable)',
     );
     try {
-      final bounds = await _getStableBounds('findAndGetBounds', {
-        'target': targetText,
-        'targetInstance': targetInstance,
-        'threshold': threshold,
-        'preferEditable': preferEditable,
-      });
+      final bounds = await _getStableBounds(
+        preferClickable ? 'findClickableAndGetBounds' : 'findAndGetBounds',
+        {
+          'target': targetText,
+          'targetInstance': targetInstance,
+          'threshold': threshold,
+          'preferEditable': preferEditable,
+        },
+      );
       if (bounds != null) {
         await _tapBounds(bounds, deltaX: 0, deltaY: deltaY);
         return true;
@@ -1457,8 +1479,12 @@ class FacebookAutomationService {
         : const _StepActionResult.failure('Failed to select vehicle type');
   }
 
-  Future<void> toolLogAccessibilityTree({String tag = 'FB-A11y-Tree'}) async {
-    if (!const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE')) return;
+  Future<void> toolLogAccessibilityTree({
+    String tag = 'FB-A11y-Tree',
+    bool force = false,
+  }) async {
+    if (!force && !const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE'))
+      return;
     debugPrint('[$tag] ════════ ACCESSIBILITY TREE DUMP ════════');
     try {
       final String? treeStr = await _automationChannel.invokeMethod<String>(
@@ -1567,129 +1593,91 @@ class FacebookAutomationService {
   // Phase 5 — Upload photos
   Future<_StepActionResult> _phaseUploadPhotos() async {
     return await _runOnce('fb_upload_photos', () async {
+          var images = formData.images;
           final expectedCount = formData.expectedImageCount;
-          var imageList = formData.images ?? const <String>[];
-          if (expectedCount != null && expectedCount == 0) {
-            imageList = const <String>[];
-          } else if (expectedCount != null &&
-              expectedCount > 0 &&
-              imageList.length > expectedCount) {
-            imageList = imageList.sublist(imageList.length - expectedCount);
+          if (expectedCount == 0) return true;
+          if (images == null || images.isEmpty) {
+            return expectedCount == null || expectedCount <= 0;
           }
-
-          debugPrint(
-            '[FB-A11y] phaseUploadPhoto: count=${imageList.length} (expected: $expectedCount)',
-          );
-          if (imageList.isEmpty) {
-            debugPrint(
-              '[FB-A11y] No images to upload. Skipping upload photos phase.',
-            );
-            return true;
+          if (expectedCount != null && expectedCount > 0) {
+            if (images.length < expectedCount) return false;
+            images = images.sublist(images.length - expectedCount.toInt());
           }
+          if (!Platform.isAndroid || _inputBlocked) return false;
 
-          debugPrint(
-            '[FB-A11y] Converting ${imageList.length} images to base64...',
-          );
-          final List<Map<String, String>> base64Files = [];
-          for (int i = 0; i < imageList.length; i++) {
-            final path = imageList[i];
-            if (path.isEmpty) continue;
+          for (final path in images) {
             try {
-              final file = File(path);
-              if (await file.exists()) {
-                final bytes = await file.readAsBytes();
-                final base64String = base64Encode(bytes);
-                final ext = path.split('.').last.toLowerCase();
-                final mimeType =
-                    (ext == 'jpg' || ext == 'jpeg')
-                        ? 'image/jpeg'
-                        : 'image/png';
-                final timestamp = DateTime.now().microsecondsSinceEpoch;
-                base64Files.add({
-                  'base64': 'data:$mimeType;base64,$base64String',
-                  'filename': 'photo_${i + 1}_$timestamp.$ext',
-                  'contentType': mimeType,
-                });
+              if (path.isEmpty ||
+                  !await File(path).exists() ||
+                  await File(path).length() == 0) {
+                return false;
               }
             } catch (e) {
-              debugPrint(
-                '[FB-A11y] Error converting image $path to base64: $e',
-              );
+              debugPrint('[FB-A11y] Image unavailable: $e');
+              return false;
             }
           }
+          if (_inputBlocked) return false;
 
-          if (base64Files.isEmpty) {
-            debugPrint(
-              '[FB-A11y] No valid images successfully converted. Skipping upload.',
-            );
-            return true;
-          }
-
-          debugPrint(
-            '[FB-A11y] Injecting images into Facebook WebView file input...',
-          );
-          final jsonFiles = jsonEncode(base64Files);
-          final jsScript = '''
-      (function() {
-        var filesArray = $jsonFiles;
-        var fileInput = document.querySelector('input[type="file"]') 
-                     || document.querySelector('input[accept*="image"]')
-                     || document.querySelector('input[name*="file"]')
-                     || document.querySelector('input[id*="file"]');
-        if (!fileInput) {
-          console.error('File input not found');
-          return 'no_input';
-        }
-
-        var container = new DataTransfer();
-        for (var k = 0; k < filesArray.length; k++) {
-          var item = filesArray[k];
-          var base64Data = item.base64;
-          var filename = item.filename;
-          var contentType = item.contentType;
-
-          var byteString = atob(base64Data.split(',')[1] || base64Data);
-          var ab = new ArrayBuffer(byteString.length);
-          var ia = new Uint8Array(ab);
-          for (var i = 0; i < byteString.length; i++) {
-            ia[i] = byteString.charCodeAt(i);
-          }
-          var blob = new Blob([ab], {type: contentType});
-          var file = new File([blob], filename, {type: contentType});
-          container.items.add(file);
-        }
-
-        fileInput.value = '';
-        fileInput.files = container.files;
-        var event = new Event('change', { bubbles: true });
-        fileInput.dispatchEvent(event);
-        return 'ok';
-      })()
-    ''';
-
+          final request = NativeImageUploadRequest(images);
+          _imageUploadRequest = request;
           try {
-            final result = await controller.runJavaScriptReturningResult(
-              jsScript,
+            // Confirmed on-device: the drop zone is an android.widget.Button with
+            // this combined label. "העלאת תמונה" is a non-clickable heading.
+            const uploadLabels =
+                'הוסף תמונות או לגרור ולשחרר|'
+                'הוסף תמונה|הוסף תמונות|הוספת תמונות|או לגרור ולשחרר|'
+                'Add photo|Add photos|Add Photos|or drag and drop';
+            // The upload area is already near the top of the form. Wait for React
+            // to expose it, without moving the viewport. Target its clickable
+            // container when the label itself is only a static text child.
+            final tapped = await _retryUntil(() async {
+              if (await toolFindElementAndTap(
+                uploadLabels,
+                threshold: 1.0,
+                preferClickable: true,
+              )) {
+                return true;
+              }
+              // WebView may merge the button and drag/drop hint into one label.
+              return toolFindElementAndTap(
+                uploadLabels,
+                threshold: 0.90,
+                preferClickable: true,
+              );
+            }, timeout: const Duration(seconds: 4));
+            if (!tapped && !_inputBlocked) {
+              await toolLogAccessibilityTree(
+                tag: 'FB-Upload-NotFound',
+                force: true,
+              );
+            }
+
+            if (!tapped || _inputBlocked) return false;
+            final selected = await request.wait();
+            if (!selected || _inputBlocked) return false;
+            debugPrint(
+              '[FB-A11y] Images returned through Android file chooser',
             );
-            debugPrint('[FB-A11y] JS upload execution result: $result');
+            await Future<void>.delayed(const Duration(seconds: 5));
+
+            debugPrint(
+              '[FB-A11y] Native image selection completed. Logging state:',
+            );
+            await toolLogAccessibilityTree(tag: 'FB-PostUpload-A11y');
+
+            return !_inputBlocked;
           } catch (e) {
-            debugPrint('[FB-A11y] Error executing JS image upload: $e');
+            debugPrint('[FB-A11y] Native image upload failed: $e');
+            return false;
+          } finally {
+            request.cancel();
+            if (identical(_imageUploadRequest, request))
+              _imageUploadRequest = null;
           }
-
-          // Wait for upload to complete on server/UI (e.g. 5 seconds)
-          await Future.delayed(const Duration(seconds: 5));
-
-          // Log both trees right after upload completes
-          debugPrint(
-            '[FB-A11y] 📸 Photo upload complete. Logging state of the screen:',
-          );
-          await toolLogDomFormElements(tag: 'FB-PostUpload-DOM');
-          await toolLogAccessibilityTree(tag: 'FB-PostUpload-A11y');
-
-          return true;
         })
         ? const _StepActionResult.success()
-        : const _StepActionResult.failure('Failed to upload photos');
+        : const _StepActionResult.failure('Failed to upload photos natively');
   }
 
   // Phase 6 — Enter year
@@ -2071,6 +2059,7 @@ class FacebookAutomationService {
               Yad2AccessibilityAutomationService.isValidExtractedDescription(
                 formData.description,
               );
+
           final descriptionText =
               hasValidDesc
                   ? formData.description.trim()
@@ -2080,8 +2069,8 @@ class FacebookAutomationService {
           await Future.delayed(const Duration(milliseconds: 500));
 
           bool tapped =
-              await toolTapNodeAfter('תיאור', offset: 1) ||
-              await toolTapNodeAfter('Description', offset: 1) ||
+              await toolTapNodeAfter('תיאור', offset: 3) ||
+              await toolTapNodeAfter('Description', offset: 3) ||
               await toolFindElementAndTap(
                 'תיאור|Description',
                 preferEditable: true,

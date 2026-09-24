@@ -19,7 +19,7 @@
             android:value="pirsumoto_chat_notifications" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
-            android:resource="@drawable/ic_status_notification" />
+            android:resource="@drawable/ic_pirsumoto_notification" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
