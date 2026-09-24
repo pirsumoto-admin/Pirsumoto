@@ -1120,15 +1120,6 @@ class Yad2AccessibilityAutomationService {
         );
 
         bool dismissed = await toolFindElementAndTap(resetTargets);
-        if (!dismissed) {
-          for (final alt in _splitAlternatives(resetTargets)) {
-            if (await toolFindAndTapJs(alt)) {
-              onAutomationFallback?.call('JavaScript', alt);
-              dismissed = true;
-              break;
-            }
-          }
-        }
         if (dismissed) {
           debugPrint(
             '[Yad2-A11y] Reset popup clicked — waiting for page reset and starting license filling...',
@@ -1167,15 +1158,6 @@ class Yad2AccessibilityAutomationService {
     // Best-effort reset-popup dismissal — check Accessibility tree first, JS fallback as last resort
     const resetTarget = 'התחלה מחדש|מחדש|להתחיל מחדש|התחל מחדש';
     bool dismissedReset = await toolFindElementAndTap(resetTarget);
-    if (!dismissedReset) {
-      for (final alt in _splitAlternatives(resetTarget)) {
-        if (await toolFindAndTapJs(alt)) {
-          onAutomationFallback?.call('JavaScript', alt);
-          dismissedReset = true;
-          break;
-        }
-      }
-    }
     if (dismissedReset) {
       debugPrint('[Yad2-A11y] Reset popup found — tapped start-over.');
       await _waitForUiSettle(const Duration(milliseconds: 1200));
@@ -1418,8 +1400,7 @@ class Yad2AccessibilityAutomationService {
       () => _performWithPopupHandling(() async {
         if (!await toolTapNodeAfter('קילומטראז|קילומטר|נסועה')) return false;
         await Future.delayed(const Duration(milliseconds: 500));
-        await toolEnterTextAtFocusedJs(km);
-        return true;
+        return await toolEnterTextAtFocused(km);
       }),
       timeout: const Duration(seconds: 3),
     );
@@ -1857,17 +1838,6 @@ class Yad2AccessibilityAutomationService {
       }
     }
 
-    // 2. JavaScript fallback as last resort
-    if (allowJsFallback) {
-      for (final alt in _splitAlternatives(targetText)) {
-        if (await toolFindAndTapJs(alt, targetInstance: targetInstance)) {
-          onAutomationFallback?.call('JavaScript', alt);
-          debugPrint('[Yad2-A11y] Shadow-DOM fallback clicked "$alt"');
-          return true;
-        }
-      }
-    }
-
     // 3. OCR fallback only if explicitly enabled
     if (allowOcrFallbackOverride &&
         allowOcrFallback &&
@@ -1988,11 +1958,7 @@ class Yad2AccessibilityAutomationService {
       if (bounds == null) return false;
       await _tapBounds(bounds);
       await Future.delayed(const Duration(milliseconds: 500));
-      final native = await toolEnterTextAtFocused(value);
-      if (native) return true;
-      onAutomationFallback?.call('JavaScript', targetText);
-      await toolEnterTextAtFocusedJs(value);
-      return true;
+      return await toolEnterTextAtFocused(value);
     } catch (e) {
       debugPrint('[Yad2-A11y] enterTextBefore failed: $e');
       return false;
@@ -2004,11 +1970,7 @@ class Yad2AccessibilityAutomationService {
     final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
     if (!tapped) return false;
     await Future.delayed(const Duration(milliseconds: 500));
-    final native = await toolEnterTextAtFocused(value);
-    if (native) return true;
-    onAutomationFallback?.call('JavaScript', label);
-    await toolEnterTextAtFocusedJs(value);
-    return true;
+    return await toolEnterTextAtFocused(value);
   }
 
   Future<void> toolTapScreen(double x, double y) async {
@@ -2043,108 +2005,6 @@ class Yad2AccessibilityAutomationService {
       debugPrint('[Yad2-A11y] enterTextAtFocused failed: $e');
       return false;
     }
-  }
-
-  Future<void> toolEnterTextAtFocusedJs(String text) async {
-    if (_inputBlocked) return;
-    final encoded = jsonEncode(text);
-    await controller.runJavaScript('''
-      (function(value) {
-        var el = document.activeElement;
-        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) {
-          var inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
-          for (var i = 0; i < inputs.length; i++) {
-            var rect = inputs[i].getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight) {
-              el = inputs[i];
-              break;
-            }
-          }
-        }
-        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return false;
-        el.focus();
-        var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-        var setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-        if (setter) setter.call(el, value);
-        else el.value = value;
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      })($encoded);
-    ''');
-  }
-
-  Future<bool> toolFindAndTapJs(
-    String targetText, {
-    int targetInstance = 1,
-  }) async {
-    if (_inputBlocked) return false;
-    final encoded = jsonEncode(targetText);
-    final result = await controller.runJavaScriptReturningResult('''
-      (function(targetText, targetInstance) {
-        var all = [];
-        function visit(root) {
-          if (!root) return;
-          var elements = root.querySelectorAll('*');
-          for (var i = 0; i < elements.length; i++) {
-            all.push(elements[i]);
-            if (elements[i].shadowRoot) visit(elements[i].shadowRoot);
-          }
-        }
-        visit(document);
-
-        var cleanTarget = String(targetText || '').replace(/\\s+/g, '');
-        var matches = [];
-        for (var i = 0; i < all.length; i++) {
-          var el = all[i];
-          var rect = el.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) continue;
-          if (rect.width > window.innerWidth * 0.92) continue;
-          if (rect.height > Math.max(180, window.innerHeight * 0.35)) continue;
-          var text = (el.getAttribute('aria-label') || el.innerText || el.textContent || '').trim();
-          var cleanText = text.replace(/\\s+/g, '');
-          if (cleanText === cleanTarget || cleanText.indexOf(cleanTarget) >= 0) {
-            var role = el.getAttribute('role') || '';
-            var style = window.getComputedStyle(el);
-            var interactive = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'LABEL' ||
-              role === 'button' || role === 'option' || role === 'menuitem' || style.cursor === 'pointer';
-            matches.push({ el: el, area: rect.width * rect.height, interactive: interactive });
-          }
-        }
-        matches.sort(function(a, b) {
-          if (a.interactive !== b.interactive) return a.interactive ? -1 : 1;
-          return a.area - b.area;
-        });
-        var item = matches[Math.max(0, targetInstance - 1)];
-        var target = item && item.el;
-        if (!target) return false;
-        try { target.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' }); } catch(e) {}
-        var box = target.getBoundingClientRect();
-        var x = box.left + box.width / 2;
-        var y = box.top + box.height / 2;
-        var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, screenX: x, screenY: y };
-        try {
-          target.dispatchEvent(new MouseEvent('mousedown', opts));
-          target.dispatchEvent(new MouseEvent('mouseup', opts));
-          target.dispatchEvent(new MouseEvent('click', opts));
-          target.click();
-        } catch(e) {}
-        try {
-          var key = Object.keys(target).find(function(k) { return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'); });
-          var fiber = key && target[key];
-          while (fiber) {
-            var props = fiber.memoizedProps || fiber.pendingProps;
-            if (props && typeof props.onClick === 'function') {
-              props.onClick({ type: 'click', target: target, currentTarget: target, clientX: x, clientY: y, bubbles: true, preventDefault: function(){}, stopPropagation: function(){} });
-              break;
-            }
-            fiber = fiber.return;
-          }
-        } catch(e) {}
-        return true;
-      })($encoded, $targetInstance);
-    ''');
-    return result == true || result == 'true';
   }
 
   Future<bool> toolOcrFindAndTap(
