@@ -26,7 +26,9 @@ store_deployment_assets/
 │   ├── icon/
 │   │   └── app_store_icon_1024.png     # אייקון App Store ברוחב 1024x1024 (ללא שקיפות)
 │   ├── screenshots_6_7/               # 8 צילומי מסך 1290x2796 (מסכי 6.7" Pro Max)
-│   └── screenshots_6_5/               # 8 צילומי מסך 1242x2688 (מסכי 6.5")
+│   ├── screenshots_6_5/               # 8 צילומי מסך 1242x2688 (מסכי 6.5")
+│   └── screenshots_ipad_13/           # 8 צילומי מסך 2048x2732 (מסכי iPad 13" / 12.9" Pro)
+
 ├── metadata/
 │   ├── google_play_listing.md         # שמות, תיאור קצר/מלא, סיווג והצהרת Data Safety
 │   └── apple_app_store_listing.md     # שמות, כותרת משנה, מילות מפתח, הסבר לבודק אפל

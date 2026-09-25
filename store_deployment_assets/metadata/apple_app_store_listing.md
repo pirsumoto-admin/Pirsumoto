@@ -105,3 +105,5 @@ If you have any questions or require live assistance during the review process, 
 * [x] **App Store Icon:** `1024 x 1024 px`, 24-bit RGB PNG, No Alpha (`store_deployment_assets/ios/icon/app_store_icon_1024.png`)
 * [x] **6.7" iPhone Display (8 Screenshots - iPhone 16 Pro Max / 15 Pro Max):** `1290 x 2796 px`, PNG (`store_deployment_assets/ios/screenshots_6_7/`)
 * [x] **6.5" iPhone Display (8 Screenshots - iPhone 11 Pro Max / XS Max):** `1242 x 2688 px`, PNG (`store_deployment_assets/ios/screenshots_6_5/`)
+* [x] **13" iPad Display (8 Screenshots - iPad Pro 13" M4 / 12.9" 6th Gen):** `2048 x 2732 px`, PNG (`store_deployment_assets/ios/screenshots_ipad_13/`)
+

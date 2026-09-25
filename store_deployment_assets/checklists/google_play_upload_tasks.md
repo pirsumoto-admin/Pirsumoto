@@ -6,37 +6,22 @@
 
 ## שלב 1: הכנת חתימת האפליקציה (Keystore & Release Signing)
 
-1. [ ] **יצירת Keystore ייעודי לחתימת Release (במידה וטרם נוצר):**
-   בטרמינל, הריצו את הפקודה הבאה ליצירת מפתח חתימה:
-   ```bash
-   keytool -genkey -v -keystore ~/pirsumoto-release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias pirsumoto_key
-   ```
-2. [ ] **הגדרת קובץ `android/key.properties` בפרויקט `Pirsumoto_remote_control`:**
-   צרו קובץ בשם `key.properties` בתיקייה `Pirsumoto_remote_control/android/key.properties`:
-   ```properties
-   storePassword=<סיסמת ה-keystore>
-   keyPassword=<סיסמת המפתח>
-   keyAlias=pirsumoto_key
-   storeFile=/Users/jotit/pirsumoto-release-key.jks
-   ```
-3. [ ] **חיבור החתימה ב-`android/app/build.gradle.kts`:**
-   ודאו שבקטע `buildTypes.getByName("release")` מוגדר `signingConfig = signingConfigs.getByName("release")`.
+1. [x] **הגדרת Keystore ייעודי וחתימת Release:**
+   * קובץ ה-Keystore (`upload-keystore.jks`) וקובץ ההגדרות (`key.properties`) הוגדרו בפרויקט `Pirsumoto_remote_control`.
+2. [x] **חיבור החתימה ב-`android/app/build.gradle.kts`:**
+   * הוגדר בלוק `signingConfigs.create("release")` והוגדר `signingConfig = signingConfigs.getByName("release")` עבור גרסת ה-Release.
 
 ---
 
 ## שלב 2: בניית קובץ ה-Release Android App Bundle (.aab)
 
-1. [ ] **עדכון גרסה ב-`pubspec.yaml`:**
-   ודאו ששדות הגרסה מעודכנים (למשל `version: 1.0.0+1`).
-2. [ ] **בניית ה-AAB:**
-   הריצו מתיקיית `Pirsumoto_remote_control`:
-   ```bash
-   flutter clean
-   flutter pub get
-   flutter build appbundle --release
-   ```
-   הקובץ שייווצר יישמר בנתיב:
-   `Pirsumoto_remote_control/build/app/outputs/bundle/release/app-release.aab`
+1. [x] **עדכון גרסה ב-`pubspec.yaml`:**
+   * גרסה נוכחית: `version: 1.0.0+1`.
+2. [x] **בניית ה-AAB:**
+   * ה-Build הושלם בהצלחה!
+   * **נתיב הקובץ המוכן להעלאה:**
+     [`Pirsumoto_remote_control/build/app/outputs/bundle/release/app-release.aab`](file:///Users/jotit/Desktop/Pirsumoto/Pirsumoto_remote_control/build/app/outputs/bundle/release/app-release.aab)
+
 
 ---
 

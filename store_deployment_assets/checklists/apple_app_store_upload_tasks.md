@@ -57,6 +57,9 @@
      העלו את 8 צילומי המסך המעוצבים מ-`store_deployment_assets/ios/screenshots_6_7/` *(1290x2796 PNG)*.
    * **6.5" Display (iPhone 11 Pro Max / XS Max):**
      העלו את 8 צילומי המסך מ-`store_deployment_assets/ios/screenshots_6_5/` *(1242x2688 PNG)*.
+   * **13" iPad Display (iPad Pro 13" M4 / 12.9" 6th Gen):**
+     העלו את 8 צילומי המסך מ-`store_deployment_assets/ios/screenshots_ipad_13/` *(2048x2732 PNG)*.
+
 2. [ ] **Promotional Text:**
    העתיקו את הטקסט מ-[apple_app_store_listing.md](file:///Users/jotit/Desktop/Pirsumoto/store_deployment_assets/metadata/apple_app_store_listing.md).
 3. [ ] **Description:**
