@@ -5,13 +5,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
+import 'package:audioplayers/audioplayers.dart' hide Source;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import 'ocr_service.dart';
 import 'ui_context.dart';
@@ -894,14 +895,20 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Select treatment options.',
-          action: () => _tapListValues(_treatments, fetchSettings: true),
+          action: () async {
+            await _fetchSettingsIfNeeded();
+            return _tapListValues(_treatments);
+          },
           validation: const _StepValidation(),
         );
       case AutomationPhase.phase5f:
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Select service options.',
-          action: () => _tapListValues(_services, fetchSettings: true),
+          action: () async {
+            await _fetchSettingsIfNeeded();
+            return _tapListValues(_services);
+          },
           validation: const _StepValidation(),
         );
       case AutomationPhase.phase6:
@@ -1174,7 +1181,9 @@ class Yad2AccessibilityAutomationService {
       timeout: const Duration(seconds: 8),
     );
     if (!entered) {
-      return const _StepActionResult.failure('License input field not found.');
+      return const _StepActionResult.failure(
+        'Could not enter and verify the license number.',
+      );
     }
     final searched = await _performWithPopupHandling(() => tapSmart('חיפוש'));
     return searched
@@ -1314,27 +1323,21 @@ class Yad2AccessibilityAutomationService {
 
   Future<_StepActionResult> _actionWarranties() async {
     await _fetchSettingsIfNeeded();
-    if (_warranties.isEmpty) return const _StepActionResult.success();
-    await _scrollDown(0.2, accessibilityOnly: true);
-
+    if (_warranties.isEmpty) {
+      await _scrollDown(0.3, accessibilityOnly: true);
+      return const _StepActionResult.success();
+    }
     final durationCounts = <String, int>{};
     final battery =
-        _warranties
-            .where((warranty) => warranty == 'אחריות על הסוללה')
-            .toList();
+        _warranties.where((warranty) => warranty.contains('סוללה')).toList();
     final others =
-        _warranties
-            .where((warranty) => warranty != 'אחריות על הסוללה')
-            .toList();
+        _warranties.where((warranty) => !warranty.contains('סוללה')).toList();
 
     Future<bool> process(List<String> warranties) async {
       for (final warranty in warranties) {
         final checked = await _runOnce(
           'warranty:$warranty',
-          () => _retryUntil(
-            () => _performWithPopupHandling(() => tapSmart(warranty)),
-            timeout: const Duration(seconds: 4),
-          ),
+          () => toolEnsureBenefitSelected(warranty),
         );
         if (!checked) return false;
         await Future.delayed(const Duration(milliseconds: 800));
@@ -1363,26 +1366,76 @@ class Yad2AccessibilityAutomationService {
         );
   }
 
-  Future<_StepActionResult> _tapListValues(
-    List<String> values, {
-    bool fetchSettings = false,
-  }) async {
-    if (fetchSettings) await _fetchSettingsIfNeeded();
-    if (values.isEmpty) return const _StepActionResult.success();
-    await _scrollDown(0.2, accessibilityOnly: true);
+  Future<_StepActionResult> _tapListValues(List<String> values) async {
+    if (values.isEmpty) {
+      await _scrollDown(0.3, accessibilityOnly: true);
+      return const _StepActionResult.success();
+    }
     for (final value in values) {
       final tapped = await _runOnce(
         'list:$value',
-        () => _retryUntil(
-          () => _performWithPopupHandling(() => tapSmart(value)),
-          timeout: const Duration(seconds: 3),
-        ),
+        () => toolEnsureBenefitSelected(value),
       );
       if (!tapped) {
         return _StepActionResult.failure('Could not select "$value".');
       }
     }
     return const _StepActionResult.success();
+  }
+
+  /// ToggleButton on Xiaomi, checkbox on some WebViews. A tap is not proof
+  /// of selection, and retrying an already-selected toggle would turn it off.
+  Future<bool> toolEnsureBenefitSelected(String value) async {
+    final shortLabel = value.replaceFirst(RegExp(r'^אחריות\s+'), '').trim();
+    final target = <String>{
+      value.trim(),
+      shortLabel,
+      if (value.contains('שלדה')) 'על שלדה, מנוע וגיר',
+      if (value.contains('יבואן')) 'מהיבואן',
+      if (value.contains('סוכנות')) 'מהסוכנות',
+      if (value.contains('סוללה')) 'על הסוללה',
+    }.join('|');
+    var useGesture = false;
+    try {
+      for (var attempt = 0; attempt < 8; attempt++) {
+        if (_inputBlocked) return false;
+        final state = await _automationChannel.invokeMethod<String>(
+          'ensureCheckableChecked',
+          {'target': target, 'gesture': useGesture},
+        );
+        if (state == 'checked') return true;
+        if (state == 'disabled' || state == 'failed' || state == null)
+          return false;
+        if (state == 'clicked') {
+          for (var read = 0; read < 5; read++) {
+            await Future.delayed(const Duration(milliseconds: 200));
+            if (_inputBlocked) return false;
+            final verified = await _automationChannel.invokeMethod<String>(
+              'ensureCheckableChecked',
+              {'target': target, 'readOnly': true},
+            );
+            if (verified == 'checked') return true;
+          }
+          useGesture = true;
+        } else {
+          await _waitForUiSettle(const Duration(milliseconds: 500));
+          // First let ACTION_SHOW_ON_SCREEN reveal the exact control. Use
+          // small bounded scrolls only when the WebView ignores that action.
+          if (state == 'missing' || attempt.isOdd) {
+            if (_inputBlocked) return false;
+            await _automationChannel.invokeMethod('scrollNode', {
+              'direction': state == 'above' ? 'up' : 'down',
+              'percent': 0.18,
+            });
+            await _waitForUiSettle(const Duration(milliseconds: 700));
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[Yad2-A11y] Benefit selection failed for "$value": $e');
+    }
+    debugPrint('[Yad2-A11y] Benefit was not confirmed checked: "$value"');
+    return false;
   }
 
   Future<_StepActionResult> _actionOpenHandDropdown() async {
@@ -1404,7 +1457,15 @@ class Yad2AccessibilityAutomationService {
       () => _performWithPopupHandling(() async {
         if (!await toolTapNodeAfter('קילומטראז|קילומטר|נסועה')) return false;
         await Future.delayed(const Duration(milliseconds: 500));
-        return await toolEnterTextAtFocused(km);
+        await toolEnterTextAtFocused(km);
+        if (await _verifyInputAfter('קילומטראז|קילומטר|נסועה', km)) return true;
+        if (_inputBlocked) return false;
+        debugPrint(
+          '[Yad2-A11y] Text readback failed; trying native WebView input.',
+        );
+        final nativeSuccess = await toolReplaceFocusedWebViewText(km);
+        if (nativeSuccess) return true;
+        return await _verifyInputAfter('קילומטראז|קילומטר|נסועה', km);
       }),
       timeout: const Duration(seconds: 3),
     );
@@ -1532,6 +1593,7 @@ class Yad2AccessibilityAutomationService {
 
   Future<String> _extractVehicleDescriptionText() async {
     final tree = await _readTreeString();
+    await _scrollDown(0.35, accessibilityOnly: true);
     final text = tree == null ? '' : descriptionFromAccessibilityTree(tree);
     return _saveAndReturnDescription(text);
   }
@@ -1637,9 +1699,15 @@ class Yad2AccessibilityAutomationService {
         if (await _isDescriptionStep()) return false;
         if (!await toolTapNodeAfter(_priceLabel)) return false;
         await Future<void>.delayed(const Duration(milliseconds: 500));
-        // Native text-entry success is the gate. Reading the node after the
-        // label can return stale text or a wrapper, causing repeated entry.
-        return toolEnterTextAtFocused(price);
+        await toolEnterTextAtFocused(price);
+        if (await _verifyInputAfter(_priceLabel, price)) return true;
+        if (_inputBlocked) return false;
+        debugPrint(
+          '[Yad2-A11y] Text readback failed; trying native WebView input.',
+        );
+        final nativeSuccess = await toolReplaceFocusedWebViewText(price);
+        if (nativeSuccess) return true;
+        return await _verifyInputAfter(_priceLabel, price);
       }),
     );
     if (!entered) {
@@ -1737,6 +1805,7 @@ class Yad2AccessibilityAutomationService {
     if (_termsSubmitted) return const _StepActionResult.success();
     const termsMarker = 'יצירת איש קשר חדש';
 
+    await Future.delayed(const Duration(milliseconds: 1100));
     final tappedCheckbox =
         !_termsCheckboxAttempted &&
         await _performWithPopupHandling(() async {
@@ -1964,9 +2033,91 @@ class Yad2AccessibilityAutomationService {
       if (bounds == null) return false;
       await _tapBounds(bounds);
       await Future.delayed(const Duration(milliseconds: 500));
-      return await toolEnterTextAtFocused(value);
+      if (_inputBlocked) return false;
+      // Resolve the actual input again after keyboard layout/focus changes.
+      // Some WebViews expose their wrapper as FOCUS_INPUT instead of the HTML input.
+      await _automationChannel.invokeMethod<bool>('setTextBeforeTarget', {
+        'target': targetText,
+        'value': value,
+      });
+      if (await _verifyInputBefore(targetText, value)) return true;
+      if (_inputBlocked) return false;
+      debugPrint(
+        '[Yad2-A11y] Text readback failed; trying native WebView input.',
+      );
+      await toolReplaceFocusedWebViewText(value);
+      return await _verifyInputBefore(targetText, value);
     } catch (e) {
       debugPrint('[Yad2-A11y] enterTextBefore failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _verifyInputBefore(String targetText, String expected) async {
+    String normalize(String value) {
+      // Yad2 can display a plate with hyphens and RTL direction marks.
+      if (targetText == 'חיפוש' && RegExp(r'^\d+$').hasMatch(expected)) {
+        return value.replaceAll(
+          RegExp(r'[\s\-\u200e\u200f\u202a-\u202e\u2066-\u2069]'),
+          '',
+        );
+      }
+      return value;
+    }
+
+    for (var attempt = 0; attempt < 4; attempt++) {
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (_inputBlocked) return false;
+      final actual = await _automationChannel.invokeMethod<String>(
+        'getInputTextBeforeTarget',
+        {'target': targetText},
+      );
+      if (actual != null && normalize(actual) == normalize(expected)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<bool> _verifyInputAfter(String label, String expected) async {
+    String normalize(String value) {
+      return value.replaceAll(RegExp(r'[,\s\₪]'), '');
+    }
+
+    for (var attempt = 0; attempt < 4; attempt++) {
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (_inputBlocked) return false;
+      final actual = await toolGetNodeTextAfter(label);
+      if (actual != null && normalize(actual) == normalize(expected)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<bool> toolReplaceFocusedWebViewText(String value) async {
+    if (_inputBlocked) return false;
+    final platform = controller.platform;
+    if (platform is! AndroidWebViewController) return false;
+    return await _automationChannel.invokeMethod<bool>(
+          'replaceFocusedWebViewText',
+          {'identifier': platform.webViewIdentifier, 'value': value},
+        ) ??
+        false;
+  }
+
+  Future<bool> toolPasteTextBefore(String targetText, String value) async {
+    if (_inputBlocked) return false;
+    try {
+      final bounds = await _getStableBounds('findInputBeforeAndGetBounds', {
+        'target': targetText,
+      });
+      if (bounds == null) return false;
+      await _tapBounds(bounds);
+      await Future.delayed(const Duration(milliseconds: 500));
+      return await toolPasteTextAtFocused(value);
+    } catch (e) {
+      debugPrint('[Yad2-A11y] pasteTextBefore failed: $e');
       return false;
     }
   }
@@ -2009,6 +2160,19 @@ class Yad2AccessibilityAutomationService {
       return success ?? false;
     } catch (e) {
       debugPrint('[Yad2-A11y] enterTextAtFocused failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> toolPasteTextAtFocused(String text) async {
+    if (_inputBlocked) return false;
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      await Future.delayed(const Duration(milliseconds: 300));
+      final success = await _automationChannel.invokeMethod<bool>('pasteText');
+      return success ?? false;
+    } catch (e) {
+      debugPrint('[Yad2-A11y] pasteTextAtFocused failed: $e');
       return false;
     }
   }
@@ -2664,12 +2828,15 @@ class Yad2AccessibilityAutomationService {
     if (_warranties.isEmpty && _treatments.isEmpty && _services.isEmpty) {
       try {
         final user = FirebaseAuth.instance.currentUser;
+        if (user == null) {
+          throw StateError('Cannot load benefits without a signed-in account.');
+        }
         if (user != null) {
-          final doc =
-              await FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(user.uid)
-                  .get();
+          final doc = await FirebaseFirestore.instance
+              .collection('users')
+              .doc(user.uid)
+              .get(const GetOptions(source: Source.server))
+              .timeout(const Duration(seconds: 10));
           final settings = doc.data()?['settings'] as Map<String, dynamic>?;
           if (settings != null) {
             _warranties = List<String>.from(settings['warranties'] ?? const []);
@@ -2682,8 +2849,15 @@ class Yad2AccessibilityAutomationService {
         }
       } catch (e) {
         debugPrint('[Yad2-A11y] Settings fetch failed: $e');
+        // A transient network/auth failure is not an empty configuration.
+        // Leave this uncached so the phase retry can load the selections.
+        rethrow;
       }
     }
+    debugPrint(
+      '[Yad2-A11y] Loaded benefits: ${_warranties.length} warranties, '
+      '${_treatments.length} treatments, ${_services.length} services.',
+    );
     _settingsFetched = true;
   }
 
@@ -2691,7 +2865,9 @@ class Yad2AccessibilityAutomationService {
     if (warranty.contains('שלדה')) return 'אחריות שלדה, מנוע וגיר';
     if (warranty.contains('יבואן')) return 'אחריות מהיבואן';
     if (warranty.contains('סוכנות')) return 'אחריות מהסוכנות';
-    if (warranty.contains('סוללה')) return 'אחירות על סוללה';
+    if (warranty.contains('סוללה')) {
+      return 'אחריות על הסוללה|אחריות על סוללה|אחירות על סוללה';
+    }
     return warranty;
   }
 
@@ -2706,7 +2882,8 @@ class Yad2AccessibilityAutomationService {
   /// Empty responses cancel unsolicited, expired, or paused chooser requests.
   List<String> handleNativeImageChooser({required bool allowMultiple}) {
     if (_inputBlocked) return const [];
-    return _imageUploadRequest?.select(allowMultiple: allowMultiple) ?? const [];
+    return _imageUploadRequest?.select(allowMultiple: allowMultiple) ??
+        const [];
   }
 
   Future<bool> _injectImagesIfAny() async {

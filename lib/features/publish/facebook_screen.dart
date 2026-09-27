@@ -345,7 +345,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
       // Commit PopScope before navigating, and navigate before reporting the
       // terminal status, which can immediately launch the next queued vehicle.
       await WidgetsBinding.instance.endOfFrame;
-      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+      if (mounted) {
         Navigator.of(context).popUntil((route) => route.isFirst);
       }
     }

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -95,6 +97,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   bool _isSaving = false;
   bool _isLoading = true;
+  StreamSubscription<DocumentSnapshot>? _settingsSubscription;
 
   final _picker = ImagePicker();
 
@@ -112,66 +115,78 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _loadSettings() async {
     final userId = _currentUserId;
     if (userId != null && userId.isNotEmpty) {
-      final db = ref.read(dbServiceProvider);
-      try {
-        final settings = await db.getSettingsData(userId);
-        if (settings != null && mounted) {
-          setState(() {
-            _yad2Enabled = settings['yad2Enabled'] ?? true;
-            _fbAutoPostEnabled = settings['fbAutoPostEnabled'] ?? false;
-            _fbGroupXxxEnabled = settings['fbGroupXxxEnabled'] ?? false;
-            _fbGroupYyyEnabled = settings['fbGroupYyyEnabled'] ?? false;
-            _carWizEnabled = settings['carWizEnabled'] ?? false;
+      _settingsSubscription = FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .snapshots()
+          .listen((doc) {
+        if (mounted) {
+          final settings = doc.exists ? (doc.data()?['settings'] as Map<String, dynamic>?) : null;
+          if (settings != null) {
+            setState(() {
+              if (!_isSaving) { // Avoid overwriting while typing/saving locally
+                _yad2Enabled = settings['yad2Enabled'] ?? true;
+                _fbAutoPostEnabled = settings['fbAutoPostEnabled'] ?? false;
+                _fbGroupXxxEnabled = settings['fbGroupXxxEnabled'] ?? false;
+                _fbGroupYyyEnabled = settings['fbGroupYyyEnabled'] ?? false;
+                _carWizEnabled = settings['carWizEnabled'] ?? false;
 
-            _yad2PhoneController.text = settings['yad2Phone'] ?? '';
-            _fbAutoPostPhoneController.text = settings['fbAutoPostPhone'] ?? '';
-            _fbGroupXxxPhoneController.text = settings['fbGroupXxxPhone'] ?? '';
-            _fbGroupYyyPhoneController.text = settings['fbGroupYyyPhone'] ?? '';
-            _carWizPhoneController.text = settings['carWizPhone'] ?? '';
+                _yad2PhoneController.text = settings['yad2Phone'] ?? '';
+                _fbAutoPostPhoneController.text = settings['fbAutoPostPhone'] ?? '';
+                _fbGroupXxxPhoneController.text = settings['fbGroupXxxPhone'] ?? '';
+                _fbGroupYyyPhoneController.text = settings['fbGroupYyyPhone'] ?? '';
+                _carWizPhoneController.text = settings['carWizPhone'] ?? '';
 
-            _yad2DescController.text = settings['yad2Desc'] ?? '';
-            _fbAutoPostDescController.text = settings['fbAutoPostDesc'] ?? '';
-            _fbGroupXxxDescController.text = settings['fbGroupXxxDesc'] ?? '';
-            _fbGroupYyyDescController.text = settings['fbGroupYyyDesc'] ?? '';
-            _carWizDescController.text = settings['carWizDesc'] ?? '';
+                _yad2DescController.text = settings['yad2Desc'] ?? '';
+                _fbAutoPostDescController.text = settings['fbAutoPostDesc'] ?? '';
+                _fbGroupXxxDescController.text = settings['fbGroupXxxDesc'] ?? '';
+                _fbGroupYyyDescController.text = settings['fbGroupYyyDesc'] ?? '';
+                _carWizDescController.text = settings['carWizDesc'] ?? '';
 
-            // Load Benefits & Services
-            _selectedWarranties.clear();
-            if (settings['warranties'] != null) {
-              _selectedWarranties.addAll(
-                List<String>.from(settings['warranties']),
-              );
-            }
+                // Load Benefits & Services
+                _selectedWarranties.clear();
+                if (settings['warranties'] != null) {
+                  _selectedWarranties.addAll(
+                    List<String>.from(settings['warranties']),
+                  );
+                }
 
-            _warrantyDurations.clear();
-            if (settings['warrantyDurations'] != null) {
-              final Map<String, dynamic> savedDurations =
-                  Map<String, dynamic>.from(settings['warrantyDurations']);
-              savedDurations.forEach((k, v) {
-                _warrantyDurations[k] = v.toString();
-              });
-            }
+                _warrantyDurations.clear();
+                if (settings['warrantyDurations'] != null) {
+                  final Map<String, dynamic> savedDurations =
+                      Map<String, dynamic>.from(settings['warrantyDurations']);
+                  savedDurations.forEach((k, v) {
+                    _warrantyDurations[k] = v.toString();
+                  });
+                }
 
-            _selectedTreatments.clear();
-            if (settings['treatments'] != null) {
-              _selectedTreatments.addAll(
-                List<String>.from(settings['treatments']),
-              );
-            }
+                _selectedTreatments.clear();
+                if (settings['treatments'] != null) {
+                  _selectedTreatments.addAll(
+                    List<String>.from(settings['treatments']),
+                  );
+                }
 
-            _selectedServices.clear();
-            if (settings['services'] != null) {
-              _selectedServices.addAll(List<String>.from(settings['services']));
-            }
-          });
+                _selectedServices.clear();
+                if (settings['services'] != null) {
+                  _selectedServices.addAll(List<String>.from(settings['services']));
+                }
+              }
+            });
+          }
+          if (_isLoading) {
+            setState(() => _isLoading = false);
+          }
         }
-      } catch (e) {
-        debugPrint('[SettingsScreen] Error loading settings: $e');
-      }
+      }, onError: (e) {
+        debugPrint('[SettingsScreen] Error listening to settings from Firestore: $e');
+        if (mounted) setState(() => _isLoading = false);
+      });
+    } else {
+      if (mounted) setState(() => _isLoading = false);
     }
     // Load template images from local storage
     await _loadTemplateImages();
-    if (mounted) setState(() => _isLoading = false);
   }
 
   Future<void> _loadTemplateImages() async {
@@ -306,6 +321,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   void dispose() {
+    _settingsSubscription?.cancel();
     _yad2PhoneController.dispose();
     _fbAutoPostPhoneController.dispose();
     _fbGroupXxxPhoneController.dispose();

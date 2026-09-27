@@ -7,6 +7,7 @@ import 'dart:io'; // Keep: used in main() for Platform.isAndroid / Platform.isIO
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_skill/flutter_skill.dart';
 // [WHATSAPP-DISABLED] permission_handler was used to request manageExternalStorage for WA.
 // import 'package:permission_handler/permission_handler.dart';
 // [WHATSAPP-DISABLED] form_provider was used in _applyWhatsAppVehicleData.
@@ -34,12 +35,27 @@ import 'firebase_options.dart';
 // import 'package:flutter_skill/flutter_skill.dart';
 // import 'package:flutter_gemma/flutter_gemma.dart';
 
+const platform = MethodChannel('com.pirsumoto/accessibility');
+
+void lockDeviceInKioskMode() async {
+  try {
+    bool isOwner = await platform.invokeMethod('isDeviceOwner');
+    if (isOwner) {
+      await platform.invokeMethod('startKioskMode'); // This pins the app to the screen!
+    }
+  } catch (e) {
+    debugPrint('Failed to lock device in kiosk mode: $e');
+  }
+}
+
 void main() async {
+  FlutterSkillBinding.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
 
   if (Platform.isAndroid || Platform.isIOS) {
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      lockDeviceInKioskMode();
     } catch (e) {
       debugPrint('Failed to set SystemUI: $e');
     }

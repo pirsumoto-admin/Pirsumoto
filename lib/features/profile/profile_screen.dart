@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../auth/auth_provider.dart';
 import '../../services/db_service.dart';
 
@@ -26,6 +28,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   String? _profileImagePath;
   bool _isLoading = true;
   bool _isSaving = false;
+  StreamSubscription<DocumentSnapshot>? _profileSubscription;
 
   final _picker = ImagePicker();
 
@@ -56,24 +59,21 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     }
 
     if (user != null) {
-      final db = ref.read(dbServiceProvider);
-      try {
-        final profile = await db.getProfileData(user.uid);
+      _profileSubscription = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .snapshots()
+          .listen((doc) {
         if (mounted) {
+          final profile = doc.exists ? (doc.data()?['profile'] as Map<String, dynamic>?) : null;
           setState(() {
-            _nameController.text = profile?['name'] ??
-                profile?['displayName'] ??
-                user.displayName ??
-                '';
-            _emailController.text =
-                profile?['email'] ?? user.email ?? '';
-            _phoneController.text = profile?['phone'] ??
-                profile?['phoneNumber'] ??
-                user.phoneNumber ??
-                '';
-            _companyNumberController.text =
-                profile?['companyNumber'] ?? '';
-            _selectedLanguage = profile?['language'] ?? 'עברית';
+            if (!_isSaving) { // Avoid overwriting while typing/saving locally
+              _nameController.text = profile?['name'] ?? profile?['displayName'] ?? user.displayName ?? '';
+              _emailController.text = profile?['email'] ?? user.email ?? '';
+              _phoneController.text = profile?['phone'] ?? profile?['phoneNumber'] ?? user.phoneNumber ?? '';
+              _companyNumberController.text = profile?['companyNumber'] ?? '';
+              _selectedLanguage = profile?['language'] ?? 'עברית';
+            }
 
             final savedPath = profile?['profileImagePath'];
             if (savedPath is String && savedPath.isNotEmpty) {
@@ -81,14 +81,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 _profileImagePath = savedPath;
               }
             }
+            if (_isLoading) {
+              _isLoading = false;
+            }
           });
         }
-      } catch (e) {
-        debugPrint('[ProfileScreen] Error loading profile from Firestore: $e');
-      }
+      }, onError: (e) {
+        debugPrint('[ProfileScreen] Error listening to profile from Firestore: $e');
+        if (mounted) setState(() => _isLoading = false);
+      });
+    } else {
+      if (mounted) setState(() => _isLoading = false);
     }
-
-    if (mounted) setState(() => _isLoading = false);
   }
 
   Future<void> _pickProfileImage() async {
@@ -195,6 +199,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   @override
   void dispose() {
+    _profileSubscription?.cancel();
     _nameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();

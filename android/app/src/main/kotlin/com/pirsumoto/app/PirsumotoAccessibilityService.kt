@@ -214,6 +214,8 @@ class PirsumotoAccessibilityService : AccessibilityService() {
     fun normalizeHebrew(s: String): String {
         return s
             .replace(Regex("[\\u0591-\\u05C7]"), "") // Hebrew niqqud/cantillation
+            .replace(Regex("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]"), "")
+            .replace('\u00a0', ' ')
             .replace(Regex("\\s+"), " ")
             .trim()
     }
@@ -367,27 +369,49 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         return matches
     }
 
+    /** Full traversal: WebView's text-search shortcut can omit virtual toggle nodes. */
+    fun findCheckableByLabel(root: AccessibilityNodeInfo?, target: String): AccessibilityNodeInfo? {
+        val labels = target.split("|").map { normalizeHebrew(it) }.filter { it.isNotEmpty() }
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (node.isCheckable && listOfNotNull(node.text, node.contentDescription)
+                    .any { normalizeHebrew(it.toString()) in labels }) return node
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { visit(it)?.let { found -> return found } }
+            }
+            return null
+        }
+        return root?.let { visit(it) }
+    }
+
     fun findInputBeforeTarget(
         root: AccessibilityNodeInfo?,
         target: String,
         targetInstance: Int = 1,
         threshold: Double = 0.82
     ): Rect? {
+        val input = findInputNodeBeforeTarget(root, target, targetInstance, threshold) ?: return null
+        return Rect().also { input.getBoundsInScreen(it) }
+    }
+
+    fun findInputNodeBeforeTarget(
+        root: AccessibilityNodeInfo?,
+        target: String,
+        targetInstance: Int = 1,
+        threshold: Double = 0.82
+    ): AccessibilityNodeInfo? {
         if (root == null) return null
 
         val normalizedTargetList = target.split("|").map { normalizeHebrew(it) }
         
-        data class TargetMatch(val match: Match, val precedingInput: Rect?)
+        data class TargetMatch(val match: Match, val precedingInput: AccessibilityNodeInfo?)
         val allMatches = mutableListOf<TargetMatch>()
         
-        var lastInputRect: Rect? = null
+        var lastInput: AccessibilityNodeInfo? = null
 
         fun visit(node: AccessibilityNodeInfo) {
             // Check if this node is editable or is an EditText
             if (node.isEditable || node.className?.toString()?.contains("EditText") == true) {
-                val rect = Rect()
-                node.getBoundsInScreen(rect)
-                lastInputRect = rect
+                lastInput = node
             }
 
             val labels = listOfNotNull(
@@ -419,7 +443,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
                         allMatches.add(
                             TargetMatch(
                                 match = Match(node = node, label = label, bounds = rect, score = bestScore),
-                                precedingInput = lastInputRect
+                                precedingInput = lastInput
                             )
                         )
                     }

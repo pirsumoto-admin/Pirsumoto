@@ -157,6 +157,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         }
       }
     });
+    _scrollToBottom();
     unawaited(_saveMessagesToPrefs());
   }
 
@@ -652,6 +653,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }
 
     final missing = RemoteValidationService.getMissingFields(mergedVehicleData);
+    
+    if (mergedVehicleData['initial_missing_fields'] == null) {
+      mergedVehicleData['initial_missing_fields'] = missing.join(',');
+    }
+    
     final allErrors = RemoteValidationService.validateValues(mergedVehicleData);
     final errors = _getFilteredErrors(allErrors, mergedVehicleData, missing);
     final isComplete = missing.isEmpty && allErrors.isEmpty;
@@ -763,6 +769,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (merged['license_plate'] != null &&
         merged['license_plate']!.isNotEmpty) {
       _currentLicensePlate = merged['license_plate']!;
+    }
+
+    if (merged['initial_missing_fields'] == null) {
+      final missingNow = RemoteValidationService.getMissingFields(merged);
+      merged['initial_missing_fields'] = [...missingNow, ...updatedValues.keys].join(',');
     }
 
     final missing = RemoteValidationService.getMissingFields(merged);
@@ -2069,7 +2080,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               itemBuilder: (context, index) {
                 final message = _messages[index];
                 final isLast = index == _messages.length - 1;
-                return _buildMessageBubble(message, isLastMessage: isLast);
+                final isLastBotMessage = index == _messages.lastIndexWhere((m) => m.sender == ChatSender.bot);
+                return _buildMessageBubble(
+                  message,
+                  isLastMessage: isLast,
+                  isLastBotMessage: isLastBotMessage,
+                );
               },
             ),
           ),
@@ -2306,6 +2322,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   Widget _buildMessageBubble(
     ChatMessageItem message, {
     bool isLastMessage = false,
+    bool isLastBotMessage = false,
   }) {
     final isUser = message.sender == ChatSender.user;
     final timeStr = intl.DateFormat('HH:mm').format(message.timestamp);
@@ -2322,10 +2339,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _currentLicensePlate.isNotEmpty;
     final showMissingFieldsForm =
         !isUser &&
-        isLastMessage &&
-        hasPlate &&
-        missingFields.isNotEmpty &&
-        _publicationState == null;
+        isLastBotMessage &&
+        hasPlate;
 
     return ChatMessageBubble(
       isUser: isUser,
@@ -2380,7 +2395,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           ],
 
           // Bot Quick Action Chips
-          if (!isUser && isLastMessage && _publicationState == null)
+          if (!isUser && isLastBotMessage && _publicationState == null)
             _buildQuickActionChips(message.text),
         ],
       ),
@@ -3413,7 +3428,24 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   List<String> get _fieldsToShow {
-    final fields = List<String>.from(widget.missingFields);
+    List<String> fields;
+    if (widget.currentData['initial_missing_fields'] != null && widget.currentData['initial_missing_fields']!.isNotEmpty) {
+      fields = widget.currentData['initial_missing_fields']!.split(',');
+    } else {
+      final manuallyFillable = [
+        'price', 'km', 'hand', 'previous_ownership', 'current_ownership',
+        'color', 'test_year', 'test_month', 'engine_capacity',
+        'phone', 'city', 'area', 'contact_name'
+      ];
+      final Set<String> combined = Set.from(widget.missingFields);
+      for (final f in manuallyFillable) {
+        if ((widget.currentData[f] ?? '').isNotEmpty) {
+          combined.add(f);
+        }
+      }
+      fields = combined.toList();
+    }
+
     if (!fields.contains('km')) {
       fields.add('km');
     }

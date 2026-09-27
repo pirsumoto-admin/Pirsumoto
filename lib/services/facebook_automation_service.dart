@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'yad2_automation_models.dart' show VehiclePublishData;
 import 'yad2_accessibility_automation_service_optimized.dart'
     show Yad2AccessibilityAutomationService;
@@ -51,6 +52,7 @@ enum FacebookAutomationPhase {
   selectTransmission('Select transmission', 'בחירת תיבת הילוכים'),
   enterDescription('Enter description', 'הזנת תיאור'),
   publish('Publish listing', 'פרסום המודעה'),
+  selectGroups('Select groups', 'בחירת קבוצות'),
   complete('Automation complete', 'האוטומציה הושלמה');
 
   final String description;
@@ -580,6 +582,14 @@ class FacebookAutomationService {
             return await _phasePublish();
           },
         );
+      case FacebookAutomationPhase.selectGroups:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Select Groups',
+          action: () async {
+            return await _phaseSelectGroups();
+          },
+        );
       case FacebookAutomationPhase.complete:
         return null;
     }
@@ -859,6 +869,40 @@ class FacebookAutomationService {
       debugPrint('[FB-A11y] enterTextAtFocused native error: ${e.message}');
     } catch (e) {
       debugPrint('[FB-A11y] enterTextAtFocused error: $e');
+    }
+    return false;
+  }
+
+  Future<bool> toolReplaceFocusedWebViewText(String value) async {
+    if (_inputBlocked) return false;
+    final platform = controller.platform;
+    if (platform is! AndroidWebViewController) return false;
+    return await _automationChannel.invokeMethod<bool>(
+          'replaceFocusedWebViewText',
+          {'identifier': platform.webViewIdentifier, 'value': value},
+        ) ??
+        false;
+  }
+
+  Future<bool> _verifyInputAfter(
+    String label,
+    String expected, {
+    int offset = 1,
+  }) async {
+    String normalize(String value) {
+      if (RegExp(r'^\d+$').hasMatch(expected)) {
+        return value.replaceAll(RegExp(r'[^\d]'), '');
+      }
+      return value.replaceAll(RegExp(r'[,\s\₪]'), '');
+    }
+
+    for (var attempt = 0; attempt < 4; attempt++) {
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (_inputBlocked) return false;
+      final actual = await toolGetNodeTextAfter(label, offset: offset);
+      if (actual != null && normalize(actual) == normalize(expected)) {
+        return true;
+      }
     }
     return false;
   }
@@ -1450,7 +1494,7 @@ class FacebookAutomationService {
   //   tap to open it, and then select the first option from the dropdown list.
   Future<_StepActionResult> _phaseSelectVehicleType() async {
     return await _runOnce('fb_select_vehicle_type', () async {
-          await Future.delayed(const Duration(seconds: 2));
+          await Future.delayed(const Duration(seconds: 1));
           const dropdownLabels = ['Vehicle type', 'סוג רכב'];
 
           bool opened = await _retryUntil(() async {
@@ -1459,7 +1503,7 @@ class FacebookAutomationService {
               if (await toolTapNodeAfter(label)) return true;
             }
             return false;
-          }, timeout: const Duration(seconds: 8));
+          }, timeout: const Duration(seconds: 6));
 
           if (!opened) return false;
 
@@ -1686,7 +1730,7 @@ class FacebookAutomationService {
           final yearVal = formData.year;
           if (yearVal.isEmpty) return true;
 
-          await _scrollDown(0.4);
+          await _scrollDown(0.45);
 
           bool opened = await _retryUntil(() async {
             if (await toolTapNodeAfter('שנה|שנת|Year', offset: 1)) return true;
@@ -1697,6 +1741,48 @@ class FacebookAutomationService {
 
           if (!opened) return false;
           await Future.delayed(const Duration(milliseconds: 800));
+
+          final parsedYear = int.tryParse(yearVal);
+          if (parsedYear != null && parsedYear < 2016) {
+            await _scrollDown(0.3);
+            if (parsedYear < 2010) {
+              await _scrollDown(0.3);
+            }
+            await Future.delayed(const Duration(milliseconds: 800));
+
+            final String? treeStr = await _automationChannel
+                .invokeMethod<String>('logTree');
+            if (treeStr != null) {
+              final regex = RegExp(
+                r'\[(.*?)\] text="(.*?)" desc="(.*?)" clickable=(true|false) bounds=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)',
+              );
+              final matches = regex.allMatches(treeStr);
+              bool tappedFromTree = false;
+              for (final match in matches) {
+                final text = match.group(2) ?? '';
+                final desc = match.group(3) ?? '';
+                if (text == yearVal || desc == yearVal) {
+                  final left = double.tryParse(match.group(5) ?? '0') ?? 0;
+                  final top = double.tryParse(match.group(6) ?? '0') ?? 0;
+                  final right = double.tryParse(match.group(7) ?? '0') ?? 0;
+                  final bottom = double.tryParse(match.group(8) ?? '0') ?? 0;
+
+                  final centerX = left + (right - left) / 2;
+                  final centerY = top + (bottom - top) / 2;
+
+                  debugPrint(
+                    '[FB-A11y] Tapping year $yearVal from fresh tree at $centerX, $centerY',
+                  );
+                  await toolTapScreen(centerX, centerY);
+                  tappedFromTree = true;
+                  break;
+                }
+              }
+              if (tappedFromTree) {
+                return true;
+              }
+            }
+          }
 
           bool selected = await _retryUntil(() async {
             return await tapSmart(yearVal, allowJsFallback: false);
@@ -1730,8 +1816,19 @@ class FacebookAutomationService {
           if (!tapped) return false;
 
           await Future.delayed(const Duration(milliseconds: 500));
-          bool entered = await toolEnterTextAtFocused(makeVal);
-          if (!entered) return false;
+          await toolEnterTextAtFocused(makeVal);
+          final makeLabel = 'יצרן|Make|Manufacturer';
+          if (!(await _verifyInputAfter(makeLabel, makeVal))) {
+            if (_inputBlocked) return false;
+            debugPrint(
+              '[FB-A11y] Text readback failed; trying native WebView input.',
+            );
+            final nativeSuccess = await toolReplaceFocusedWebViewText(makeVal);
+            if (!nativeSuccess &&
+                !(await _verifyInputAfter(makeLabel, makeVal))) {
+              return false;
+            }
+          }
 
           await Future.delayed(const Duration(milliseconds: 800));
           try {
@@ -1767,8 +1864,19 @@ class FacebookAutomationService {
           if (!tapped) return false;
 
           await Future.delayed(const Duration(milliseconds: 500));
-          bool entered = await toolEnterTextAtFocused(modelVal);
-          if (!entered) return false;
+          await toolEnterTextAtFocused(modelVal);
+          final modelLabel = 'דגם|Model';
+          if (!(await _verifyInputAfter(modelLabel, modelVal))) {
+            if (_inputBlocked) return false;
+            debugPrint(
+              '[FB-A11y] Text readback failed; trying native WebView input.',
+            );
+            final nativeSuccess = await toolReplaceFocusedWebViewText(modelVal);
+            if (!nativeSuccess &&
+                !(await _verifyInputAfter(modelLabel, modelVal))) {
+              return false;
+            }
+          }
 
           await Future.delayed(const Duration(milliseconds: 800));
           try {
@@ -1778,7 +1886,7 @@ class FacebookAutomationService {
                 targetInstance: 2,
                 allowJsFallback: false,
               );
-            }, timeout: const Duration(milliseconds: 1500));
+            }, timeout: const Duration(milliseconds: 1000));
           } catch (_) {}
 
           await toolDismissKeyboardAndBlur();
@@ -1814,8 +1922,19 @@ class FacebookAutomationService {
           if (!tapped) return false;
 
           await Future.delayed(const Duration(milliseconds: 500));
-          bool entered = await toolEnterTextAtFocused(km);
-          if (!entered) return false;
+          await toolEnterTextAtFocused(km);
+          final verifyLabel =
+              'קילומטראז׳|קילומטראז|ק״מ|ק"מ|קילומטרים|קמ|מיילס|מיילים|מייל|Mileage|Miles';
+          if (!(await _verifyInputAfter(verifyLabel, km))) {
+            if (_inputBlocked) return false;
+            debugPrint(
+              '[FB-A11y] Text readback failed; trying native WebView input.',
+            );
+            final nativeSuccess = await toolReplaceFocusedWebViewText(km);
+            if (!nativeSuccess && !(await _verifyInputAfter(verifyLabel, km))) {
+              return false;
+            }
+          }
 
           await Future.delayed(const Duration(milliseconds: 500));
           await toolDismissKeyboardAndBlur();
@@ -1853,8 +1972,21 @@ class FacebookAutomationService {
           if (!tapped) return false;
 
           await Future.delayed(const Duration(milliseconds: 500));
-          bool entered = await toolEnterTextAtFocused(priceText);
-          if (!entered) return false;
+          await toolEnterTextAtFocused(priceText);
+          final priceLabel = 'מחיר|Price';
+          if (!(await _verifyInputAfter(priceLabel, priceText))) {
+            if (_inputBlocked) return false;
+            debugPrint(
+              '[FB-A11y] Text readback failed; trying native WebView input.',
+            );
+            final nativeSuccess = await toolReplaceFocusedWebViewText(
+              priceText,
+            );
+            if (!nativeSuccess &&
+                !(await _verifyInputAfter(priceLabel, priceText))) {
+              return false;
+            }
+          }
 
           await Future.delayed(const Duration(milliseconds: 500));
           await toolDismissKeyboardAndBlur();
@@ -1867,7 +1999,7 @@ class FacebookAutomationService {
   // Phase 11 — Select body style
   Future<_StepActionResult> _phaseSelectBodyStyle() async {
     return await _runOnce('fb_select_body_style', () async {
-          await _scrollDown(0.1);
+          await _scrollDown(0.22);
           bool opened = await _retryUntil(() async {
             if (await toolFindElementAndTap('סגנון גוף הרכב')) return true;
             if (await toolFindElementAndTap('Body style')) return true;
@@ -2020,6 +2152,18 @@ class FacebookAutomationService {
   // Phase 14 — Select transmission
   Future<_StepActionResult> _phaseSelectTransmission() async {
     return await _runOnce('fb_select_transmission', () async {
+          final String gearVal =
+              formData.gear.isNotEmpty ? formData.gear : 'הילוכים אוטומטיים';
+
+          if (gearVal == 'הילוכים אוטומטיים' ||
+              gearVal == 'Automatic' ||
+              gearVal == 'אוטומטי') {
+            debugPrint(
+              '[FB-A11y] Skipping transmission selection as automatic is default',
+            );
+            return true;
+          }
+
           bool opened = await _retryUntil(() async {
             if (await toolFindElementAndTap('תיבת הילוכים')) return true;
             if (await toolFindElementAndTap('Transmission')) return true;
@@ -2029,8 +2173,6 @@ class FacebookAutomationService {
           if (!opened) return true;
           await Future.delayed(const Duration(milliseconds: 800));
 
-          final String gearVal =
-              formData.gear.isNotEmpty ? formData.gear : 'הילוכים אוטומטיים';
           final transLabels = <String>[];
           if (gearVal == 'שידור ידני' || gearVal == 'ידני') {
             transLabels.addAll(['Manual', 'שידור ידני', 'ידני']);
@@ -2079,6 +2221,28 @@ class FacebookAutomationService {
           if (tapped) {
             await Future.delayed(const Duration(milliseconds: 500));
             await toolEnterTextAtFocused(descriptionText);
+            final descLabel = 'תיאור|Description';
+            if (!(await _verifyInputAfter(
+              descLabel,
+              descriptionText,
+              offset: 3,
+            ))) {
+              if (_inputBlocked) return false;
+              debugPrint(
+                '[FB-A11y] Text readback failed; trying native WebView input.',
+              );
+              final nativeSuccess = await toolReplaceFocusedWebViewText(
+                descriptionText,
+              );
+              if (!nativeSuccess &&
+                  !(await _verifyInputAfter(
+                    descLabel,
+                    descriptionText,
+                    offset: 3,
+                  ))) {
+                return false;
+              }
+            }
           } else {
             return false;
           }
@@ -2121,6 +2285,60 @@ class FacebookAutomationService {
         })
         ? const _StepActionResult.success()
         : const _StepActionResult.failure('Failed to publish');
+  }
+
+  // Phase 17 — Select Groups
+  Future<_StepActionResult> _phaseSelectGroups() async {
+    return await _runOnce('fb_select_groups', () async {
+          final found = await _retryUntil(
+            () => _isElementPresent('פרסום בקבוצות שלך'),
+            timeout: const Duration(seconds: 8),
+          );
+
+          if (found) {
+            debugPrint(
+              '[FB-A11y] Found "פרסום בקבוצות שלך", selecting groups...',
+            );
+            await Future.delayed(const Duration(seconds: 1));
+
+            final String? treeStr = await _automationChannel
+                .invokeMethod<String>('logTree');
+
+            if (treeStr != null) {
+              final regex = RegExp(
+                r'\[(.*?)\] text="(.*?)" desc="(.*?)" clickable=(true|false) bounds=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)',
+              );
+              final matches = regex.allMatches(treeStr);
+
+              for (final match in matches) {
+                final className = match.group(1) ?? '';
+                if (className.contains('CheckBox')) {
+                  final left = double.tryParse(match.group(5) ?? '0') ?? 0;
+                  final top = double.tryParse(match.group(6) ?? '0') ?? 0;
+                  final right = double.tryParse(match.group(7) ?? '0') ?? 0;
+                  final bottom = double.tryParse(match.group(8) ?? '0') ?? 0;
+
+                  final centerX = left + (right - left) / 2;
+                  final centerY = top + (bottom - top) / 2;
+
+                  debugPrint(
+                    '[FB-A11y] Tapping checkbox at $centerX, $centerY',
+                  );
+                  await toolTapScreen(centerX, centerY);
+                  await Future.delayed(const Duration(milliseconds: 300));
+                }
+              }
+            }
+          } else {
+            debugPrint(
+              '[FB-A11y] "פרסום בקבוצות שלך" not found, skipping groups',
+            );
+          }
+
+          return true;
+        })
+        ? const _StepActionResult.success()
+        : const _StepActionResult.failure('Failed to select groups');
   }
 
   // ── Phase chain controller ────────────────────────────────────────────────
@@ -2177,6 +2395,8 @@ class FacebookAutomationService {
       case FacebookAutomationPhase.enterDescription:
         return FacebookAutomationPhase.publish;
       case FacebookAutomationPhase.publish:
+        return FacebookAutomationPhase.selectGroups;
+      case FacebookAutomationPhase.selectGroups:
         return FacebookAutomationPhase.complete;
       case FacebookAutomationPhase.complete:
         return null;
@@ -2201,6 +2421,7 @@ class FacebookAutomationService {
       case FacebookAutomationPhase.selectTransmission:
       case FacebookAutomationPhase.enterDescription:
       case FacebookAutomationPhase.publish:
+      case FacebookAutomationPhase.selectGroups:
         return const Duration(milliseconds: 1000);
       case FacebookAutomationPhase.complete:
         return const Duration(milliseconds: 700);

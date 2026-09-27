@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -6,12 +7,16 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 import 'services/chat_notification_service.dart';
 import 'ui/app_theme.dart';
-import 'ui/device_select_screen.dart';
+import 'ui/home_screen.dart';
 import 'ui/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  } else {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -44,7 +49,11 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => ChatNotificationService.instance.navigatePending(),
     );
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
   }
 
   @override
@@ -56,7 +65,11 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      } else {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      }
     }
   }
 
@@ -88,7 +101,7 @@ class _PirsumotoRemoteControlAppState extends State<PirsumotoRemoteControlApp>
           }
 
           if (snapshot.hasData && snapshot.data != null) {
-            return const DeviceSelectScreen();
+            return const HomeScreen();
           }
 
           return const LoginScreen();

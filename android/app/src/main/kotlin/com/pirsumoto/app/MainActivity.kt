@@ -435,6 +435,34 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "setTextBeforeTarget", "getInputTextBeforeTarget" -> {
+                    val target = call.argument<String>("target") ?: ""
+                    val input = service.findInputNodeBeforeTarget(rootNode, target)
+                    if (call.method == "getInputTextBeforeTarget") {
+                        // A placeholder is not entered text, even when exposed as node.text.
+                        val showingHint = Build.VERSION.SDK_INT >= 26 && input?.isShowingHintText == true
+                        result.success(if (showingHint) "" else input?.text?.toString())
+                    } else {
+                        val accepted = input != null && input.isEnabled && input.isVisibleToUser &&
+                            service.enterTextIntoNode(input, call.argument<String>("value") ?: "")
+                        Log.d("A11Y", "Targeted setText: editable=${input?.isEditable}, focused=${input?.isFocused}, accepted=$accepted")
+                        result.success(accepted)
+                    }
+                }
+                "replaceFocusedWebViewText" -> {
+                    val identifier = call.argument<Number>("identifier")?.toLong()
+                    @Suppress("DEPRECATION")
+                    val webView = identifier?.let {
+                        io.flutter.plugins.webviewflutter.WebViewFlutterAndroidExternalApi.getWebView(flutterEngine, it)
+                    }
+                    if (webView == null || !isAppInForeground) {
+                        result.success(false)
+                    } else {
+                        NativeWebViewTextInput.replace(webView, call.argument<String>("value") ?: "") {
+                            result.success(it)
+                        }
+                    }
+                }
                 "enterTextAtFocused" -> {
                     val value = call.argument<String>("value") ?: ""
                     // Try to find the focused node
@@ -494,8 +522,10 @@ class MainActivity : FlutterActivity() {
                     val height = displayMetrics.heightPixels.toFloat()
                     
                     val startX = width / 2f
-                    val startY = height * 0.8f
-                    val endY = startY - (height * percent).toFloat()
+                    val upward = call.argument<String>("direction") == "up"
+                    val startY = height * if (upward) 0.3f else 0.8f
+                    val distance = (height * percent.coerceIn(0.0, 0.6)).toFloat()
+                    val endY = if (upward) startY + distance else startY - distance
                     
                     if (call.argument<Boolean>("requireAppWindow") == true) {
                         service.performAutomationGesture(startX, startY, startX, endY, 400L) { completed ->
@@ -627,6 +657,40 @@ class MainActivity : FlutterActivity() {
                     val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
                     result.success(pressed)
                 }
+                "ensureCheckableChecked" -> {
+                    val target = call.argument<String>("target") ?: ""
+                    val node = service.findCheckableByLabel(rootNode, target)
+                    when {
+                        node == null -> result.success("missing")
+                        node.isChecked -> result.success("checked")
+                        call.argument<Boolean>("readOnly") == true -> result.success("unchecked")
+                        !node.isEnabled -> result.success("disabled")
+                        else -> {
+                            val rect = android.graphics.Rect()
+                            node.getBoundsInScreen(rect)
+                            val dm = service.resources.displayMetrics
+                            // Xiaomi exposes offscreen virtual controls with an empty rect.
+                            // Keep gesture taps away from the automation's top/bottom overlays.
+                            val safelyVisible = node.isVisibleToUser && !rect.isEmpty &&
+                                rect.centerX() in 1 until dm.widthPixels &&
+                                rect.centerY() > dm.heightPixels * 0.15 &&
+                                rect.centerY() < dm.heightPixels * 0.88
+                            if (!safelyVisible) {
+                                node.performAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+                                result.success(if (!rect.isEmpty && rect.centerY() <= dm.heightPixels * 0.15) "above" else "revealing")
+                            } else if (call.argument<Boolean>("gesture") != true &&
+                                node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)) {
+                                result.success("clicked") // Dart must read the checked state back.
+                            } else {
+                                val x = rect.centerX().toFloat()
+                                val y = rect.centerY().toFloat()
+                                service.performAutomationGesture(x, y, x + 1f, y + 1f, 50L) { completed ->
+                                    result.success(if (completed) "clicked" else "failed")
+                                }
+                            }
+                        }
+                    }
+                }
                 "findAndGetBounds" -> {
                     val target = call.argument<String>("target") ?: ""
                     val targetInstance = call.argument<Int>("targetInstance") ?: 1
@@ -754,6 +818,29 @@ class MainActivity : FlutterActivity() {
                         Log.d("A11Y", "No focused input node found for paste")
                     }
                     result.success(pasted)
+                }
+                "isDeviceOwner" -> {
+                    val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                    result.success(dpm.isDeviceOwnerApp(context.packageName))
+                }
+                "startKioskMode" -> {
+                    val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                    val componentName = android.content.ComponentName(context, DeviceAdminReceiver::class.java)
+                    if (dpm.isDeviceOwnerApp(context.packageName)) {
+                        dpm.setLockTaskPackages(componentName, arrayOf(context.packageName))
+                        startLockTask()
+                        result.success(true)
+                    } else {
+                        result.error("NOT_DEVICE_OWNER", "App is not a device owner", null)
+                    }
+                }
+                "stopKioskMode" -> {
+                    try {
+                        stopLockTask()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("KIOSK_ERROR", e.message, null)
+                    }
                 }
                 else -> result.notImplemented()
             }

@@ -18,6 +18,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
+        android:testOnly="true"
         android:label="פרסומוטו"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon">
@@ -26,6 +27,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:lockTaskMode="if_whitelisted"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:showWhenLocked="true"
@@ -121,6 +123,18 @@
             </intent-filter>
         </receiver>
         -->
+        <receiver
+            android:name=".DeviceAdminReceiver"
+            android:label="Pirsumoto Kiosk Admin"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
