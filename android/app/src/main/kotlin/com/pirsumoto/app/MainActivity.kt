@@ -376,6 +376,28 @@ class MainActivity : FlutterActivity() {
             rootNode?.refresh()
 
             when (call.method) {
+                "clickCheckboxes" -> {
+                    fun findCheckboxes(node: android.view.accessibility.AccessibilityNodeInfo, list: MutableList<android.view.accessibility.AccessibilityNodeInfo>) {
+                        if (node.className?.toString()?.contains("CheckBox") == true) {
+                            list.add(node)
+                        }
+                        for (i in 0 until node.childCount) {
+                            node.getChild(i)?.let { findCheckboxes(it, list) }
+                        }
+                    }
+                    val checkboxes = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+                    findCheckboxes(rootNode!!, checkboxes)
+                    var count = 0
+                    if (checkboxes.isNotEmpty()) {
+                        val cb = checkboxes.first()
+                        var clicked = cb.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        if (!clicked && cb.parent != null) {
+                            clicked = cb.parent.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        }
+                        if (clicked) count++
+                    }
+                    result.success(count)
+                }
                 "findAndTap" -> {
                     val target = call.argument<String>("target") ?: ""
                     val targetInstance = call.argument<Int>("targetInstance") ?: 1

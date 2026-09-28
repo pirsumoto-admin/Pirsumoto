@@ -894,7 +894,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             
-            sb.append("$indent[$className] text=\"$text\" desc=\"$desc\" clickable=$isClickable bounds=$bounds\n")
+            sb.append("$indent[$className] text=\"$text\" desc=\"$desc\" clickable=$isClickable checked=${node.isChecked} bounds=$bounds\n")
 
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { traverse(it, depth + 1) }

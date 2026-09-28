@@ -956,7 +956,7 @@ class FacebookAutomationService {
     if (_inputBlocked) return false;
     final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
     if (!tapped) return false;
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 200));
     final native = await toolEnterTextAtFocused(value);
     if (native) return true;
     return false;
@@ -970,7 +970,7 @@ class FacebookAutomationService {
       });
       if (bounds == null) return false;
       await _tapBounds(bounds);
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 200));
       return await toolEnterTextAtFocused(value);
     } catch (e) {
       debugPrint('[FB-A11y] enterTextBefore failed: $e');
@@ -994,7 +994,7 @@ class FacebookAutomationService {
       });
       if (bounds != null) {
         await _tapBounds(bounds);
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 200));
         return await toolEnterTextAtFocused(value);
       }
       return false;
@@ -1219,6 +1219,26 @@ class FacebookAutomationService {
     }
   }
 
+  Future<void> _scrollUp(
+    double percent, {
+    bool accessibilityOnly = false,
+  }) async {
+    if (_inputBlocked) return;
+    try {
+      await _automationChannel.invokeMethod('scrollNode', {
+        'direction': 'up',
+        'percent': percent,
+      });
+    } catch (e) {
+      debugPrint('[FB-A11y] Scroll up failed: $e');
+    }
+    if (accessibilityOnly) {
+      await _waitForUiSettle(const Duration(milliseconds: 700));
+    } else {
+      await _waitForScrollSettle();
+    }
+  }
+
   Future<void> _waitForScrollSettle({
     Duration timeout = const Duration(seconds: 3),
   }) async {
@@ -1434,7 +1454,7 @@ class FacebookAutomationService {
 
   Future<_StepActionResult> _phaseLoginGate() async {
     return await _runOnce('fb_login_gate', () async {
-          await Future.delayed(const Duration(seconds: 1));
+          await Future.delayed(const Duration(milliseconds: 300));
           await _applyDesktopViewport();
 
           bool loginDetected = false;
@@ -1448,7 +1468,7 @@ class FacebookAutomationService {
               return false;
             },
             timeout: const Duration(seconds: 12),
-            pollInterval: const Duration(milliseconds: 600),
+            pollInterval: const Duration(milliseconds: 300),
           );
 
           if (loginDetected) {
@@ -1468,7 +1488,7 @@ class FacebookAutomationService {
   Future<_StepActionResult> _phaseSetViewport() async {
     return await _runOnce('fb_set_viewport', () async {
           await _applyDesktopViewport();
-          await Future.delayed(const Duration(seconds: 1));
+          await Future.delayed(const Duration(milliseconds: 300));
           return true;
         })
         ? const _StepActionResult.success()
@@ -1815,7 +1835,7 @@ class FacebookAutomationService {
 
           if (!tapped) return false;
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(milliseconds: 200));
           await toolEnterTextAtFocused(makeVal);
           final makeLabel = 'יצרן|Make|Manufacturer';
           if (!(await _verifyInputAfter(makeLabel, makeVal))) {
@@ -1863,7 +1883,7 @@ class FacebookAutomationService {
 
           if (!tapped) return false;
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(milliseconds: 200));
           await toolEnterTextAtFocused(modelVal);
           final modelLabel = 'דגם|Model';
           if (!(await _verifyInputAfter(modelLabel, modelVal))) {
@@ -1921,7 +1941,7 @@ class FacebookAutomationService {
 
           if (!tapped) return false;
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(milliseconds: 200));
           await toolEnterTextAtFocused(km);
           final verifyLabel =
               'קילומטראז׳|קילומטראז|ק״מ|ק"מ|קילומטרים|קמ|מיילס|מיילים|מייל|Mileage|Miles';
@@ -1936,7 +1956,7 @@ class FacebookAutomationService {
             }
           }
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          // await Future.delayed(const Duration(milliseconds: 500));
           await toolDismissKeyboardAndBlur();
           return true;
         })
@@ -1971,7 +1991,7 @@ class FacebookAutomationService {
 
           if (!tapped) return false;
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(milliseconds: 200));
           await toolEnterTextAtFocused(priceText);
           final priceLabel = 'מחיר|Price';
           if (!(await _verifyInputAfter(priceLabel, priceText))) {
@@ -1988,7 +2008,7 @@ class FacebookAutomationService {
             }
           }
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          // await Future.delayed(const Duration(milliseconds: 500));
           await toolDismissKeyboardAndBlur();
           return true;
         })
@@ -2208,7 +2228,7 @@ class FacebookAutomationService {
                   : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\nיד: ${formData.hand} | ק"מ: ${formData.kilometers}\nסוג דלק: ${formData.fuelType}';
 
           await _scrollDown(0.25);
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(milliseconds: 200));
 
           bool tapped =
               await toolTapNodeAfter('תיאור', offset: 3) ||
@@ -2219,7 +2239,7 @@ class FacebookAutomationService {
               );
 
           if (tapped) {
-            await Future.delayed(const Duration(milliseconds: 500));
+            await Future.delayed(const Duration(milliseconds: 200));
             await toolEnterTextAtFocused(descriptionText);
             final descLabel = 'תיאור|Description';
             if (!(await _verifyInputAfter(
@@ -2247,7 +2267,7 @@ class FacebookAutomationService {
             return false;
           }
 
-          await Future.delayed(const Duration(milliseconds: 500));
+          // await Future.delayed(const Duration(milliseconds: 500));
           await toolDismissKeyboardAndBlur();
           return true;
         })
@@ -2301,33 +2321,171 @@ class FacebookAutomationService {
             );
             await Future.delayed(const Duration(seconds: 1));
 
-            final String? treeStr = await _automationChannel
-                .invokeMethod<String>('logTree');
+            // 1. Scroll to the top
+            for (int i = 0; i < 5; i++) {
+              await _scrollUp(0.8);
+            }
 
-            if (treeStr != null) {
+            final Set<String> seenCheckboxes = {};
+            int totalTapped = 0;
+            const int maxGroupsToSelect = 20; // Facebook maximum
+
+            // Loop until reaching the end of the page
+            while (true) {
+              final String? treeStr = await _automationChannel
+                  .invokeMethod<String>('logTree');
+              if (treeStr == null) {
+                debugPrint('[FB-A11y] logTree returned null, stopping.');
+                break;
+              }
+
+              // Groups: 1=class 2=text 3=desc 4=clickable 5=checked 6=left 7=top 8=right 9=bottom
               final regex = RegExp(
-                r'\[(.*?)\] text="(.*?)" desc="(.*?)" clickable=(true|false) bounds=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)',
+                r'\[(.*?)\] text="(.*?)" desc="(.*?)" clickable=(true|false) checked=(true|false) bounds=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)',
               );
-              final matches = regex.allMatches(treeStr);
+              final matches = regex.allMatches(treeStr).toList();
 
+              // Collect only NEW (unseen) checkboxes visible on screen
+              final List<RegExpMatch> newCheckboxes = [];
               for (final match in matches) {
                 final className = match.group(1) ?? '';
-                if (className.contains('CheckBox')) {
-                  final left = double.tryParse(match.group(5) ?? '0') ?? 0;
-                  final top = double.tryParse(match.group(6) ?? '0') ?? 0;
-                  final right = double.tryParse(match.group(7) ?? '0') ?? 0;
-                  final bottom = double.tryParse(match.group(8) ?? '0') ?? 0;
+                if (!className.contains('CheckBox')) continue;
 
-                  final centerX = left + (right - left) / 2;
-                  final centerY = top + (bottom - top) / 2;
+                final text = match.group(2) ?? '';
+                final desc = match.group(3) ?? '';
+                final contentKey = '$text|$desc'; // stable across scrolls
 
-                  debugPrint(
-                    '[FB-A11y] Tapping checkbox at $centerX, $centerY',
-                  );
-                  await toolTapScreen(centerX, centerY);
-                  await Future.delayed(const Duration(milliseconds: 300));
+                if (!seenCheckboxes.contains(contentKey)) {
+                  newCheckboxes.add(match);
                 }
               }
+
+              debugPrint(
+                '[FB-A11y] New checkboxes visible this scroll: ${newCheckboxes.length}',
+              );
+
+              // If no new checkboxes found, we've reached the bottom
+              if (newCheckboxes.isEmpty) {
+                debugPrint(
+                  '[FB-A11y] No new checkboxes found — reached end of page.',
+                );
+                break;
+              }
+
+              // Process up to 5 new checkboxes this scroll batch
+              final batch = newCheckboxes.take(5).toList();
+              final keywords = ['רכב', 'רכבים', 'רכבי', 'הרכב', 'הרכבים'];
+              bool hitMax = false;
+
+              for (final match in batch) {
+                final text = match.group(2) ?? '';
+                final desc = match.group(3) ?? '';
+                final isChecked = match.group(5) == 'true';
+                final left = int.tryParse(match.group(6) ?? '0') ?? 0;
+                final top = int.tryParse(match.group(7) ?? '0') ?? 0;
+                final right = int.tryParse(match.group(8) ?? '0') ?? 0;
+                final bottom = int.tryParse(match.group(9) ?? '0') ?? 0;
+                final contentKey = '$text|$desc'; // stable across scrolls
+                final centerX = left + (right - left) / 2.0;
+                final centerY = top + (bottom - top) / 2.0;
+
+                // Mark as seen by name — stable across scrolls
+                seenCheckboxes.add(contentKey);
+
+                final bool shouldBeChecked = keywords.any(
+                  (k) => text.contains(k) || desc.contains(k),
+                );
+
+                debugPrint(
+                  '[FB-A11y] Checkbox text="$text" desc="$desc" isChecked=$isChecked shouldBeChecked=$shouldBeChecked',
+                );
+
+                if (shouldBeChecked && !isChecked) {
+                  if (totalTapped >= maxGroupsToSelect) {
+                    debugPrint(
+                      '[FB-A11y] 🛑 Reached Facebook maximum of $maxGroupsToSelect groups, stopping.',
+                    );
+                    hitMax = true;
+                    break;
+                  }
+                  // Needs to be checked — tap and verify
+                  debugPrint(
+                    '[FB-A11y] ✅ Checking group at ($centerX, $centerY)',
+                  );
+                  await toolTapScreen(centerX, centerY);
+                  await Future.delayed(const Duration(milliseconds: 700));
+
+                  // Verify it got checked; retry once if not
+                  final String? treeAfter = await _automationChannel
+                      .invokeMethod<String>('logTree');
+                  if (treeAfter != null) {
+                    final verifyPattern = RegExp(
+                      r'\[([^\]]*CheckBox[^\]]*)\] text="[^"]*" desc="[^"]*" clickable=(true|false) checked=(true|false) bounds=Rect\(' +
+                          '$left, $top - $right, $bottom' +
+                          r'\)',
+                    );
+                    final vm = verifyPattern.firstMatch(treeAfter);
+                    final nowChecked = vm?.group(3) == 'true';
+                    if (!nowChecked) {
+                      debugPrint('[FB-A11y] ⚠️ Still unchecked — retrying tap');
+                      await toolTapScreen(centerX, centerY);
+                      await Future.delayed(const Duration(milliseconds: 900));
+                    } else {
+                      totalTapped++;
+                      debugPrint(
+                        '[FB-A11y] ✔ Verified checked ($totalTapped/$maxGroupsToSelect)',
+                      );
+                    }
+                  }
+                } else if (!shouldBeChecked && isChecked) {
+                  // Needs to be unchecked
+                  debugPrint(
+                    '[FB-A11y] ☑→☐ Unchecking non-car group at ($centerX, $centerY)',
+                  );
+                  await toolTapScreen(centerX, centerY);
+                  await Future.delayed(const Duration(milliseconds: 700));
+                } else {
+                  debugPrint(
+                    '[FB-A11y] ⏭ No action (shouldBe=$shouldBeChecked already=$isChecked)',
+                  );
+                }
+              }
+
+              if (hitMax) {
+                // Scroll all the way to the bottom so פרסום button is reachable
+                debugPrint(
+                  '[FB-A11y] 🏁 Reached max — scrolling to bottom to wait.',
+                );
+                for (int i = 0; i < 8; i++) {
+                  await _scrollDown(0.9);
+                  await Future.delayed(const Duration(milliseconds: 400));
+                }
+                debugPrint(
+                  '[FB-A11y] ⏳ At bottom — waiting for פרסום button step.',
+                );
+                break;
+              }
+
+              // Adaptive scroll: push the LAST processed row up to the top 1/3
+              // of the screen. This keeps the already-seen anchor visible at the
+              // top while exposing a full 2/3 screen of fresh rows below.
+              // estScreenH is conservative for 1080p–1440p Android devices.
+              const int estScreenH = 2400;
+              final lastInBatch = batch.last;
+              final lastSeenBottom =
+                  int.tryParse(lastInBatch.group(9) ?? '0') ?? 0;
+              // Target: last seen row sits at y ≈ screenH/3 (top third)
+              final targetY = estScreenH ~/ 3;
+              final scrollPx = (lastSeenBottom - targetY).clamp(
+                80,
+                estScreenH - targetY,
+              );
+              final scrollFraction = (scrollPx / estScreenH).clamp(0.05, 0.55);
+              debugPrint(
+                '[FB-A11y] Scroll: last seen bottom=$lastSeenBottom → push to y=$targetY, fraction=$scrollFraction',
+              );
+              await _scrollDown(scrollFraction);
+              await Future.delayed(const Duration(milliseconds: 1800));
             }
           } else {
             debugPrint(
@@ -2335,10 +2493,16 @@ class FacebookAutomationService {
             );
           }
 
+          debugPrint('[FB-A11y] Finished selecting groups. Tapping פרסום button.');
+          await toolFindElementAndTap('פרסום', preferClickable: true);
+          await Future.delayed(const Duration(milliseconds: 1500));
+
+          _completedPhaseActions.add('fb_select_groups');
+          debugPrint('[FB-A11y] fb_select_groups phase complete.');
           return true;
         })
         ? const _StepActionResult.success()
-        : const _StepActionResult.failure('Failed to select groups');
+        : const _StepActionResult.failure('Failed to complete group selection');
   }
 
   // ── Phase chain controller ────────────────────────────────────────────────

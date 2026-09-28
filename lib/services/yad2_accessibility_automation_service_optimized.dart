@@ -1803,37 +1803,62 @@ class Yad2AccessibilityAutomationService {
   bool _termsCheckboxAttempted = false;
   Future<_StepActionResult> _actionTermsAgreement() async {
     if (_termsSubmitted) return const _StepActionResult.success();
-    const termsMarker = 'יצירת איש קשר חדש';
+    const primaryMarker = 'יצירת איש קשר חדש';
+    const fallbackMarker = 'פרטים ליצירת קשר';
 
-    await Future.delayed(const Duration(milliseconds: 1100));
+    await Future.delayed(const Duration(milliseconds: 1800));
     final tappedCheckbox =
         !_termsCheckboxAttempted &&
         await _performWithPopupHandling(() async {
           final treeStr = await _readTreeString();
           if (treeStr != null && treeStr.isNotEmpty) {
-            final hasTerms = treeStr.contains(termsMarker);
-            if (hasTerms) {
-              final nodes = _parseA11yTree(treeStr);
-              final checkboxNode = nodes.cast<_A11yTreeNode?>().firstWhere(
-                (node) =>
-                    node != null &&
-                    (node.className == 'android.widget.CheckBox' ||
-                        node.className.endsWith('.CheckBox') ||
-                        node.className.contains('CheckBox')),
-                orElse: () => null,
-              );
+            final hasPrimary = treeStr.contains(primaryMarker);
+            final hasFallback = treeStr.contains(fallbackMarker);
+            debugPrint(
+              '[Yad2-A11y] terms check: hasPrimary($primaryMarker)=$hasPrimary, hasFallback($fallbackMarker)=$hasFallback',
+            );
 
-              if (checkboxNode != null &&
-                  checkboxNode.centerX != null &&
-                  checkboxNode.centerY != null) {
-                await _tapBounds({
-                  'x': checkboxNode.centerX!,
-                  'y': checkboxNode.centerY!,
-                });
+            if (hasPrimary || hasFallback) {
+              final nodes = _parseA11yTree(treeStr);
+              final allCheckboxes =
+                  nodes
+                      .cast<_A11yTreeNode?>()
+                      .where(
+                        (node) =>
+                            node != null &&
+                            (node.className == 'android.widget.CheckBox' ||
+                                node.className.endsWith('.CheckBox') ||
+                                node.className.contains('CheckBox')),
+                      )
+                      .toList();
+
+              // await showToast('Terms Check: Found ${allCheckboxes.length} CheckBoxes');
+
+              if (allCheckboxes.isNotEmpty) {
+                debugPrint('[Yad2-A11y] Tapping CheckBoxes via native ACTION_CLICK.');
+                final clickedCount = await _automationChannel.invokeMethod<int>('clickCheckboxes');
+                debugPrint('[Yad2-A11y] Native ACTION_CLICK clicked $clickedCount checkboxes.');
+                await Future.delayed(const Duration(milliseconds: 600));
                 _termsCheckboxAttempted = true;
                 return true;
+              } else {
+                debugPrint(
+                  '[Yad2-A11y] NO CHECKBOX FOUND IN TREE. Dumping up to 30 nodes:',
+                );
+                for (var n in nodes.take(30)) {
+                  debugPrint(
+                    '[Yad2-A11y] Node class: ${n.className} | text: ${n.text} | desc: ${n.desc}',
+                  );
+                }
               }
+            } else {
+              final previewLength = treeStr.length < 500 ? treeStr.length : 500;
+              debugPrint(
+                '[Yad2-A11y] Marker texts NOT found in tree. Tree preview: ${treeStr.substring(0, previewLength)}',
+              );
             }
+          } else {
+            debugPrint('[Yad2-A11y] terms check: treeStr is null or empty');
           }
           return false;
         });

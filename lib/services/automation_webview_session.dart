@@ -123,6 +123,15 @@ class AutomationWebViewSession {
         in _sessions.where((s) => identical(s._parent, this)).toList()) {
       await child._close();
     }
+
+    try {
+      // Clear memory/disk cache to prevent resource leaks across multiple sessions.
+      // We intentionally do NOT clear local storage or cookies to preserve logins.
+      await controller.clearCache();
+    } catch (e) {
+      debugPrint('[AutomationWebView] Error clearing cache: $e');
+    }
+
     await _detach();
     await _native('destroy');
     _sessions.remove(this);
