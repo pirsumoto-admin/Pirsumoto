@@ -35,7 +35,11 @@
     "test_month": "חודש טסט",
     "test_year": "שנת טסט",
     "handicapped": "תו נכה (כן/לא)",
-    "no_test": "ללא טסט (כן/לא)"
+    "no_test": "ללא טסט (כן/לא)",
+    "test_until": "טסט עד",
+    "govIl": "משרד התחבורה",
+    "includeYad2": "כולל יד2",
+    "include_yad2": "כולל יד2"
   },
   "enums": {
     "color": [

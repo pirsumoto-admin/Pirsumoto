@@ -609,6 +609,15 @@ class Yad2MacHybridAutomationService {
           action: _actionNoTest,
           validation: const _StepValidation(),
         );
+      case AutomationPhase.phase5c1:
+      case AutomationPhase.phase5c2:
+      case AutomationPhase.phase5c3:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Select test date.',
+          action: () async => const _StepActionResult.success(),
+          validation: const _StepValidation(),
+        );
       case AutomationPhase.phase5d:
         return _AutomationStepSpec(
           phase: phase,
@@ -2809,6 +2818,14 @@ class Yad2MacHybridAutomationService {
       case AutomationPhase.phase5b:
         return AutomationPhase.phase5c;
       case AutomationPhase.phase5c:
+        return (!formData.govIl && !formData.noTest)
+            ? AutomationPhase.phase5c1
+            : AutomationPhase.phase5d;
+      case AutomationPhase.phase5c1:
+        return AutomationPhase.phase5c2;
+      case AutomationPhase.phase5c2:
+        return AutomationPhase.phase5c3;
+      case AutomationPhase.phase5c3:
         return AutomationPhase.phase5d;
       case AutomationPhase.phase5d:
         return AutomationPhase.phase5e;

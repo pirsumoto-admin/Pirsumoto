@@ -40,9 +40,12 @@ test('background delivery has a visible alert on both platforms without private 
   assert.ok(message.notification.body);
   assert.equal(message.android.priority, 'high');
   assert.equal(message.android.notification.channelId, 'pirsumoto_chat_notifications');
+  assert.equal(message.android.notification.notificationPriority, 'PRIORITY_LOW');
+  assert.equal(message.android.notification.defaultSound, false);
+  assert.equal(message.android.notification.sound, undefined);
   assert.equal(message.apns.headers['apns-push-type'], 'alert');
-  assert.equal(message.apns.headers['apns-priority'], '10');
-  assert.equal(message.apns.payload.aps.sound, 'default');
+  assert.equal(message.apns.headers['apns-priority'], '5');
+  assert.equal(message.apns.payload.aps.sound, undefined);
   assert.equal(JSON.stringify(message).includes(after.lastMessage), false);
   assert.deepEqual(message.data, {
     ownerUid: 'owner', deviceId: 'device', sessionId: 'request',

@@ -884,6 +884,35 @@ class Yad2AccessibilityAutomationService {
           action: _actionNoTest,
           validation: const _StepValidation(),
         );
+      case AutomationPhase.phase5c1:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Open test-month dropdown.',
+          action:
+              () => _openDropdownByLabel(
+                'טסט עד',
+                skipToPhase: AutomationPhase.phase5c3,
+              ),
+          validation: _StepValidation(
+            mustContain: VehiclePublishData.monthToHebrew(
+              formData.testMonth ?? '',
+            ),
+          ),
+        );
+      case AutomationPhase.phase5c2:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Open test-year dropdown.',
+          action: () => _openDropdownByLabel('שנה'),
+          validation: _StepValidation(mustContain: formData.testYear),
+        );
+      case AutomationPhase.phase5c3:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Select test date.',
+          action: _actionTestDate,
+          validation: const _StepValidation(),
+        );
       case AutomationPhase.phase5d:
         return _AutomationStepSpec(
           phase: phase,
@@ -1313,11 +1342,30 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_StepActionResult> _actionNoTest() async {
-    if (!formData.noTest) return const _StepActionResult.success();
-    await _retryUntil(
-      () => _performWithPopupHandling(() => tapSmart('ללא טסט')),
-      timeout: const Duration(seconds: 4),
-    );
+    if (!formData.govIl && formData.noTest) {
+      await _retryUntil(
+        () => _performWithPopupHandling(() => tapSmart('ללא טסט')),
+        timeout: const Duration(seconds: 4),
+      );
+    }
+    return const _StepActionResult.success();
+  }
+
+  Future<_StepActionResult> _actionTestDate() async {
+    if (!formData.govIl && !formData.noTest) {
+      if (formData.testMonth != null && formData.testMonth!.isNotEmpty) {
+        final monthHebrew = VehiclePublishData.monthToHebrew(formData.testMonth!);
+        await _selectOpenOption(
+          _variants(monthHebrew, formData.testMonth!),
+          selectedValue: monthHebrew,
+        );
+      }
+      if (formData.testYear != null && formData.testYear!.isNotEmpty) {
+        // Open year dropdown and select
+        await _openDropdownByLabel('שנה');
+        await _selectOpenOption(formData.testYear!, selectedValue: formData.testYear!);
+      }
+    }
     return const _StepActionResult.success();
   }
 
@@ -3035,6 +3083,14 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase5b:
         return AutomationPhase.phase5c;
       case AutomationPhase.phase5c:
+        return (!formData.govIl && !formData.noTest)
+            ? AutomationPhase.phase5c1
+            : AutomationPhase.phase5d;
+      case AutomationPhase.phase5c1:
+        return AutomationPhase.phase5c2;
+      case AutomationPhase.phase5c2:
+        return AutomationPhase.phase5c3;
+      case AutomationPhase.phase5c3:
         return AutomationPhase.phase5d;
       case AutomationPhase.phase5d:
         return AutomationPhase.phase5e;

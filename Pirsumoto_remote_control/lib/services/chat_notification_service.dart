@@ -68,12 +68,17 @@ class ChatNotificationService with WidgetsBindingObserver {
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
+    // Recreate the channel with low importance so notifications are silent and do not pop up
+    await android?.deleteNotificationChannel(channelId: channelId);
     await android?.createNotificationChannel(
       const AndroidNotificationChannel(
         channelId,
         channelName,
         description: channelDesc,
-        importance: Importance.high,
+        importance: Importance.low,
+        playSound: false,
+        enableVibration: false,
+        showBadge: false,
       ),
     );
     _notificationsInitialized = true;
@@ -407,11 +412,19 @@ class ChatNotificationService with WidgetsBindingObserver {
           channelId,
           channelName,
           channelDescription: channelDesc,
-          importance: Importance.high,
-          priority: Priority.high,
+          importance: Importance.low,
+          priority: Priority.low,
+          playSound: false,
+          enableVibration: false,
           icon: 'ic_pirsumoto_notification',
         ),
-        iOS: DarwinNotificationDetails(),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBanner: false,
+          presentSound: false,
+          presentBadge: false,
+          presentList: true,
+        ),
       ),
       payload: jsonEncode({
         'deviceId': deviceId,

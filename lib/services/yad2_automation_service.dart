@@ -349,6 +349,12 @@ class Yad2AutomationService {
         await _phase5bSelectMonthValue();
       case AutomationPhase.phase5c:
         _handlePhaseComplete(AutomationPhase.phase5c);
+      case AutomationPhase.phase5c1:
+        _handlePhaseComplete(AutomationPhase.phase5c1);
+      case AutomationPhase.phase5c2:
+        _handlePhaseComplete(AutomationPhase.phase5c2);
+      case AutomationPhase.phase5c3:
+        _handlePhaseComplete(AutomationPhase.phase5c3);
       case AutomationPhase.phase5d:
         _handlePhaseComplete(AutomationPhase.phase5d);
       case AutomationPhase.phase5e:
@@ -1850,8 +1856,19 @@ class Yad2AutomationService {
         next = AutomationPhase.phase5c;
         delayMs = 1000; // wait for month to settle
       case AutomationPhase.phase5c:
-        next = AutomationPhase.phase5d;
+        next = (!formData.govIl && !formData.noTest)
+            ? AutomationPhase.phase5c1
+            : AutomationPhase.phase5d;
         delayMs = 500;
+      case AutomationPhase.phase5c1:
+        next = AutomationPhase.phase5c2;
+        delayMs = 1500;
+      case AutomationPhase.phase5c2:
+        next = AutomationPhase.phase5c3;
+        delayMs = 1500;
+      case AutomationPhase.phase5c3:
+        next = AutomationPhase.phase5d;
+        delayMs = 1000;
       case AutomationPhase.phase5d:
         next = AutomationPhase.phase5e;
         delayMs = 500;

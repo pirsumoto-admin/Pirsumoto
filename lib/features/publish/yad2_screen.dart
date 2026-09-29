@@ -23,6 +23,7 @@ import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 import 'facebook_screen.dart';
 import '../../remote_control/firebase_chat_receiver.dart';
+import '../../routing/app_router.dart';
 
 // Shadow AxTree extractor injected into the WebView on each observe() call.
 // Uses webview_flutter's JS channel: window.updateShadowTree.postMessage(json).
@@ -204,11 +205,20 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       stop: () async {
         _publicationStopped = true;
         await _closeBrowser();
-        if (mounted)
+        if (mounted) {
           setState(() {
             _isPaused = true;
             _statusMessage = 'הפרסום בוטל';
           });
+          await WidgetsBinding.instance.endOfFrame;
+          if (mounted) {
+            Navigator.of(context).popUntil((route) => route.isFirst);
+          } else {
+            rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+          }
+        } else {
+          rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+        }
       },
     );
     // Hide status bar + Android soft navigation bar for a full-screen WebView.

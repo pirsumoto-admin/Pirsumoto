@@ -27,6 +27,7 @@ import '../settings/settings_screen.dart';
 import '../publish/yad2_screen.dart';
 import '../publish/facebook_screen.dart';
 import '../../services/yad2_automation_service.dart';
+
 // import 'package:flutter_gemma/flutter_gemma.dart';
 // import '../../services/gemma_service.dart';
 
@@ -235,7 +236,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
           bottomNavigationBar: Container(
             decoration: const BoxDecoration(
-              border: Border(top: BorderSide(color: Color(0xFFEEEEEE), width: 1)),
+              border: Border(
+                top: BorderSide(color: Color(0xFFEEEEEE), width: 1),
+              ),
             ),
             child: bottomNav,
           ),
@@ -384,6 +387,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   bool _hasSearchedSuccessfully = false;
   bool _isPublishing = false;
   bool _useGemmaAutomation = true; // Use Gemma Automation for testing
+  bool _isGovIl = true; // Tracks if the vehicle data was sourced from gov.il
 
   /// Debug parameters (initialized from HomeScreen static defaults, dynamically toggleable)
   // [WHATSAPP-DISABLED] _disableWhatsAppListener field disabled — WA bridge removed.
@@ -725,6 +729,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           if (mounted) {
             setState(() {
               _hasSearchedSuccessfully = true;
+              _isGovIl = true;
             });
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -743,10 +748,17 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
           );
           setState(() {
             _hasSearchedSuccessfully = false;
+            _isGovIl = false;
           });
           _showLicenseNotFoundDialog();
         }
       } else {
+        // HTTP status != 200
+        if (mounted) {
+          setState(() {
+            _isGovIl = false;
+          });
+        }
         debugPrint(
           '[LicenseLookup] HTTP GET failed with status ${response.statusCode}: ${response.body}',
         );
@@ -755,6 +767,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
         );
       }
     } catch (e, stackTrace) {
+      if (mounted) {
+        setState(() => _isGovIl = false);
+      }
       debugPrint(
         '[LicenseLookup] Error fetching vehicle data for license "$license": $e',
       );
@@ -1308,6 +1323,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
         final records = result['records'] as List;
 
         if (records.isNotEmpty) {
+          if (mounted) setState(() => _isGovIl = true);
           final data = records.first;
           maker = data['tozeret_nm']?.toString() ?? '';
           model =
@@ -1393,6 +1409,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       }
     } catch (e) {
       debugPrint('Error fetching vehicle data for FB: $e');
+      if (mounted) setState(() => _isGovIl = false);
     } finally {
       if (mounted) {
         setState(() => _isFetchingVehicle = false);
@@ -1418,6 +1435,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       price: _priceController.text,
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
+      testYear: _testYearController.text,
+      testMonth: _testMonthController.text,
+      govIl: _isGovIl,
       images: formState.images,
       maker: maker.isNotEmpty ? maker : formState.maker,
       model: model.isNotEmpty ? model : formState.model,
@@ -1576,26 +1596,32 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
               : <String>[];
     }
 
-    final finalMaker = _makerController.text.isNotEmpty
-        ? _makerController.text
-        : formState.maker;
-    final finalModel = _modelController.text.isNotEmpty
-        ? _modelController.text
-        : formState.model;
-    final finalYear = _yearController.text.isNotEmpty
-        ? _yearController.text
-        : formState.year;
-    final finalFuelType = _fuelTypeController.text.isNotEmpty
-        ? _fuelTypeController.text
-        : formState.fuelType;
-    final finalGear = _gearController.text.isNotEmpty
-        ? _gearController.text
-        : (formState.gear.isNotEmpty ? formState.gear : 'הילוכים אוטומטיים');
-    final finalVehicleCondition = _vehicleConditionController.text.isNotEmpty
-        ? _vehicleConditionController.text
-        : (formState.vehicleCondition.isNotEmpty
-            ? formState.vehicleCondition
-            : 'טוב');
+    final finalMaker =
+        _makerController.text.isNotEmpty
+            ? _makerController.text
+            : formState.maker;
+    final finalModel =
+        _modelController.text.isNotEmpty
+            ? _modelController.text
+            : formState.model;
+    final finalYear =
+        _yearController.text.isNotEmpty ? _yearController.text : formState.year;
+    final finalFuelType =
+        _fuelTypeController.text.isNotEmpty
+            ? _fuelTypeController.text
+            : formState.fuelType;
+    final finalGear =
+        _gearController.text.isNotEmpty
+            ? _gearController.text
+            : (formState.gear.isNotEmpty
+                ? formState.gear
+                : 'הילוכים אוטומטיים');
+    final finalVehicleCondition =
+        _vehicleConditionController.text.isNotEmpty
+            ? _vehicleConditionController.text
+            : (formState.vehicleCondition.isNotEmpty
+                ? formState.vehicleCondition
+                : 'טוב');
 
     final listingData = {
       'license': _licenseController.text,
@@ -1651,6 +1677,9 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       price: _priceController.text,
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
+      testYear: _testYearController.text,
+      testMonth: _testMonthController.text,
+      govIl: _isGovIl,
       images: formState.images,
       maker:
           _makerController.text.isNotEmpty
@@ -1685,7 +1714,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     );
 
     // Route to Facebook or Yad2 automation based on debug parameter
-    if (_mapPublishToFacebook) {
+    final bool includeYad2 = settings?['includeYad2'] ?? true;
+    if (_mapPublishToFacebook || !includeYad2) {
       Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => FacebookScreen(publishData: publishData),

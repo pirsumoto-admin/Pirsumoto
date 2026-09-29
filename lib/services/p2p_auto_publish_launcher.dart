@@ -3,17 +3,19 @@ import '../remote_control/firebase_chat_receiver.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import '../features/publish/facebook_screen.dart';
 import '../features/publish/yad2_screen.dart';
 import '../routing/app_router.dart';
 import 'db_service.dart';
 import 'yad2_automation_models.dart';
 
-/// Launches Yad2 automated publication from internal P2P chat vehicle data.
+/// Launches automated publication from internal P2P chat vehicle data.
 class P2PAutoPublishLauncher {
-  /// Main entrypoint to launch Yad2 publication from vehicle state map.
+  /// Main entrypoint to launch publication from vehicle state map.
   static Future<bool> launch(
     Map<String, String> data, {
     PublicationIdentity? identity,
@@ -60,10 +62,30 @@ class P2PAutoPublishLauncher {
         ),
       );
 
-      // 4. Navigate to Yad2Screen on main thread
-      return await _openYad2Screen(publishData);
+      // 4. Route to Facebook or Yad2 automation based on includeYad2
+      bool includeYad2 = publishData.includeYad2;
+      if (!data.containsKey('includeYad2') && !data.containsKey('include_yad2')) {
+        try {
+          final uid = FirebaseChatReceiver.activeOwnerUid ?? FirebaseAuth.instance.currentUser?.uid;
+          if (uid != null && uid.isNotEmpty) {
+            final settings = await DBService().getSettingsData(uid);
+            if (settings != null && settings.containsKey('includeYad2')) {
+              includeYad2 = settings['includeYad2'] == true;
+            }
+          }
+        } catch (e) {
+          debugPrint('[P2PAutoPublish] Error checking user settings: $e');
+        }
+      }
+
+      debugPrint('[P2PAutoPublish] Routing publication: includeYad2 = $includeYad2');
+      if (!includeYad2) {
+        return await _openFacebookScreen(publishData.copyWith(includeYad2: false));
+      } else {
+        return await _openYad2Screen(publishData.copyWith(includeYad2: true));
+      }
     } catch (e, st) {
-      debugPrint('[P2PAutoPublish] Error launching Yad2 auto publish: $e\n$st');
+      debugPrint('[P2PAutoPublish] Error launching auto publish: $e\n$st');
       return false;
     }
   }
@@ -91,6 +113,11 @@ class P2PAutoPublishLauncher {
     } else {
       resolvedImages = images;
     }
+
+    final rawIncludeYad2 = data['includeYad2'] ?? data['include_yad2'];
+    final bool includeYad2 = rawIncludeYad2 != null
+        ? rawIncludeYad2.toString().toLowerCase() != 'false'
+        : true;
 
     return VehiclePublishData(
       publicationIdentity: identity,
@@ -124,7 +151,41 @@ class P2PAutoPublishLauncher {
       ], fallback: 'טוב'),
       description: _firstNonEmpty([data['description']]),
       expectedImageCount: expectedCount,
+      testYear: data['test_year'],
+      testMonth: data['test_month'],
+      govIl: (data['govIl'] ?? true) != false && data['govIl'] != 'false',
+      includeYad2: includeYad2,
     );
+  }
+
+  static Future<bool> _openFacebookScreen(
+    VehiclePublishData publishData, {
+    int attempt = 0,
+  }) async {
+    if (!FirebaseChatReceiver.isCurrent(publishData.publicationIdentity))
+      return false;
+    final navigator = rootNavigatorKey.currentState;
+    if (navigator != null && navigator.mounted) {
+      navigator.push(
+        MaterialPageRoute(
+          builder: (_) => FacebookScreen(publishData: publishData),
+        ),
+      );
+      debugPrint(
+        '[P2PAutoPublish] Successfully opened FacebookScreen for ${publishData.licenseNumber}',
+      );
+      return true;
+    }
+
+    if (attempt >= 20) {
+      debugPrint(
+        '[P2PAutoPublish] Failed to open Facebook: navigator missing after $attempt attempts',
+      );
+      return false;
+    }
+
+    await Future.delayed(const Duration(milliseconds: 300));
+    return _openFacebookScreen(publishData, attempt: attempt + 1);
   }
 
   static Future<bool> _openYad2Screen(

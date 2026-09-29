@@ -373,6 +373,18 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         }
       }
 
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null && uid.isNotEmpty) {
+        try {
+          final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+          final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+          if (settings != null && settings.containsKey('includeYad2')) {
+            final bool incYad2 = settings['includeYad2'] ?? true;
+            saved.vehicleData['includeYad2'] = incYad2 ? 'true' : 'false';
+          }
+        } catch (_) {}
+      }
+
       await ChatSessionManager.startPublication(widget.deviceId, saved);
       await _refreshSession();
     } catch (e) {
@@ -636,7 +648,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (plate.isNotEmpty) {
       try {
         final govInfo = await VehicleDataService.fetchVehicleData(plate);
-        if (govInfo != null) {
+        if (govInfo != null && govInfo.isNotEmpty) {
+          mergedVehicleData['govIl'] = 'true';
           for (final entry in govInfo.entries) {
             final key = entry.key;
             final val = entry.value?.toString().trim() ?? '';
@@ -646,10 +659,15 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               mergedVehicleData[key] = val;
             }
           }
+        } else {
+          mergedVehicleData['govIl'] = 'false';
         }
       } catch (e) {
+        mergedVehicleData['govIl'] = 'false';
         debugPrint('[WhatsAppChat] Error fetching gov.il data in turn: $e');
       }
+    } else {
+      mergedVehicleData['govIl'] = 'false';
     }
 
     final missing = RemoteValidationService.getMissingFields(mergedVehicleData);
@@ -3414,6 +3432,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   final Map<String, TextEditingController> _controllers = {};
   final Map<String, String?> _dropdownValues = {};
   bool _isSaving = false;
+  bool _noTest = false;
 
   @override
   void initState() {
@@ -3456,6 +3475,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         !fields.contains('current_ownership')) {
       fields.add('current_ownership');
     }
+    if (widget.currentData['govIl'] == 'false') {
+      if (!fields.contains('test_until')) fields.add('test_until');
+      fields.remove('test_year');
+      fields.remove('test_month');
+    }
     return fields;
   }
 
@@ -3482,6 +3506,17 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         }
       }
 
+      if (field == 'test_until') {
+        _noTest = widget.currentData['no_test'] == 'true';
+        if (!_controllers.containsKey(field)) {
+          final c = TextEditingController(text: existingVal);
+          c.addListener(() {
+            if (mounted) setState(() {});
+          });
+          _controllers[field] = c;
+        }
+        continue;
+      }
       if (_isDropdownField(field)) {
         final options = _getFieldOptions(field);
         if (options.contains(existingVal)) {
@@ -3520,6 +3555,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   bool _isFieldFilled(String field) {
+    if (field == 'test_until') {
+      return _noTest || (_controllers['test_until']?.text.isNotEmpty ?? false);
+    }
     if (_isDropdownField(field)) {
       final val = _dropdownValues[field]?.trim();
       if (val == null || val.isEmpty || val == 'בחר...' || val == '0') {
@@ -3589,7 +3627,17 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     setState(() => _isSaving = true);
     try {
       final updated = <String, String>{};
+      if (_fieldsToShow.contains('test_until')) {
+        updated['no_test'] = _noTest ? 'true' : 'false';
+      }
+      if (widget.currentData['govIl'] != null) {
+        updated['govIl'] = widget.currentData['govIl']!;
+      }
       for (final field in _fieldsToShow) {
+        if (field == 'test_until' && _noTest) {
+          updated[field] = '';
+          continue;
+        }
         if (_isDropdownField(field)) {
           final val = _dropdownValues[field]?.trim();
           if (val != null && val.isNotEmpty) {
@@ -3658,14 +3706,31 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  'להשלמת פרטי רכב חסרים:',
-                  textDirection: TextDirection.rtl,
-                  style: GoogleFonts.heebo(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.onSurface,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'להשלמת פרטי רכב חסרים:',
+                      textDirection: TextDirection.rtl,
+                      style: GoogleFonts.heebo(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.onSurface,
+                      ),
+                    ),
+                    if (widget.currentData['govIl'] == 'false')
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          'מכיון שלא נמצא מידע על הרכב במשרד התחבורה, מיד לאחר תחילת הפרסום תתבקש להשלים את פרטי היצרן ותת-הדגם מתוך ממשק יד2',
+                          textDirection: TextDirection.rtl,
+                          style: GoogleFonts.heebo(
+                            fontSize: 12,
+                            color: AppColors.error,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ],
@@ -3728,6 +3793,8 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   Widget _buildFieldRow(String field) {
+    if (field == 'test_until') return _buildTestUntilRow();
+    
     final label = _getFieldLabel(field);
     final isDropdown = _isDropdownField(field);
 
@@ -3765,6 +3832,98 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
                   isDropdown
                       ? _buildDropdownInput(field)
                       : _buildTextInput(field),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTestUntilRow() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Directionality(
+        textDirection: TextDirection.rtl,
+        child: Row(
+          children: [
+            Expanded(
+              flex: 3,
+              child: Text(
+                'טסט עד',
+                textDirection: TextDirection.rtl,
+                style: GoogleFonts.heebo(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.onSurface,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 4,
+              child: GestureDetector(
+                onTap: _noTest ? null : () async {
+                  final date = await showDatePicker(
+                    context: context,
+                    initialDate: DateTime.now(),
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime(2050),
+                  );
+                  if (date != null) {
+                    setState(() {
+                      if (!_controllers.containsKey('test_until')) {
+                        _controllers['test_until'] = TextEditingController();
+                      }
+                      _controllers['test_until']!.text = "${date.month.toString().padLeft(2, '0')}/${date.year}";
+                    });
+                  }
+                },
+                child: Container(
+                  height: 38,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: _noTest ? AppColors.surfaceSubtle.withOpacity(0.5) : AppColors.surfaceSubtle,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    _controllers['test_until']?.text.isNotEmpty == true 
+                        ? _controllers['test_until']!.text 
+                        : 'בחר תאריך',
+                    style: GoogleFonts.heebo(
+                      fontSize: 13,
+                      color: _noTest ? AppColors.secondary : AppColors.onSurface,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 3,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Checkbox(
+                    value: _noTest,
+                    onChanged: (val) {
+                      setState(() {
+                        _noTest = val ?? false;
+                        if (_noTest) {
+                          _controllers['test_until']?.text = '';
+                        }
+                      });
+                    },
+                  ),
+                  Text('ללא טסט', style: GoogleFonts.heebo(fontSize: 12)),
+                ],
+              ),
             ),
           ],
         ),

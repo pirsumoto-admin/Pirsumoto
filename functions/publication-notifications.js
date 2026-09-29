@@ -22,16 +22,17 @@ function publicationMessage(after, {deviceId, requestId}, tokens) {
       notification: {
         channelId: 'pirsumoto_chat_notifications',
         tag: thread,
-        sound: 'default',
+        notificationPriority: 'PRIORITY_LOW',
+        defaultSound: false,
       },
     },
     apns: {
       headers: {
         'apns-push-type': 'alert',
-        'apns-priority': '10',
+        'apns-priority': '5',
         'apns-collapse-id': thread,
       },
-      payload: {aps: {sound: 'default', threadId: thread}},
+      payload: {aps: {threadId: thread}},
     },
     data: {
       ownerUid: after.ownerUid,

@@ -74,6 +74,7 @@ class FirebaseChatReceiver {
   CollectionReference<Map<String, dynamic>> get _requests =>
       _device.collection('requests');
   static bool get isPublishingActive => _instance?._active != null;
+  static String? get activeOwnerUid => _instance?._activeOwnerUid;
   static bool isCurrent(PublicationIdentity? id) =>
       id == null ||
       (_instance?._active?.matches(id) == true &&
@@ -433,7 +434,11 @@ class FirebaseChatReceiver {
             lease != null &&
             lease.toDate().isAfter(DateTime.now()))
           return;
-        if (_active != null) await _stop?.call();
+        if (_active != null) {
+          final activeIdentity = _active!;
+          await _stop?.call();
+          unawaited(_cleanupMedia(activeIdentity));
+        }
         final released = await _firestore.runTransaction<bool>((tx) async {
           final d = (await tx.get(_device)).data();
           final r = (await tx.get(snap.reference)).data();
@@ -611,6 +616,18 @@ class FirebaseChatReceiver {
       if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id.attemptId))
         throw StateError('Invalid attempt');
       final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
+      if (!vehicle.containsKey('includeYad2') && !vehicle.containsKey('include_yad2')) {
+        try {
+          final ownerUid = data['ownerUid'] as String?;
+          if (ownerUid != null && ownerUid.isNotEmpty) {
+            final userDoc = await _firestore.collection('users').doc(ownerUid).get();
+            final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+            if (settings != null && settings.containsKey('includeYad2')) {
+              vehicle['includeYad2'] = (settings['includeYad2'] == true) ? 'true' : 'false';
+            }
+          }
+        } catch (_) {}
+      }
       if (!VehicleSchema.isComplete(vehicle))
         throw StateError('פרטי הרכב אינם תקינים');
       final attachments = List<Map<String, dynamic>>.from(
@@ -677,7 +694,8 @@ class FirebaseChatReceiver {
       // A pause requested during download is acknowledged before opening a site.
       await _handleControl();
       if (!isCurrent(id) || _paused) return;
-      if (!await _report(id, 'publishing', 'מתחיל פרסום ביד2')) {
+      final bool includeYad2 = (vehicle['includeYad2'] ?? vehicle['include_yad2']) != 'false';
+      if (!await _report(id, 'publishing', includeYad2 ? 'מתחיל פרסום ביד2' : 'מתחיל פרסום בפייסבוק')) {
         await _handleControl();
         return;
       }

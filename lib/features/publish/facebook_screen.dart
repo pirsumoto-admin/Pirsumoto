@@ -12,6 +12,7 @@ import '../../services/facebook_automation_service.dart';
 import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 import '../../remote_control/firebase_chat_receiver.dart';
+import '../../routing/app_router.dart';
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Create Vehicle Listing Screen
@@ -103,11 +104,20 @@ class _FacebookScreenState extends State<FacebookScreen> {
       stop: () async {
         _publicationStopped = true;
         await _closeBrowser();
-        if (mounted)
+        if (mounted) {
           setState(() {
             _isPaused = true;
             _statusMessage = 'הפרסום בוטל';
           });
+          await WidgetsBinding.instance.endOfFrame;
+          if (mounted) {
+            Navigator.of(context).popUntil((route) => route.isFirst);
+          } else {
+            rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+          }
+        } else {
+          rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+        }
       },
     );
     WakelockPlus.enable();

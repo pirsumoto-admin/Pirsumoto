@@ -370,11 +370,22 @@ class ChatSessionManager {
     }
     if (FirebaseAuth.instance.currentUser?.uid != uid)
       throw StateError('החשבון השתנה; יש להתחבר מחדש');
+    final vehiclePayload = Map<String, String>.from(draft.vehicleData);
+    if (!vehiclePayload.containsKey('includeYad2') && !vehiclePayload.containsKey('include_yad2')) {
+      try {
+        final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+        final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+        final bool includeYad2 = settings?['includeYad2'] ?? true;
+        vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';
+      } catch (_) {
+        vehiclePayload['includeYad2'] = 'true';
+      }
+    }
     final result = await RemoteApi.post(deviceId, {
       'action': 'enqueue_publication',
       'requestId': draft.id,
       'attemptId': attemptId,
-      'vehicleData': draft.vehicleData,
+      'vehicleData': vehiclePayload,
       'attachments': attachments,
     });
     await _project(

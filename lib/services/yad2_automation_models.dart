@@ -27,6 +27,10 @@ class VehiclePublishData {
   final List<String> services;
   final String description;
   final int? expectedImageCount;
+  final String? testYear;
+  final String? testMonth;
+  final bool govIl;
+  final bool includeYad2;
 
   const VehiclePublishData({
     this.publicationIdentity,
@@ -55,6 +59,10 @@ class VehiclePublishData {
     this.services = const [],
     this.description = '',
     this.expectedImageCount,
+    this.testYear,
+    this.testMonth,
+    this.govIl = true,
+    this.includeYad2 = true,
   });
 
   VehiclePublishData copyWith({
@@ -83,6 +91,10 @@ class VehiclePublishData {
     List<String>? services,
     String? description,
     int? expectedImageCount,
+    String? testYear,
+    String? testMonth,
+    bool? govIl,
+    bool? includeYad2,
   }) {
     return VehiclePublishData(
       publicationIdentity: publicationIdentity,
@@ -111,6 +123,10 @@ class VehiclePublishData {
       services: services ?? this.services,
       description: description ?? this.description,
       expectedImageCount: expectedImageCount ?? this.expectedImageCount,
+      testYear: testYear ?? this.testYear,
+      testMonth: testMonth ?? this.testMonth,
+      govIl: govIl ?? this.govIl,
+      includeYad2: includeYad2 ?? this.includeYad2,
     );
   }
 
@@ -182,6 +198,9 @@ enum AutomationPhase {
   phase5a('Month Dropdown Open', 'חודש עלייה לכביש', 1),
   phase5b('Month Selection', null, 1),
   phase5c('No Test Check', 'ללא טסט', 1),
+  phase5c1('Test Month Dropdown Open', 'טסט עד', 1),
+  phase5c2('Test Year Dropdown Open', 'שנה', 1),
+  phase5c3('Test Date Selection', null, 1),
   phase5d('Warranties Selection', null, 1),
   phase5e('Treatments Selection', null, 1),
   phase5f('Services Selection', null, 1),

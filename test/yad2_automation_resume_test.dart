@@ -57,6 +57,7 @@ class _Automation extends Yad2AccessibilityAutomationService {
   @override
   Future<bool> toolFindElementAndTap(
     String text, {
+    int maxReads = 50,
     int targetInstance = 1,
     double deltaY = 0,
     double threshold = 0.82,

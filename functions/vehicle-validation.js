@@ -41,14 +41,14 @@ function sanitizeFields(raw, {allowPlate = false} = {}) {
   return output;
 }
 function getMissingFields(state) {
-  const disregarded = new Set(['city', 'handicapped', 'no_test']);
+  const disregarded = new Set(['city', 'handicapped', 'no_test', 'govIl', 'includeYad2', 'include_yad2', 'test_until', 'force_show_current_ownership', 'history_records']);
   return schema.required.filter(k => !disregarded.has(k) && !String(state[k] ?? '').trim());
 }
 function validateValues(state) {
   const errors = [];
   const year = new Date().getFullYear();
   const ranges = {km:[0,1500000],price:[1,100000000],hand:[1,20],year:[1900,year+1],month:[1,12],test_month:[1,12],test_year:[1900,year+3]};
-  const disregarded = new Set(['city', 'handicapped', 'no_test']);
+  const disregarded = new Set(['city', 'handicapped', 'no_test', 'govIl', 'includeYad2', 'include_yad2', 'test_until', 'force_show_current_ownership', 'history_records']);
   for (const [key, value] of Object.entries(state)) {
     if (!value || disregarded.has(key)) continue;
     let invalid = key === 'license_plate' && !/^\d{7,8}$/.test(value);

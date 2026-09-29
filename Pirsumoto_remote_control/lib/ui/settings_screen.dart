@@ -80,6 +80,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _isSaving = false;
   bool _isLoading = true;
+  bool _includeYad2 = true;
   StreamSubscription<DocumentSnapshot>? _settingsSubscription;
 
   final _picker = ImagePicker();
@@ -107,6 +108,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (settings != null) {
             setState(() {
               if (!_isSaving) { // Avoid overwriting while typing/saving locally
+                _includeYad2 = settings['includeYad2'] ?? true;
                 _yad2DescController.text = settings['yad2Desc'] ?? '';
                 _fbAutoPostDescController.text = settings['fbAutoPostDesc'] ?? '';
                 _fbGroupXxxDescController.text = settings['fbGroupXxxDesc'] ?? '';
@@ -253,6 +255,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       await FirebaseFirestore.instance.collection('users').doc(userId).set({
         'settings': {
+          'includeYad2': _includeYad2,
           'yad2Desc': _yad2DescController.text.trim(),
           'fbAutoPostDesc': _fbAutoPostDescController.text.trim(),
           'fbGroupXxxDesc': _fbGroupXxxDescController.text.trim(),
@@ -342,6 +345,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ],
                     ),
                     const SizedBox(height: 24),
+                    _buildIncludeYad2Toggle(),
+                    const SizedBox(height: 16),
                     _buildBenefitsAndServicesCard(),
                     const SizedBox(height: 16),
                     _buildBackgroundTemplateCard(),
@@ -384,6 +389,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ],
                 ),
               ),
+      ),
+    );
+  }
+
+  Widget _buildIncludeYad2Toggle() {
+    return _card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 8.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'כולל יד2',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E293B),
+              ),
+            ),
+            Switch(
+              value: _includeYad2,
+              activeColor: const Color(0xFF3B5BDB),
+              onChanged: (v) async {
+                setState(() => _includeYad2 = v);
+                final userId = _currentUserId;
+                if (userId != null && userId.isNotEmpty) {
+                  try {
+                    await FirebaseFirestore.instance.collection('users').doc(userId).set({
+                      'settings': {
+                        'includeYad2': v,
+                        'updatedAt': DateTime.now().toIso8601String(),
+                      }
+                    }, SetOptions(merge: true));
+                  } catch (e) {
+                    debugPrint('[Settings] Error auto-saving includeYad2: $e');
+                  }
+                }
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
