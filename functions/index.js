@@ -848,6 +848,7 @@ async function handleRemoteValidation(req, res) {
         isFirstTurn = true;
         const govData = await fetchGovIlData(rawPlate);
         if (govData) {
+          state.govIl = 'true';
           state.maker = govData.maker || '';
           state.model = govData.model || '';
           state.year = govData.year || '';
@@ -860,7 +861,11 @@ async function handleRemoteValidation(req, res) {
           if (govData.test_month) state.test_month = govData.test_month;
           if (govData.test_year) state.test_year = govData.test_year;
           if (govData.estimatedKm && !state.km) state.km = String(govData.estimatedKm);
+        } else {
+          state.govIl = 'false';
         }
+      } else if (state.license_plate && typeof state.govIl === 'undefined') {
+        state.govIl = (state.maker && state.model) ? 'true' : 'false';
       }
 
       const hasActiveSession = Boolean(state.license_plate);

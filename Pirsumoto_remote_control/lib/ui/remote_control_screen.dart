@@ -246,7 +246,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                       SnackBar(
                         content: Text(
                           'יש ללחוץ על "קבלת שליטה" כדי לשלוט במכשיר',
-                          style: GoogleFonts.heebo(color: Colors.white),
+                          style: GoogleFonts.heebo(color: Colors.black87),
                         ),
                         backgroundColor: AppColors.surfaceSubtle,
                         duration: const Duration(milliseconds: 1500),
@@ -451,7 +451,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
         SnackBar(
           content: Text(
             'הצ\'אט נוקה והסשן אותחל מחדש',
-            style: GoogleFonts.heebo(color: Colors.white),
+            style: GoogleFonts.heebo(color: Colors.black87),
           ),
           backgroundColor: AppColors.surfaceSubtle,
           duration: const Duration(seconds: 2),
@@ -484,7 +484,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                   SnackBar(
                     content: Text(
                       'יש ללחוץ על "קבלת שליטה" כדי לשלוט במכשיר',
-                      style: GoogleFonts.heebo(color: Colors.white),
+                      style: GoogleFonts.heebo(color: Colors.black87),
                     ),
                     backgroundColor: AppColors.surfaceSubtle,
                     duration: const Duration(milliseconds: 1500),

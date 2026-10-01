@@ -355,6 +355,8 @@ class Yad2AutomationService {
         _handlePhaseComplete(AutomationPhase.phase5c2);
       case AutomationPhase.phase5c3:
         _handlePhaseComplete(AutomationPhase.phase5c3);
+      case AutomationPhase.phase5c4:
+        _handlePhaseComplete(AutomationPhase.phase5c4);
       case AutomationPhase.phase5d:
         _handlePhaseComplete(AutomationPhase.phase5d);
       case AutomationPhase.phase5e:
@@ -1867,6 +1869,9 @@ class Yad2AutomationService {
         next = AutomationPhase.phase5c3;
         delayMs = 1500;
       case AutomationPhase.phase5c3:
+        next = AutomationPhase.phase5c4;
+        delayMs = 1500;
+      case AutomationPhase.phase5c4:
         next = AutomationPhase.phase5d;
         delayMs = 1000;
       case AutomationPhase.phase5d:

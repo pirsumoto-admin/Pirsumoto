@@ -132,7 +132,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     setState(() {
       _allDataFilled =
           saved != null &&
-          VehicleSchema.isComplete(saved.vehicleData) &&
+          RemoteValidationService.getMissingFields(saved.vehicleData).isEmpty &&
           saved.imagePaths.isNotEmpty;
       _localStatus = saved?.status;
       _vehicleData = saved?.vehicleData ?? {};
@@ -149,8 +149,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               id: id,
               sender: ChatSender.bot,
               text: text,
-              timestamp:
-                  timestamp is Timestamp ? timestamp.toDate() : DateTime.now(),
+              timestamp: timestamp is Timestamp
+                  ? timestamp.toDate()
+                  : DateTime.now(),
             ),
           );
           _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -212,16 +213,15 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _sessionId,
         beforeTimestamp: before,
       );
-      final remote =
-          await FirebaseFirestore.instance
-              .collection('remote_chats')
-              .doc(widget.deviceId)
-              .collection('messages')
-              .where('sessionId', isEqualTo: _sessionId)
-              .orderBy('timestamp', descending: true)
-              .startAfter([before])
-              .limit(100)
-              .get();
+      final remote = await FirebaseFirestore.instance
+          .collection('remote_chats')
+          .doc(widget.deviceId)
+          .collection('messages')
+          .where('sessionId', isEqualTo: _sessionId)
+          .orderBy('timestamp', descending: true)
+          .startAfter([before])
+          .limit(100)
+          .get();
       for (final doc in remote.docs) {
         if (doc.data()['sender'] == 'bot' && doc.data()['type'] == 'status')
           older.add(ChatMessageItem.fromJson({...doc.data(), 'id': doc.id}));
@@ -352,7 +352,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       if (!_sameAccount || !mounted) return;
       final saved = await SqliteDatabaseHelper.instance.getSession(_sessionId);
       if (saved == null) throw StateError('יש להשלים את פרטי הרכב');
-      
+
       if (saved.vehicleData.containsKey('color')) {
         final rawColor = saved.vehicleData['color']!;
         final allowedColors = AgentConfigService.instance.allowedColors;
@@ -368,15 +368,18 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           }
         }
         if (matchedColor.isNotEmpty && matchedColor != rawColor) {
-           saved.vehicleData['color'] = matchedColor;
-           await ChatSessionManager.saveSession(saved);
+          saved.vehicleData['color'] = matchedColor;
+          await ChatSessionManager.saveSession(saved);
         }
       }
 
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid != null && uid.isNotEmpty) {
         try {
-          final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+          final userDoc = await FirebaseFirestore.instance
+              .collection('users')
+              .doc(uid)
+              .get();
           final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
           if (settings != null && settings.containsKey('includeYad2')) {
             final bool incYad2 = settings['includeYad2'] ?? true;
@@ -491,7 +494,13 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (norm.contains('סגול')) return 'סגול';
     if (norm.contains('ורוד')) return 'ורוד';
     if (norm.contains('שחור')) return 'שחור';
-    return allowedColors.first;
+    
+    // Also try substring matching backwards (e.g., if allowed is "כסוף" and rawColor is "כסף")
+    for (final allowed in allowedColors) {
+      if (allowed.contains(norm)) return allowed;
+    }
+    
+    return rawColor;
   }
 
   void _initAudioPlayerListeners() {
@@ -609,16 +618,15 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final currentVehicleData = session?.vehicleData ?? {};
     var currentImagePaths = session?.imagePaths ?? [];
 
-    final historyList =
-        _messages
-            .where((m) => m.id != userMessage.id && m.text.trim().isNotEmpty)
-            .map(
-              (m) => {
-                'role': m.sender == ChatSender.user ? 'user' : 'assistant',
-                'text': m.text,
-              },
-            )
-            .toList();
+    final historyList = _messages
+        .where((m) => m.id != userMessage.id && m.text.trim().isNotEmpty)
+        .map(
+          (m) => {
+            'role': m.sender == ChatSender.user ? 'user' : 'assistant',
+            'text': m.text,
+          },
+        )
+        .toList();
 
     // The authenticated backend extracts fields and looks up the vehicle.
     final result = await RemoteValidationService.processTurn(
@@ -638,10 +646,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _currentLicensePlate = result.vehicleData['license_plate']!;
     }
 
-    final plate =
-        _currentLicensePlate.isNotEmpty
-            ? _currentLicensePlate
-            : (result.vehicleData['license_plate'] ?? '');
+    final plate = _currentLicensePlate.isNotEmpty
+        ? _currentLicensePlate
+        : (result.vehicleData['license_plate'] ?? '');
 
     // Merge vehicle data with gov.il sources if needed
     final mergedVehicleData = Map<String, String>.from(result.vehicleData);
@@ -671,11 +678,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }
 
     final missing = RemoteValidationService.getMissingFields(mergedVehicleData);
-    
+
     if (mergedVehicleData['initial_missing_fields'] == null) {
       mergedVehicleData['initial_missing_fields'] = missing.join(',');
     }
-    
+
     final allErrors = RemoteValidationService.validateValues(mergedVehicleData);
     final errors = _getFilteredErrors(allErrors, mergedVehicleData, missing);
     final isComplete = missing.isEmpty && allErrors.isEmpty;
@@ -690,12 +697,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (plate.isNotEmpty) {
       final summary =
           'נקלט רכב $plate: ${[mergedVehicleData['maker'], mergedVehicleData['model'], mergedVehicleData['year']].where((s) => s != null && s.isNotEmpty).join(' ')}';
-      final guidance =
-          missing.isNotEmpty
-              ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
-              : (currentImagePaths.isNotEmpty
-                  ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.'
-                  : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
+      final guidance = missing.isNotEmpty
+          ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
+          : (currentImagePaths.isNotEmpty
+                ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.'
+                : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
       final errorLines = errors.map((e) => '⚠️ $e').toList();
       finalBotReply = [
         if (summary.isNotEmpty) summary,
@@ -752,8 +758,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       formFields.add('current_ownership');
     }
 
-    final labelsToFilter =
-        formFields.map((f) => vehicleFieldLabels[f] ?? f).toSet();
+    final labelsToFilter = formFields
+        .map((f) => vehicleFieldLabels[f] ?? f)
+        .toSet();
 
     return allErrors.where((err) {
       for (final label in labelsToFilter) {
@@ -784,6 +791,28 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       merged[key] = val;
     }
 
+    if (merged.containsKey('test_until')) {
+      final tu = merged['test_until'];
+      if (tu != null && tu.contains('/')) {
+        final parts = tu.split('/');
+        if (parts.length == 2) {
+          merged['test_month'] = int.tryParse(parts[0])?.toString() ?? parts[0];
+          merged['test_year'] = parts[1];
+        }
+      } else if (tu == null || tu.isEmpty || tu == 'null') {
+        merged.remove('test_month');
+        merged.remove('test_year');
+      }
+    }
+
+    if (updatedValues.containsKey('govIl')) {
+      merged['govIl'] = updatedValues['govIl']!;
+    } else if (!merged.containsKey('govIl') ||
+        merged['govIl'] == null ||
+        merged['govIl']!.isEmpty) {
+      merged['govIl'] = 'false';
+    }
+
     if (merged['license_plate'] != null &&
         merged['license_plate']!.isNotEmpty) {
       _currentLicensePlate = merged['license_plate']!;
@@ -791,7 +820,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     if (merged['initial_missing_fields'] == null) {
       final missingNow = RemoteValidationService.getMissingFields(merged);
-      merged['initial_missing_fields'] = [...missingNow, ...updatedValues.keys].join(',');
+      merged['initial_missing_fields'] = [
+        ...missingNow,
+        ...updatedValues.keys,
+      ].join(',');
     }
 
     final missing = RemoteValidationService.getMissingFields(merged);
@@ -805,10 +837,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final updatedSession = ChatSession(
       id: _sessionId,
       deviceId: widget.deviceId,
-      licensePlate:
-          _currentLicensePlate.isNotEmpty
-              ? _currentLicensePlate
-              : (session?.licensePlate ?? ''),
+      licensePlate: _currentLicensePlate.isNotEmpty
+          ? _currentLicensePlate
+          : (session?.licensePlate ?? ''),
       startTimestamp:
           session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
       status: session?.status ?? ChatSessionStatus.draft,
@@ -866,10 +897,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _sessionId,
       );
       final status = existing?.status ?? ChatSessionStatus.draft;
-      final plate =
-          _currentLicensePlate.isNotEmpty
-              ? _currentLicensePlate
-              : (existing?.licensePlate ?? '');
+      final plate = _currentLicensePlate.isNotEmpty
+          ? _currentLicensePlate
+          : (existing?.licensePlate ?? '');
       await ChatSessionManager.saveSession(
         ChatSession(
           id: _sessionId,
@@ -949,10 +979,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final updatedSession = ChatSession(
       id: _sessionId,
       deviceId: widget.deviceId,
-      licensePlate:
-          _currentLicensePlate.isNotEmpty
-              ? _currentLicensePlate
-              : (session?.licensePlate ?? ''),
+      licensePlate: _currentLicensePlate.isNotEmpty
+          ? _currentLicensePlate
+          : (session?.licensePlate ?? ''),
       startTimestamp:
           session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
       status: session?.status ?? ChatSessionStatus.draft,
@@ -1135,19 +1164,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final updatedSession = ChatSession(
         id: _sessionId,
         deviceId: widget.deviceId,
-        licensePlate:
-            _currentLicensePlate.isNotEmpty
-                ? _currentLicensePlate
-                : (session?.licensePlate ?? ''),
+        licensePlate: _currentLicensePlate.isNotEmpty
+            ? _currentLicensePlate
+            : (session?.licensePlate ?? ''),
         startTimestamp:
             session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
         status: session?.status ?? ChatSessionStatus.draft,
-        lastMessage:
-            isNowReady
-                ? 'מוכן לפרסום'
-                : (currentImgs.isNotEmpty
-                    ? '📷 תמונה (${currentImgs.length})'
-                    : 'הוסרה תמונה'),
+        lastMessage: isNowReady
+            ? 'מוכן לפרסום'
+            : (currentImgs.isNotEmpty
+                  ? '📷 תמונה (${currentImgs.length})'
+                  : 'הוסרה תמונה'),
         vehicleData: vehicleData,
         imagePaths: currentImgs,
         isReadyToPublish: isNowReady,
@@ -1186,20 +1213,18 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     try {
       final pathsSet = pathsToDelete.toSet();
-      final messagesToDelete =
-          _messages.where((m) {
-            if (m.mediaType != 'image') return false;
-            if (m.localFilePath != null && pathsSet.contains(m.localFilePath)) {
-              return true;
-            }
-            if (m.mediaUrl != null && pathsSet.contains(m.mediaUrl))
-              return true;
-            if (m.localFilePath != null) {
-              final fn = m.localFilePath!.split('/').last;
-              if (pathsToDelete.any((p) => p.endsWith(fn))) return true;
-            }
-            return false;
-          }).toList();
+      final messagesToDelete = _messages.where((m) {
+        if (m.mediaType != 'image') return false;
+        if (m.localFilePath != null && pathsSet.contains(m.localFilePath)) {
+          return true;
+        }
+        if (m.mediaUrl != null && pathsSet.contains(m.mediaUrl)) return true;
+        if (m.localFilePath != null) {
+          final fn = m.localFilePath!.split('/').last;
+          if (pathsToDelete.any((p) => p.endsWith(fn))) return true;
+        }
+        return false;
+      }).toList();
 
       for (final msg in messagesToDelete) {
         if (msg.localFilePath != null) {
@@ -1266,19 +1291,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final updatedSession = ChatSession(
         id: _sessionId,
         deviceId: widget.deviceId,
-        licensePlate:
-            _currentLicensePlate.isNotEmpty
-                ? _currentLicensePlate
-                : (session?.licensePlate ?? ''),
+        licensePlate: _currentLicensePlate.isNotEmpty
+            ? _currentLicensePlate
+            : (session?.licensePlate ?? ''),
         startTimestamp:
             session?.startTimestamp ?? DateTime.now().millisecondsSinceEpoch,
         status: session?.status ?? ChatSessionStatus.draft,
-        lastMessage:
-            isNowReady
-                ? 'מוכן לפרסום'
-                : (currentImgs.isNotEmpty
-                    ? '📷 תמונה (${currentImgs.length})'
-                    : 'הוסרו תמונות'),
+        lastMessage: isNowReady
+            ? 'מוכן לפרסום'
+            : (currentImgs.isNotEmpty
+                  ? '📷 תמונה (${currentImgs.length})'
+                  : 'הוסרו תמונות'),
         vehicleData: vehicleData,
         imagePaths: currentImgs,
         isReadyToPublish: isNowReady,
@@ -1313,62 +1336,55 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     showDialog(
       context: context,
-      builder:
-          (ctx) => Directionality(
-            textDirection: TextDirection.rtl,
-            child: AlertDialog(
-              backgroundColor: AppColors.surface,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              title: Row(
-                children: [
-                  const Icon(
-                    Icons.delete_outline_rounded,
-                    color: AppColors.error,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'מחיקת תמונה',
-                    style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-              content: Text(
-                'האם למחוק תמונה זו?\nהתמונה תוסר מפרסום הרכב, תימחק מהמכשיר ומהשרת, ולא תישלח לפרסום.',
-                style: GoogleFonts.heebo(
-                  fontSize: 14,
-                  color: AppColors.onSurface,
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: Text(
-                    'ביטול',
-                    style: GoogleFonts.heebo(color: AppColors.secondary),
-                  ),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.error,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _deleteImageMessage(message);
-                  },
-                  child: Text(
-                    'מחק תמונה',
-                    style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            ),
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
           ),
+          title: Row(
+            children: [
+              const Icon(Icons.delete_outline_rounded, color: AppColors.error),
+              const SizedBox(width: 8),
+              Text(
+                'מחיקת תמונה',
+                style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          content: Text(
+            'האם למחוק תמונה זו?\nהתמונה תוסר מפרסום הרכב, תימחק מהמכשיר ומהשרת, ולא תישלח לפרסום.',
+            style: GoogleFonts.heebo(fontSize: 14, color: AppColors.onSurface),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(
+                'ביטול',
+                style: GoogleFonts.heebo(color: AppColors.secondary),
+              ),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.error,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              onPressed: () {
+                Navigator.pop(ctx);
+                _deleteImageMessage(message);
+              },
+              child: Text(
+                'מחק תמונה',
+                style: GoogleFonts.heebo(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1387,64 +1403,62 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
     showDialog(
       context: context,
-      builder:
-          (ctx) => Dialog(
-            backgroundColor: Colors.black,
-            insetPadding: EdgeInsets.zero,
-            child: Stack(
-              children: [
-                Center(
-                  child: InteractiveViewer(
-                    minScale: 0.5,
-                    maxScale: 4.0,
-                    child:
-                        imageProvider != null
-                            ? Image(image: imageProvider, fit: BoxFit.contain)
-                            : const Icon(
-                              Icons.broken_image_rounded,
-                              color: Colors.white54,
-                              size: 64,
-                            ),
-                  ),
-                ),
-                // Top Action Bar
-                SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          icon: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                          onPressed: () => Navigator.pop(ctx),
-                        ),
-                        if (_publicationState == null && !_submitting)
-                          IconButton(
-                            tooltip: 'מחק תמונה',
-                            icon: const Icon(
-                              Icons.delete_outline_rounded,
-                              color: Colors.white,
-                              size: 28,
-                            ),
-                            onPressed: () {
-                              Navigator.pop(ctx);
-                              _confirmAndDeleteImage(message);
-                            },
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: EdgeInsets.zero,
+        child: Stack(
+          children: [
+            Center(
+              child: InteractiveViewer(
+                minScale: 0.5,
+                maxScale: 4.0,
+                child: imageProvider != null
+                    ? Image(image: imageProvider, fit: BoxFit.contain)
+                    : const Icon(
+                        Icons.broken_image_rounded,
+                        color: Colors.white54,
+                        size: 64,
+                      ),
+              ),
             ),
-          ),
+            // Top Action Bar
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    IconButton(
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                    if (_publicationState == null && !_submitting)
+                      IconButton(
+                        tooltip: 'מחק תמונה',
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _confirmAndDeleteImage(message);
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1464,8 +1478,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         final selected = <String>{};
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            final imageMessages =
-                _messages.where((m) => m.mediaType == 'image').toList();
+            final imageMessages = _messages
+                .where((m) => m.mediaType == 'image')
+                .toList();
             // Combine paths from session and messages
             final allPaths = <String>[];
             for (final p in imgs) {
@@ -1587,18 +1602,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                   children: [
                                     ClipRRect(
                                       borderRadius: BorderRadius.circular(10),
-                                      child:
-                                          fileExists
-                                              ? Image.file(
-                                                file,
-                                                fit: BoxFit.cover,
-                                              )
-                                              : (path.startsWith('http')
-                                                  ? Image.network(
+                                      child: fileExists
+                                          ? Image.file(file, fit: BoxFit.cover)
+                                          : (path.startsWith('http')
+                                                ? Image.network(
                                                     path,
                                                     fit: BoxFit.cover,
                                                   )
-                                                  : Container(
+                                                : Container(
                                                     color:
                                                         AppColors.surfaceSubtle,
                                                     child: const Icon(
@@ -1628,10 +1639,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                       right: 4,
                                       child: Container(
                                         decoration: BoxDecoration(
-                                          color:
-                                              isSelected
-                                                  ? AppColors.primary
-                                                  : Colors.black45,
+                                          color: isSelected
+                                              ? AppColors.primary
+                                              : Colors.black45,
                                           shape: BoxShape.circle,
                                         ),
                                         padding: const EdgeInsets.all(2),
@@ -1658,15 +1668,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                                   (m) =>
                                                       m.localFilePath == path ||
                                                       m.mediaUrl == path,
-                                                  orElse:
-                                                      () => ChatMessageItem(
-                                                        id:
-                                                            'tmp_${DateTime.now().microsecondsSinceEpoch}',
-                                                        sender: ChatSender.user,
-                                                        localFilePath: path,
-                                                        timestamp:
-                                                            DateTime.now(),
-                                                      ),
+                                                  orElse: () => ChatMessageItem(
+                                                    id: 'tmp_${DateTime.now().microsecondsSinceEpoch}',
+                                                    sender: ChatSender.user,
+                                                    localFilePath: path,
+                                                    timestamp: DateTime.now(),
+                                                  ),
                                                 );
                                             _confirmAndDeleteImage(matchingMsg);
                                           },
@@ -2046,11 +2053,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder:
-            (_) => RemoteControlScreen(
-              session: session!,
-              deviceName: widget.deviceName,
-            ),
+        builder: (_) => RemoteControlScreen(
+          session: session!,
+          deviceName: widget.deviceName,
+        ),
       ),
     );
     if (mounted) {
@@ -2098,7 +2104,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               itemBuilder: (context, index) {
                 final message = _messages[index];
                 final isLast = index == _messages.length - 1;
-                final isLastBotMessage = index == _messages.lastIndexWhere((m) => m.sender == ChatSender.bot);
+                final isLastBotMessage =
+                    index ==
+                    _messages.lastIndexWhere((m) => m.sender == ChatSender.bot);
                 return _buildMessageBubble(
                   message,
                   isLastMessage: isLast,
@@ -2132,14 +2140,13 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (session != null) {
       return ListenableBuilder(
         listenable: session,
-        builder:
-            (context, _) => label(
-              session.isConnected
-                  ? 'מחובר'
-                  : session.isConnecting
-                  ? 'מתחבר'
-                  : 'מנותק',
-            ),
+        builder: (context, _) => label(
+          session.isConnected
+              ? 'מחובר'
+              : session.isConnecting
+              ? 'מתחבר'
+              : 'מנותק',
+        ),
       );
     }
 
@@ -2197,12 +2204,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                     Navigator.pushReplacement(
                       context,
                       MaterialPageRoute(
-                        builder:
-                            (context) => ChatSessionsListScreen(
-                              deviceId: widget.deviceId,
-                              deviceName: widget.deviceName,
-                              session: widget.session,
-                            ),
+                        builder: (context) => ChatSessionsListScreen(
+                          deviceId: widget.deviceId,
+                          deviceName: widget.deviceName,
+                          session: widget.session,
+                        ),
                       ),
                     );
                   },
@@ -2348,17 +2354,13 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         !isUser &&
         (message.text.contains('המודעה מוכנה') ||
             message.text.contains('טיוטה'));
-    final missingFields =
-        !isUser
-            ? RemoteValidationService.getMissingFields(_vehicleData)
-            : <String>[];
+    final missingFields = !isUser
+        ? RemoteValidationService.getMissingFields(_vehicleData)
+        : <String>[];
     final hasPlate =
         (_vehicleData['license_plate'] ?? '').isNotEmpty ||
         _currentLicensePlate.isNotEmpty;
-    final showMissingFieldsForm =
-        !isUser &&
-        isLastBotMessage &&
-        hasPlate;
+    final showMissingFieldsForm = !isUser && isLastBotMessage && hasPlate;
 
     return ChatMessageBubble(
       isUser: isUser,
@@ -2424,11 +2426,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     child: ExpansionTile(
       title: Text('פרטי הרכב — ${_vehicleData['license_plate'] ?? ''}'),
       children: [
-        for (final key in vehicleFieldLabels.keys)
-          if ((_vehicleData[key] ?? '').isNotEmpty)
+        for (final key in _vehicleData.keys.where((k) => k != 'initial_missing_fields'))
+          if ((_vehicleData[key] ?? '').isNotEmpty && _vehicleData[key] != 'null')
             ListTile(
               dense: true,
-              title: Text(vehicleFieldLabels[key]!),
+              title: Text(vehicleFieldLabels[key] ?? key),
               trailing: Text(_vehicleData[key]!),
             ),
       ],
@@ -2450,8 +2452,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         (plateToLookup != null && plateToLookup.isNotEmpty
                 ? plateToLookup
                 : (_currentLicensePlate.isNotEmpty
-                    ? _currentLicensePlate
-                    : (_vehicleData['license_plate'] ?? '')))
+                      ? _currentLicensePlate
+                      : (_vehicleData['license_plate'] ?? '')))
             .trim();
 
     showModalBottomSheet(
@@ -2541,13 +2543,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               required IconData icon,
               required List<Widget> children,
             }) {
-              final visibleChildren =
-                  children.where((w) {
-                    if (w is SizedBox) {
-                      return w.height != 0 && w.width != 0;
-                    }
-                    return true;
-                  }).toList();
+              final visibleChildren = children.where((w) {
+                if (w is SizedBox) {
+                  return w.height != 0 && w.width != 0;
+                }
+                return true;
+              }).toList();
               if (visibleChildren.isEmpty) return const SizedBox.shrink();
 
               return Container(
@@ -2923,14 +2924,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     void action(String label, VoidCallback callback) => actions.add(
       ActionChip(label: Text(label), onPressed: busy ? null : callback),
     );
-    final plate =
-        _currentLicensePlate.isNotEmpty
-            ? _currentLicensePlate
-            : (_vehicleData['license_plate'] ?? '');
+    final plate = _currentLicensePlate.isNotEmpty
+        ? _currentLicensePlate
+        : (_vehicleData['license_plate'] ?? '');
     if (plate.isNotEmpty || _vehicleData.isNotEmpty)
       action('הצגת פרטי רכב', () => _showAggregatedGovVehicleDetails(plate));
-    final currentImageCount =
-        _messages.where((m) => m.mediaType == 'image').length;
+    final currentImageCount = _messages
+        .where((m) => m.mediaType == 'image')
+        .length;
     if (currentImageCount > 0)
       action('תמונות ($currentImageCount)', () => _showManageImagesSheet());
     if (state == null && _allDataFilled)
@@ -3014,18 +3015,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 width: double.infinity,
                 height: 200,
                 fit: BoxFit.cover,
-                errorBuilder:
-                    (_, _, _) => Container(
-                      color: AppColors.surfaceSubtle,
-                      height: 140,
-                      child: const Center(
-                        child: Icon(
-                          Icons.broken_image_rounded,
-                          color: AppColors.secondary,
-                          size: 36,
-                        ),
-                      ),
+                errorBuilder: (_, _, _) => Container(
+                  color: AppColors.surfaceSubtle,
+                  height: 140,
+                  child: const Center(
+                    child: Icon(
+                      Icons.broken_image_rounded,
+                      color: AppColors.secondary,
+                      size: 36,
                     ),
+                  ),
+                ),
               )
             else
               Container(
@@ -3141,12 +3141,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 LinearProgressIndicator(
-                  value:
-                      isPlaying && _currentAudioDuration.inMilliseconds > 0
-                          ? (_currentAudioPosition.inMilliseconds /
-                                  _currentAudioDuration.inMilliseconds)
-                              .clamp(0.0, 1.0)
-                          : 0.0,
+                  value: isPlaying && _currentAudioDuration.inMilliseconds > 0
+                      ? (_currentAudioPosition.inMilliseconds /
+                                _currentAudioDuration.inMilliseconds)
+                            .clamp(0.0, 1.0)
+                      : 0.0,
                   backgroundColor: AppColors.border,
                   color: AppColors.primaryAction,
                   minHeight: 4,
@@ -3269,113 +3268,112 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
             // Center: Text Input or Recording State
             Expanded(
-              child:
-                  _isRecording
-                      ? Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppColors.errorSoft,
-                          borderRadius: BorderRadius.circular(24),
-                          border: Border.all(
-                            color: AppColors.error.withValues(alpha: 0.3),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 10,
-                              height: 10,
-                              decoration: const BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: AppColors.error,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              'הקלטת הודעה... ${_formatDuration(_recordSeconds)}',
-                              style: GoogleFonts.heebo(
-                                color: AppColors.error,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            const Spacer(),
-                            TextButton(
-                              onPressed:
-                                  () => _stopAndSendRecording(cancel: true),
-                              child: Text(
-                                'ביטול',
-                                style: GoogleFonts.heebo(
-                                  color: AppColors.error,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                      : Container(
-                        decoration: BoxDecoration(
-                          color: AppColors.surfaceSubtle,
-                          borderRadius: BorderRadius.circular(24),
-                          border: Border.all(color: AppColors.border),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _textController,
-                                style: GoogleFonts.heebo(
-                                  color: AppColors.onSurface,
-                                  fontSize: 15,
-                                ),
-                                textDirection: TextDirection.rtl,
-                                maxLines: 4,
-                                minLines: 1,
-                                decoration: InputDecoration(
-                                  hintText: '...הודעה למכשיר',
-                                  hintStyle: GoogleFonts.heebo(
-                                    color: AppColors.secondary,
-                                    fontSize: 14,
-                                  ),
-                                  hintTextDirection: TextDirection.rtl,
-                                  border: InputBorder.none,
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 10,
-                                  ),
-                                ),
-                                onChanged: (text) => setState(() {}),
-                                onSubmitted: (_) => _sendTextMessage(),
-                              ),
-                            ),
-                            GestureDetector(
-                              onLongPressStart: (_) => _startRecording(),
-                              onLongPressEnd:
-                                  (_) => _stopAndSendRecording(cancel: false),
-                              child: IconButton(
-                                tooltip: 'הקלטת הודעה',
-                                icon: const Icon(
-                                  Icons.mic_none_rounded,
-                                  color: AppColors.secondary,
-                                  size: 22,
-                                ),
-                                onPressed: () {
-                                  if (_isRecording) {
-                                    _stopAndSendRecording(cancel: false);
-                                  } else {
-                                    _startRecording();
-                                  }
-                                },
-                              ),
-                            ),
-                          ],
+              child: _isRecording
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.errorSoft,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: AppColors.error.withValues(alpha: 0.3),
                         ),
                       ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: AppColors.error,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'הקלטת הודעה... ${_formatDuration(_recordSeconds)}',
+                            style: GoogleFonts.heebo(
+                              color: AppColors.error,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () =>
+                                _stopAndSendRecording(cancel: true),
+                            child: Text(
+                              'ביטול',
+                              style: GoogleFonts.heebo(
+                                color: AppColors.error,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : Container(
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceSubtle,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: AppColors.border),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _textController,
+                              style: GoogleFonts.heebo(
+                                color: AppColors.onSurface,
+                                fontSize: 15,
+                              ),
+                              textDirection: TextDirection.rtl,
+                              maxLines: 4,
+                              minLines: 1,
+                              decoration: InputDecoration(
+                                hintText: '...הודעה למכשיר',
+                                hintStyle: GoogleFonts.heebo(
+                                  color: AppColors.secondary,
+                                  fontSize: 14,
+                                ),
+                                hintTextDirection: TextDirection.rtl,
+                                border: InputBorder.none,
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 10,
+                                ),
+                              ),
+                              onChanged: (text) => setState(() {}),
+                              onSubmitted: (_) => _sendTextMessage(),
+                            ),
+                          ),
+                          GestureDetector(
+                            onLongPressStart: (_) => _startRecording(),
+                            onLongPressEnd: (_) =>
+                                _stopAndSendRecording(cancel: false),
+                            child: IconButton(
+                              tooltip: 'הקלטת הודעה',
+                              icon: const Icon(
+                                Icons.mic_none_rounded,
+                                color: AppColors.secondary,
+                                size: 22,
+                              ),
+                              onPressed: () {
+                                if (_isRecording) {
+                                  _stopAndSendRecording(cancel: false);
+                                } else {
+                                  _startRecording();
+                                }
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
             ),
             const SizedBox(width: 8),
 
@@ -3447,23 +3445,52 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   List<String> get _fieldsToShow {
-    List<String> fields;
-    if (widget.currentData['initial_missing_fields'] != null && widget.currentData['initial_missing_fields']!.isNotEmpty) {
+    List<String> fields = [];
+    if (widget.currentData['initial_missing_fields'] != null &&
+        widget.currentData['initial_missing_fields']!.isNotEmpty) {
       fields = widget.currentData['initial_missing_fields']!.split(',');
-    } else {
-      final manuallyFillable = [
-        'price', 'km', 'hand', 'previous_ownership', 'current_ownership',
-        'color', 'test_year', 'test_month', 'engine_capacity',
-        'phone', 'city', 'area', 'contact_name'
-      ];
-      final Set<String> combined = Set.from(widget.missingFields);
+    }
+    
+    final manuallyFillable = [
+      'maker',
+      'trim',
+      'model',
+      'year',
+      'fuel_type',
+      'gear_type',
+      'month',
+      'price',
+      'km',
+      'hand',
+      'previous_ownership',
+      'current_ownership',
+      'color',
+      'test_year',
+      'test_month',
+      'engine_capacity',
+      'phone',
+      'city',
+      'area',
+      'contact_name',
+    ];
+
+    final bool isGovIl = widget.currentData['govIl'] == 'true';
+
+    final Set<String> combined = Set.from(fields);
+    // Include all explicitly requested missing fields
+    combined.addAll(widget.missingFields);
+    
+    // If NOT govIl, include any field that already has a value, so the user can edit it if needed.
+    if (!isGovIl) {
       for (final f in manuallyFillable) {
-        if ((widget.currentData[f] ?? '').isNotEmpty) {
+        final val = widget.currentData[f];
+        if (val != null && val.isNotEmpty && val != 'null') {
           combined.add(f);
         }
       }
-      fields = combined.toList();
     }
+    
+    fields = combined.toList();
 
     if (!fields.contains('km')) {
       fields.add('km');
@@ -3475,7 +3502,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         !fields.contains('current_ownership')) {
       fields.add('current_ownership');
     }
-    if (widget.currentData['govIl'] == 'false') {
+    final bool hasTestDate = (widget.currentData['test_year'] ?? '').isNotEmpty &&
+                             (widget.currentData['test_month'] ?? '').isNotEmpty;
+    if (!isGovIl || !hasTestDate) {
       if (!fields.contains('test_until')) fields.add('test_until');
       fields.remove('test_year');
       fields.remove('test_month');
@@ -3487,20 +3516,22 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     for (final field in _fieldsToShow) {
       var existingVal = (widget.currentData[field] ?? '').trim();
       if (field == 'km' && (existingVal.isEmpty || existingVal == '0')) {
-        final estKm = (widget.currentData['estimatedKm'] ??
-                widget.currentData['kilometer_test_aharon'] ??
-                '')
-            .trim();
+        final estKm =
+            (widget.currentData['estimatedKm'] ??
+                    widget.currentData['kilometer_test_aharon'] ??
+                    '')
+                .trim();
         if (estKm.isNotEmpty && estKm != '0') {
           existingVal = estKm;
         }
       }
       if (field == 'previous_ownership' && existingVal.isEmpty) {
-        final prev = (widget.currentData['ownershipHistory'] ??
-                widget.currentData['prev_ownership'] ??
-                widget.currentData['previousOwnership'] ??
-                '')
-            .trim();
+        final prev =
+            (widget.currentData['ownershipHistory'] ??
+                    widget.currentData['prev_ownership'] ??
+                    widget.currentData['previousOwnership'] ??
+                    '')
+                .trim();
         if (prev.isNotEmpty) {
           existingVal = prev;
         }
@@ -3508,6 +3539,13 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
       if (field == 'test_until') {
         _noTest = widget.currentData['no_test'] == 'true';
+        if (existingVal.isEmpty) {
+          final tm = widget.currentData['test_month'];
+          final ty = widget.currentData['test_year'];
+          if (tm != null && tm.isNotEmpty && ty != null && ty.isNotEmpty && ty != 'null' && tm != 'null') {
+            existingVal = '${tm.padLeft(2, '0')}/$ty';
+          }
+        }
         if (!_controllers.containsKey(field)) {
           final c = TextEditingController(text: existingVal);
           c.addListener(() {
@@ -3533,6 +3571,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           if (_dropdownValues[field] == null ||
               _dropdownValues[field]!.isEmpty) {
             _dropdownValues[field] = 'פרטי';
+          }
+        } else if (existingVal.isNotEmpty) {
+          // If the current saved value isn't in the predefined options, we still want to keep it.
+          if (_dropdownValues[field] == null || _dropdownValues[field]!.isEmpty) {
+            _dropdownValues[field] = existingVal;
           }
         }
       } else {
@@ -3607,6 +3650,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
   List<String> _getFieldOptions(String field) {
     if (vehicleEnums.containsKey(field)) {
+      if (field == 'gear_type' || field == 'gear') {
+        return vehicleEnums[field]!
+            .where((e) => e == 'שידור ידני' || e == 'הילוכים אוטומטיים')
+            .toList();
+      }
       return vehicleEnums[field]!;
     }
     if (field == 'month' || field == 'test_month') {
@@ -3630,9 +3678,8 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       if (_fieldsToShow.contains('test_until')) {
         updated['no_test'] = _noTest ? 'true' : 'false';
       }
-      if (widget.currentData['govIl'] != null) {
-        updated['govIl'] = widget.currentData['govIl']!;
-      }
+      final bool isGovIl = widget.currentData['govIl'] == 'true';
+      updated['govIl'] = isGovIl ? 'true' : 'false';
       for (final field in _fieldsToShow) {
         if (field == 'test_until' && _noTest) {
           updated[field] = '';
@@ -3718,7 +3765,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
                         color: AppColors.onSurface,
                       ),
                     ),
-                    if (widget.currentData['govIl'] == 'false')
+                    if (widget.currentData['govIl'] == 'false' ||
+                        (widget.currentData['govIl'] != 'true' &&
+                            (widget.currentData['maker'] ?? '').isEmpty))
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
                         child: Text(
@@ -3750,21 +3799,20 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             height: 42,
             child: ElevatedButton.icon(
               onPressed: _canSave ? _handleSave : null,
-              icon:
-                  _isSaving
-                      ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                      : const Icon(
-                        Icons.check_rounded,
+              icon: _isSaving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
                         color: Colors.white,
-                        size: 20,
                       ),
+                    )
+                  : const Icon(
+                      Icons.check_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
               label: Text(
                 _isSaving ? 'שומר פרטים...' : 'שמור פרטים',
                 style: GoogleFonts.heebo(
@@ -3775,11 +3823,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
               ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primaryAction,
-                disabledBackgroundColor:
-                    AppColors.primaryAction.withValues(alpha: 0.38),
+                disabledBackgroundColor: AppColors.primaryAction.withValues(
+                  alpha: 0.38,
+                ),
                 foregroundColor: Colors.white,
-                disabledForegroundColor:
-                    Colors.white.withValues(alpha: 0.6),
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.6),
                 elevation: 0,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
@@ -3794,7 +3842,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
   Widget _buildFieldRow(String field) {
     if (field == 'test_until') return _buildTestUntilRow();
-    
+
     final label = _getFieldLabel(field);
     final isDropdown = _isDropdownField(field);
 
@@ -3828,10 +3876,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             // 2. Input Field on the Left (Second child in RTL - physically to the left of field name!)
             Expanded(
               flex: 6,
-              child:
-                  isDropdown
-                      ? _buildDropdownInput(field)
-                      : _buildTextInput(field),
+              child: isDropdown
+                  ? _buildDropdownInput(field)
+                  : _buildTextInput(field),
             ),
           ],
         ),
@@ -3868,61 +3915,97 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             Expanded(
               flex: 4,
               child: GestureDetector(
-                onTap: _noTest ? null : () async {
-                  final date = await showDatePicker(
-                    context: context,
-                    initialDate: DateTime.now(),
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime(2050),
-                  );
-                  if (date != null) {
-                    setState(() {
-                      if (!_controllers.containsKey('test_until')) {
-                        _controllers['test_until'] = TextEditingController();
-                      }
-                      _controllers['test_until']!.text = "${date.month.toString().padLeft(2, '0')}/${date.year}";
-                    });
-                  }
-                },
+                onTap: _noTest
+                    ? null
+                    : () async {
+                        final date = await showDatePicker(
+                          context: context,
+                          initialDate: DateTime.now(),
+                          firstDate: DateTime(2000),
+                          lastDate: DateTime(2050),
+                        );
+                        if (date != null) {
+                          setState(() {
+                            if (!_controllers.containsKey('test_until')) {
+                              _controllers['test_until'] =
+                                  TextEditingController();
+                            }
+                            _controllers['test_until']!.text =
+                                "${date.month.toString().padLeft(2, '0')}/${date.year}";
+                          });
+                        }
+                      },
                 child: Container(
                   height: 38,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   decoration: BoxDecoration(
-                    color: _noTest ? AppColors.surfaceSubtle.withOpacity(0.5) : AppColors.surfaceSubtle,
+                    color: _noTest
+                        ? AppColors.surfaceSubtle.withOpacity(0.5)
+                        : AppColors.surfaceSubtle,
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(color: AppColors.border),
                   ),
                   alignment: Alignment.centerRight,
                   child: Text(
-                    _controllers['test_until']?.text.isNotEmpty == true 
-                        ? _controllers['test_until']!.text 
+                    _controllers['test_until']?.text.isNotEmpty == true
+                        ? _controllers['test_until']!.text
                         : 'בחר תאריך',
                     style: GoogleFonts.heebo(
                       fontSize: 13,
-                      color: _noTest ? AppColors.secondary : AppColors.onSurface,
+                      color: _noTest
+                          ? AppColors.secondary
+                          : AppColors.onSurface,
                     ),
                   ),
                 ),
               ),
             ),
+            const SizedBox(width: 8),
             Expanded(
               flex: 3,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Checkbox(
-                    value: _noTest,
-                    onChanged: (val) {
-                      setState(() {
-                        _noTest = val ?? false;
-                        if (_noTest) {
-                          _controllers['test_until']?.text = '';
-                        }
-                      });
-                    },
-                  ),
-                  Text('ללא טסט', style: GoogleFonts.heebo(fontSize: 12)),
-                ],
+              child: InkWell(
+                onTap: () {
+                  setState(() {
+                    _noTest = !_noTest;
+                    if (_noTest) {
+                      _controllers['test_until']?.text = '';
+                    }
+                  });
+                },
+                borderRadius: BorderRadius.circular(6),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: Checkbox(
+                        value: _noTest,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        onChanged: (val) {
+                          setState(() {
+                            _noTest = val ?? false;
+                            if (_noTest) {
+                              _controllers['test_until']?.text = '';
+                            }
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'ללא טסט',
+                      style: GoogleFonts.heebo(
+                        fontSize: 11,
+                        color: AppColors.onSurface,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -3932,8 +4015,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   Widget _buildDropdownInput(String field) {
-    final options = _getFieldOptions(field);
+    final options = List<String>.from(_getFieldOptions(field));
     final currentVal = _dropdownValues[field];
+    if (currentVal != null && currentVal.isNotEmpty && !options.contains(currentVal)) {
+      options.add(currentVal);
+    }
 
     return Container(
       height: 38,
@@ -3961,20 +4047,19 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             color: AppColors.secondary,
             size: 20,
           ),
-          items:
-              options.map((opt) {
-                return DropdownMenuItem<String>(
-                  value: opt,
-                  child: Text(
-                    opt,
-                    textDirection: TextDirection.rtl,
-                    style: GoogleFonts.heebo(
-                      fontSize: 13,
-                      color: AppColors.onSurface,
-                    ),
-                  ),
-                );
-              }).toList(),
+          items: options.map((opt) {
+            return DropdownMenuItem<String>(
+              value: opt,
+              child: Text(
+                opt,
+                textDirection: TextDirection.rtl,
+                style: GoogleFonts.heebo(
+                  fontSize: 13,
+                  color: AppColors.onSurface,
+                ),
+              ),
+            );
+          }).toList(),
           onChanged: (val) {
             setState(() {
               _dropdownValues[field] = val;

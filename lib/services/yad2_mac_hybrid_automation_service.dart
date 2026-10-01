@@ -612,6 +612,7 @@ class Yad2MacHybridAutomationService {
       case AutomationPhase.phase5c1:
       case AutomationPhase.phase5c2:
       case AutomationPhase.phase5c3:
+      case AutomationPhase.phase5c4:
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Select test date.',
@@ -2826,6 +2827,8 @@ class Yad2MacHybridAutomationService {
       case AutomationPhase.phase5c2:
         return AutomationPhase.phase5c3;
       case AutomationPhase.phase5c3:
+        return AutomationPhase.phase5c4;
+      case AutomationPhase.phase5c4:
         return AutomationPhase.phase5d;
       case AutomationPhase.phase5d:
         return AutomationPhase.phase5e;

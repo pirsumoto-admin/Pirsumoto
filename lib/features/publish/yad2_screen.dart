@@ -151,6 +151,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   bool _showPauseButton = false;
   bool _isPaused = false;
   bool _isLoginRequired = false;
+  bool _isManualKeyDataFilling = false;
   bool _isPresetLoginDialogOpen = false;
   bool _isReloading = false;
   // [WHATSAPP-DISABLED] _whatsAppStopReported was used to track WA reply status.
@@ -190,6 +191,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       resume: () {
         _publicationPaused = false;
         if (_publicationStopped || _webViewClosed) return;
+        _isManualKeyDataFilling = false;
         _automationService?.resumeAutomation();
         if (mounted) {
           setState(() {
@@ -198,6 +200,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     ? _automationService.isPaused as bool
                     : false;
             _showPauseButton = true;
+            _isManualKeyDataFilling = false;
             _statusMessage = 'ממשיך משלב $_savedStepDescription';
           });
         }
@@ -433,6 +436,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             .toList();
 
     debugPrint('[Yad2Screen] 🌳 AxTree: ${elements.length} elements captured');
+    for (var i = 0; i < elements.length; i++) {
+      debugPrint('  - [${i}] "${elements[i].label}" (${elements[i].role})');
+    }
 
     return UIContext(
       screenshot: screenshot,
@@ -829,6 +835,24 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               _openPresetLoginDialog();
             }
           },
+          onManualVehicleDetailsRequired: () {
+            if (mounted) {
+              setState(() {
+                _isPaused = true;
+                _isManualKeyDataFilling = true;
+                _showPauseButton = true;
+                _statusMessage =
+                    'נדרשת הזנה ידנית של פרטי הרכב (שליטה מרחוק). לאחר סיום ההזנה לחץ המשך.';
+              });
+              final identity = widget.publishData.publicationIdentity;
+              FirebaseChatReceiver.reportAutomationStatus(
+                identity: identity,
+                statusType: 'paused',
+                text:
+                    'נדרשת הזנה ידנית של פרטי הרכב ביד2 (שליטה מרחוק). לחץ על שליטה מרחוק להזנת הפרטים ולאחר מכן לחץ המשך.',
+              );
+            }
+          },
           onToggleOverlayVisibility: (visible) {
             if (mounted) {
               setState(() {
@@ -1040,15 +1064,23 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
+    return PopScope(
+      canPop: _automationComplete || _automationError || _publicationStopped,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        debugPrint(
+          '[Yad2-Screen] Back navigation prevented during active automation',
+        );
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
           if (_webViewVisible)
             RepaintBoundary(
               key: _webViewKey,
               child: WebViewWidget(controller: _controller),
             ),
-          if (!_hideOverlayForStep) _buildStatusOverlay(),
+          if (!_hideOverlayForStep && !_isManualKeyDataFilling) _buildStatusOverlay(),
           // Tap preview marker
           if (_tapMarkerX != null && _tapMarkerY != null)
             Positioned(
@@ -1097,6 +1129,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 onPressed: () async {
                   final identity = widget.publishData.publicationIdentity;
                   if (identity != null) {
+                    _isManualKeyDataFilling = false;
                     await FirebaseChatReceiver.setLocalPaused(
                       identity,
                       !_isPaused,
@@ -1104,6 +1137,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     return;
                   }
                   if (_isPaused) {
+                    _isManualKeyDataFilling = false;
                     _publicationPaused = false;
                     _automationService?.resumeAutomation();
                     setState(() {
@@ -1112,6 +1146,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                                   is Yad2AccessibilityAutomationService
                               ? _automationService.isPaused as bool
                               : false;
+                      _isManualKeyDataFilling = false;
                       _statusMessage = 'ממשיך משלב $_savedStepDescription';
                     });
                     FirebaseChatReceiver.reportAutomationStatus(
@@ -1150,7 +1185,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                 ),
               ),
             ),
-          if (_isPaused && !_publicationStopped && !_automationComplete)
+          if (_isPaused &&
+              !_publicationStopped &&
+              !_automationComplete &&
+              !_isManualKeyDataFilling)
             Positioned(
               top: MediaQuery.of(context).padding.top + 4,
               right: 16,
@@ -1243,7 +1281,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               ),
             ),
           // Floating Button to Setup Credentials / Preset Login Dialog
-          if (_isLoginRequired && !_hideOverlayForStep && !_automationComplete)
+          if (_isLoginRequired &&
+              !_hideOverlayForStep &&
+              !_automationComplete &&
+              !_isManualKeyDataFilling)
             Positioned(
               bottom: 24,
               left: 20,
@@ -1305,6 +1346,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
               ),
             ),
         ],
+      ),
       ),
     );
   }

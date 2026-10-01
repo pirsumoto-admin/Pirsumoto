@@ -278,17 +278,25 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         matches: MutableList<Match>
     ) {
         val labels = listOfNotNull(
+            node.viewIdResourceName,
             node.text?.toString(),
             node.contentDescription?.toString()
         )
 
         for (label in labels) {
-            val normalizedLabel = normalizeHebrew(label)
+            val normalizedLabel = if (label == node.viewIdResourceName) label.lowercase() else normalizeHebrew(label)
             var bestScore = 0.0
             var bestPriority = Int.MAX_VALUE
             for (i in normalizedTargetList.indices) {
                 val normalizedTarget = normalizedTargetList[i]
-                val score = similarity(normalizedLabel, normalizedTarget)
+                val targetToMatch = if (label == node.viewIdResourceName) normalizedTarget.lowercase() else normalizedTarget
+                
+                val score = if (label == node.viewIdResourceName && normalizedLabel.endsWith(targetToMatch)) {
+                    1.0
+                } else {
+                    similarity(normalizedLabel, targetToMatch)
+                }
+
                 if (score > bestScore) {
                     bestScore = score
                     bestPriority = i
@@ -338,6 +346,10 @@ class PirsumotoAccessibilityService : AccessibilityService() {
                 val foundNodes = root.findAccessibilityNodeInfosByText(longestWord)
                 if (foundNodes != null) {
                     candidates.addAll(foundNodes)
+                }
+                val foundById = root.findAccessibilityNodeInfosByViewId(longestWord)
+                if (foundById != null) {
+                    candidates.addAll(foundById)
                 }
             }
         }
@@ -415,15 +427,23 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             }
 
             val labels = listOfNotNull(
+                node.viewIdResourceName,
                 node.text?.toString(),
                 node.contentDescription?.toString()
             )
 
             for (label in labels) {
-                val normalizedLabel = normalizeHebrew(label)
+                // Keep camelCase/English IDs intact by not stripping English chars, but still normalize Hebrew
+                val normalizedLabel = if (label == node.viewIdResourceName) label.lowercase() else normalizeHebrew(label)
                 var bestScore = 0.0
                 for (normalizedTarget in normalizedTargetList) {
-                    val score = similarity(normalizedLabel, normalizedTarget)
+                    val targetToMatch = if (label == node.viewIdResourceName) normalizedTarget.lowercase() else normalizedTarget
+                    // For IDs, if it matches exactly or contains, give high score
+                    val score = if (label == node.viewIdResourceName && normalizedLabel.endsWith(targetToMatch)) {
+                         1.0
+                    } else {
+                         similarity(normalizedLabel, targetToMatch)
+                    }
                     if (score > bestScore) {
                         bestScore = score
                     }
@@ -553,8 +573,9 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         target: String,
         targetInstance: Int = 1,
         threshold: Double = 0.82,
-        offset: Int = 1
-    ): Rect? {
+        offset: Int = 1,
+        matchClassName: String? = null
+    ): Pair<Rect, String>? {
         if (root == null) return null
 
         val normalizedTargetList = target.split("|").map { normalizeHebrew(it) }
@@ -619,12 +640,19 @@ class PirsumotoAccessibilityService : AccessibilityService() {
                 val hasText = !node.text.isNullOrEmpty() || !node.contentDescription.isNullOrEmpty()
                 val isTextView = node.className?.toString()?.contains("TextView") == true
                 val isEditText = node.className?.toString()?.contains("EditText") == true
-                if (hasText || isTextView || isEditText || node.isClickable || node.isEditable) {
+                
+                val matchesClass = if (matchClassName != null) {
+                    node.className?.toString() == matchClassName
+                } else {
+                    hasText || isTextView || isEditText || node.isClickable || node.isEditable
+                }
+
+                if (matchesClass) {
                     currentOffset++
                     if (currentOffset == offset) {
                         val rect = Rect()
                         node.getBoundsInScreen(rect)
-                        return rect
+                        return Pair(rect, node.className?.toString() ?: "")
                     }
                 }
             }

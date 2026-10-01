@@ -628,10 +628,13 @@ class MainActivity : FlutterActivity() {
                     val targetInstance = call.argument<Int>("targetInstance") ?: 1
                     val threshold = call.argument<Double>("threshold") ?: 0.82
                     val offset = call.argument<Int>("offset") ?: 1
+                    val matchClassName = call.argument<String>("matchClassName")
 
-                    val bounds = service.findNodeAfterTarget(rootNode!!, target, targetInstance, threshold, offset)
-                    if (bounds != null) {
-                        result.success(mapOf("x" to bounds.centerX().toDouble(), "y" to bounds.centerY().toDouble()))
+                    val resultPair = service.findNodeAfterTarget(rootNode!!, target, targetInstance, threshold, offset, matchClassName)
+                    if (resultPair != null) {
+                        val bounds = resultPair.first
+                        val className = resultPair.second
+                        result.success(mapOf("x" to bounds.centerX().toDouble(), "y" to bounds.centerY().toDouble(), "className" to className))
                     } else {
                         Log.d("A11Y", "Node after target '$target' not found.")
                         result.success(null)

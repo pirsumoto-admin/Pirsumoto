@@ -11,6 +11,7 @@ import '../services/remote_api.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../database/sqlite_database_helper.dart';
 import '../webrtc/controller_webrtc_session.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 
 class ChatSessionManager {
   static final _changes = StreamController<String>.broadcast();
@@ -254,12 +255,11 @@ class ChatSessionManager {
     var r = request(deviceId, sessionId);
     r ??=
         (await FirebaseFirestore.instance
-                .collection('remote_chats')
-                .doc(deviceId)
-                .collection('requests')
-                .doc(sessionId)
-                .get(const GetOptions(source: Source.server)))
-            .data();
+            .collection('remote_chats')
+            .doc(deviceId)
+            .collection('requests')
+            .doc(sessionId)
+            .get(const GetOptions(source: Source.server))).data();
     if (r == null) {
       if (command == 'cancel') {
         final draft = await SqliteDatabaseHelper.instance.getSession(sessionId);
@@ -353,11 +353,12 @@ class ChatSessionManager {
       final bytes = await file.readAsBytes();
       final path = 'publication_media/$uid/$deviceId/${draft.id}/$attemptId/$i';
       final suffix = file.path.toLowerCase();
-      final mime = suffix.endsWith('.png')
-          ? 'image/png'
-          : suffix.endsWith('.webp')
-          ? 'image/webp'
-          : 'image/jpeg';
+      final mime =
+          suffix.endsWith('.png')
+              ? 'image/png'
+              : suffix.endsWith('.webp')
+              ? 'image/webp'
+              : 'image/jpeg';
       await FirebaseStorage.instance
           .ref(path)
           .putData(bytes, SettableMetadata(contentType: mime))
@@ -371,16 +372,38 @@ class ChatSessionManager {
     if (FirebaseAuth.instance.currentUser?.uid != uid)
       throw StateError('החשבון השתנה; יש להתחבר מחדש');
     final vehiclePayload = Map<String, String>.from(draft.vehicleData);
-    if (!vehiclePayload.containsKey('includeYad2') && !vehiclePayload.containsKey('include_yad2')) {
-      try {
-        final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-        final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
-        final bool includeYad2 = settings?['includeYad2'] ?? true;
-        vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';
-      } catch (_) {
+    if (!vehiclePayload.containsKey('govIl') ||
+        vehiclePayload['govIl'] == null ||
+        vehiclePayload['govIl']!.isEmpty) {
+      final isGovIl = draft.vehicleData['govIl'] == 'true';
+      vehiclePayload['govIl'] = isGovIl ? 'true' : 'false';
+    }
+    try {
+      final userDoc =
+          await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+      final bool includeYad2 = settings?['includeYad2'] ?? true;
+      vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';
+    } catch (_) {
+      if (!vehiclePayload.containsKey('includeYad2') &&
+          !vehiclePayload.containsKey('include_yad2')) {
         vehiclePayload['includeYad2'] = 'true';
       }
     }
+    // try {
+    //   Fluttertoast.showToast(msg: 'govIl: ${vehiclePayload['govIl']} | Year: ${vehiclePayload['test_year']} | Month: ${vehiclePayload['test_month']} | Until: ${vehiclePayload['test_until']}');
+    // } catch (_) {}
+
+    // WORKAROUND: Pass govIl state via description because the deployed Cloud Function
+    // strips the govIl field until IAM permissions are fixed and it can be redeployed.
+    if (vehiclePayload['govIl'] == 'false') {
+      final desc = vehiclePayload['description'] ?? '';
+      vehiclePayload['description'] = '$desc [NO_GOVIL]'.trim();
+    } else if (vehiclePayload['govIl'] == 'true') {
+      final desc = vehiclePayload['description'] ?? '';
+      vehiclePayload['description'] = '$desc [GOVIL]'.trim();
+    }
+
     final result = await RemoteApi.post(deviceId, {
       'action': 'enqueue_publication',
       'requestId': draft.id,

@@ -25,8 +25,18 @@ class RemoteValidationService {
   static const cloudFunctionUrl = RemoteApi.url;
   static String normalizeTranscribedText(String text) =>
       VehicleSchema.normalizeSpeech(text);
-  static List<String> getMissingFields(Map<String, String> state) =>
-      VehicleSchema.missing(state);
+  static List<String> getMissingFields(Map<String, String> state) {
+    final missing = VehicleSchema.missing(state).toList();
+    final hasNoTest = state['no_test'] == 'true';
+    final hasTestYear = (state['test_year'] ?? '').trim().isNotEmpty;
+    final hasTestMonth = (state['test_month'] ?? '').trim().isNotEmpty;
+    final hasTestUntil = (state['test_until'] ?? '').trim().isNotEmpty;
+    
+    if (!hasNoTest && !hasTestUntil && (!hasTestYear || !hasTestMonth)) {
+      if (!missing.contains('test_until')) missing.add('test_until');
+    }
+    return missing;
+  }
   static List<String> validateValues(Map<String, String> state) =>
       VehicleSchema.errors(state);
 

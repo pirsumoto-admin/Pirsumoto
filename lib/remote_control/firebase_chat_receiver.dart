@@ -616,18 +616,18 @@ class FirebaseChatReceiver {
       if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id.attemptId))
         throw StateError('Invalid attempt');
       final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
-      if (!vehicle.containsKey('includeYad2') && !vehicle.containsKey('include_yad2')) {
-        try {
-          final ownerUid = data['ownerUid'] as String?;
-          if (ownerUid != null && ownerUid.isNotEmpty) {
-            final userDoc = await _firestore.collection('users').doc(ownerUid).get();
-            final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
-            if (settings != null && settings.containsKey('includeYad2')) {
-              vehicle['includeYad2'] = (settings['includeYad2'] == true) ? 'true' : 'false';
-            }
+      try {
+        final ownerUid = data['ownerUid'] as String?;
+        if (ownerUid != null && ownerUid.isNotEmpty) {
+          final userDoc =
+              await _firestore.collection('users').doc(ownerUid).get();
+          final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+          if (settings != null && settings.containsKey('includeYad2')) {
+            vehicle['includeYad2'] =
+                (settings['includeYad2'] == true) ? 'true' : 'false';
           }
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
       if (!VehicleSchema.isComplete(vehicle))
         throw StateError('פרטי הרכב אינם תקינים');
       final attachments = List<Map<String, dynamic>>.from(
@@ -694,8 +694,16 @@ class FirebaseChatReceiver {
       // A pause requested during download is acknowledged before opening a site.
       await _handleControl();
       if (!isCurrent(id) || _paused) return;
-      final bool includeYad2 = (vehicle['includeYad2'] ?? vehicle['include_yad2']) != 'false';
-      if (!await _report(id, 'publishing', includeYad2 ? 'מתחיל פרסום ביד2' : 'מתחיל פרסום בפייסבוק')) {
+      final rawIncYad2 = vehicle['includeYad2'] ?? vehicle['include_yad2'];
+      final bool includeYad2 =
+          rawIncYad2 != null
+              ? rawIncYad2.toString().toLowerCase() != 'false'
+              : true;
+      if (!await _report(
+        id,
+        'publishing',
+        includeYad2 ? 'מתחיל פרסום ביד2' : 'מתחיל פרסום בפייסבוק',
+      )) {
         await _handleControl();
         return;
       }

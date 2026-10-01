@@ -321,6 +321,7 @@ class Yad2AccessibilityAutomationService {
 
   int? _ocrFrameId;
   final Map<String, TextLocation?> _ocrCache = {};
+  String? _yearDropdownClassName;
 
   // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey disabled.
   // final bool startedFromWhatsApp;
@@ -328,6 +329,7 @@ class Yad2AccessibilityAutomationService {
 
   final void Function(bool visible)? onToggleOverlayVisibility;
   final VoidCallback? onLoginRequired;
+  final VoidCallback? onManualVehicleDetailsRequired;
   String? extractedDescription;
   static String? lastExtractedDescription;
 
@@ -350,6 +352,7 @@ class Yad2AccessibilityAutomationService {
     this.onAutomationFallback,
     this.onFirstStepDetected,
     this.onLoginRequired,
+    this.onManualVehicleDetailsRequired,
     this.onTapPreview,
     this.onToggleOverlayVisibility,
   }) {
@@ -518,6 +521,8 @@ class Yad2AccessibilityAutomationService {
   bool _stopped = false;
   bool _started = false;
   bool _actionInterrupted = false;
+  double? _lastTapScreenPhysicalX;
+  double? _lastTapScreenPhysicalY;
 
   bool get _inputBlocked {
     if (!_stopped && !_isPaused) return false;
@@ -569,13 +574,14 @@ class Yad2AccessibilityAutomationService {
     } catch (_) {}
   }
 
-  void pauseAutomation() {
+  void pauseAutomation({AutomationPhase? resumePhase}) {
     if (_stopped) return;
     _cancelImageUpload();
     _scheduler.invalidate();
     debugPrint('[Yad2-A11y] Pause requested');
     _isPaused = true;
-    _pausedPhase = _currentPhase ?? AutomationPhase.phase1;
+    _pausedPhase =
+        resumePhase ?? _pausedPhase ?? _currentPhase ?? AutomationPhase.phase1;
     onToggleOverlayVisibility?.call(true);
   }
 
@@ -815,7 +821,7 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Submit the vehicle lookup result.',
-          action: () => _tapRequired('לשלב הבא|שלב הבא|לשלב'),
+          action: _actionSubmitVehicleLookup,
           validation: const _StepValidation(
             mustContain: 'צבע|צבע*|צבע הרכב|צבע הרכב*',
             timeout: Duration(seconds: 10),
@@ -850,16 +856,24 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Open road-month dropdown.',
-          action:
-              () => _openDropdownByLabel(
-                'חודש עלייה לכביש|חודש עליה לכביש',
-                skipToPhase:
-                    AutomationPhase
-                        .phase5b, // Treat phase5b as complete, next is phase5c
-              ),
-          validation: _StepValidation(
-            mustContain: VehiclePublishData.monthToHebrew(formData.month),
-          ),
+          action: () async {
+            if (formData.month.isEmpty)
+              return const _StepActionResult.success(
+                completeAs: AutomationPhase.phase5b,
+              );
+            return _openDropdownByLabel(
+              'חודש עלייה לכביש|חודש עליה לכביש',
+              skipToPhase: AutomationPhase.phase5b,
+            );
+          },
+          validation:
+              formData.month.isEmpty
+                  ? const _StepValidation()
+                  : _StepValidation(
+                    mustContain: VehiclePublishData.monthToHebrew(
+                      formData.month,
+                    ),
+                  ),
         );
       case AutomationPhase.phase5b:
         final month = VehiclePublishData.monthToHebrew(formData.month);
@@ -867,15 +881,22 @@ class Yad2AccessibilityAutomationService {
         return _AutomationStepSpec(
           phase: phase,
           goal: 'Select road month.',
-          action: () => _selectOpenOption(search, selectedValue: month),
-          validation: _StepValidation(
-            selectedValue: month,
-            selectedAfterLabel: 'חודש עלייה לכביש|חודש עליה לכביש',
-            selectedAfterOffset: 1,
-            mustNotContain: null,
-            custom: null,
-            timeout: const Duration(seconds: 6),
-          ),
+          action: () async {
+            if (formData.month.isEmpty)
+              return const _StepActionResult.success();
+            return _selectOpenOption(search, selectedValue: month);
+          },
+          validation:
+              formData.month.isEmpty
+                  ? const _StepValidation()
+                  : _StepValidation(
+                    selectedValue: month,
+                    selectedAfterLabel: 'חודש עלייה לכביש|חודש עליה לכביש',
+                    selectedAfterOffset: 1,
+                    mustNotContain: null,
+                    custom: null,
+                    timeout: const Duration(seconds: 6),
+                  ),
         );
       case AutomationPhase.phase5c:
         return _AutomationStepSpec(
@@ -887,30 +908,122 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase5c1:
         return _AutomationStepSpec(
           phase: phase,
-          goal: 'Open test-month dropdown.',
-          action:
-              () => _openDropdownByLabel(
-                'טסט עד',
-                skipToPhase: AutomationPhase.phase5c3,
+          goal: 'Open test-year dropdown.',
+          action: () async {
+            if (formData.govIl || formData.noTest)
+              return const _StepActionResult.success(
+                completeAs: AutomationPhase.phase5d,
+              );
+            final opened = await _runOnce(
+              'dropdown:testYear',
+              () => _retryUntil(
+                () => _performWithPopupHandling(() async {
+                  // First try by resource IDs (testDate is the primary year field under "טסט עד*", lastTestDateYear is the fallback)
+                  if (await tapSmart('testDate|lastTestDateYear|בחירת שנה|שנה')) return true;
+                  // Otherwise try offsets below the main label
+                  var className = await toolTapNodeAfter('טסט עד*|טסט עד', offset: 1);
+                  if (className != null) {
+                    _yearDropdownClassName = className;
+                    return true;
+                  }
+                  className = await toolTapNodeAfter('טסט עד*|טסט עד', offset: 2);
+                  if (className != null) {
+                    _yearDropdownClassName = className;
+                    return true;
+                  }
+                  return tapSmart('טסט עד*|טסט עד');
+                }),
+                timeout: const Duration(seconds: 8),
               ),
-          validation: _StepValidation(
-            mustContain: VehiclePublishData.monthToHebrew(
-              formData.testMonth ?? '',
-            ),
-          ),
+            );
+            return opened
+                ? const _StepActionResult.success()
+                : const _StepActionResult.failure('Test year dropdown did not open.');
+          },
+          validation:
+              (formData.govIl || formData.noTest)
+                  ? const _StepValidation()
+                  : _StepValidation(mustContain: formData.testYear),
         );
       case AutomationPhase.phase5c2:
         return _AutomationStepSpec(
           phase: phase,
-          goal: 'Open test-year dropdown.',
-          action: () => _openDropdownByLabel('שנה'),
-          validation: _StepValidation(mustContain: formData.testYear),
+          goal: 'Select test year.',
+          action: () async {
+            if (formData.govIl || formData.noTest)
+              return const _StepActionResult.success();
+            if (formData.testYear != null && formData.testYear!.isNotEmpty) {
+              await _selectOpenOption(
+                formData.testYear!,
+                selectedValue: formData.testYear!,
+              );
+            }
+            return const _StepActionResult.success();
+          },
+          validation: const _StepValidation(),
         );
       case AutomationPhase.phase5c3:
         return _AutomationStepSpec(
           phase: phase,
-          goal: 'Select test date.',
-          action: _actionTestDate,
+          goal: 'Open test-month dropdown.',
+          action: () async {
+            if (formData.govIl || formData.noTest)
+              return const _StepActionResult.success(
+                completeAs: AutomationPhase.phase5d,
+              );
+            final opened = await _runOnce(
+              'dropdown:testMonth',
+              () => _retryUntil(
+                () => _performWithPopupHandling(() async {
+                  // Try by resource IDs first
+                  if (await tapSmart('testMonth|lastTestDateMonth|בחירת חודש|חודש')) return true;
+                  // If we captured the year's class, use it to find the NEXT element of the same type.
+                  if (_yearDropdownClassName != null && _yearDropdownClassName!.isNotEmpty) {
+                    // Try offset 1 and 2 for the month dropdown of the SAME type
+                    if (await toolTapNodeAfter('טסט עד*|טסט עד', offset: 1, matchClassName: _yearDropdownClassName) != null) return true;
+                    if (await toolTapNodeAfter('טסט עד*|טסט עד', offset: 2, matchClassName: _yearDropdownClassName) != null) return true;
+                  } else {
+                    // Try offsets (it's further down than year)
+                    if (await toolTapNodeAfter('טסט עד*|טסט עד', offset: 2) != null) return true;
+                    if (await toolTapNodeAfter('טסט עד*|טסט עד', offset: 3) != null) return true;
+                    if (await toolTapNodeAfter('טסט עד*|טסט עד', offset: 4) != null) return true;
+                  }
+                  return tapSmart('טסט עד*|טסט עד');
+                }),
+                timeout: const Duration(seconds: 8),
+              ),
+            );
+            return opened
+                ? const _StepActionResult.success()
+                : const _StepActionResult.failure('Test month dropdown did not open.');
+          },
+          validation:
+              (formData.govIl || formData.noTest)
+                  ? const _StepValidation()
+                  : _StepValidation(
+                    mustContain: VehiclePublishData.monthToHebrew(
+                      formData.testMonth ?? '',
+                    ),
+                  ),
+        );
+      case AutomationPhase.phase5c4:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Select test month.',
+          action: () async {
+            if (formData.govIl || formData.noTest)
+              return const _StepActionResult.success();
+            if (formData.testMonth != null && formData.testMonth!.isNotEmpty) {
+              final monthHebrew = VehiclePublishData.monthToHebrew(
+                formData.testMonth!,
+              );
+              await _selectOpenOption(
+                _variants(monthHebrew, formData.testMonth!),
+                selectedValue: monthHebrew,
+              );
+            }
+            return const _StepActionResult.success();
+          },
           validation: const _StepValidation(),
         );
       case AutomationPhase.phase5d:
@@ -1214,6 +1327,7 @@ class Yad2AccessibilityAutomationService {
         'Could not enter and verify the license number.',
       );
     }
+    await showToast('govIl: ${formData.govIl}');
     final searched = await _performWithPopupHandling(() => tapSmart('חיפוש'));
     return searched
         ? const _StepActionResult.success()
@@ -1228,6 +1342,35 @@ class Yad2AccessibilityAutomationService {
     return tapped
         ? const _StepActionResult.success()
         : _StepActionResult.failure('Could not tap "$text".');
+  }
+
+  Future<_StepActionResult> _actionSubmitVehicleLookup() async {
+    final tapped = await _tapRequired('לשלב הבא|שלב הבא|לשלב');
+    if (!tapped.success) return tapped;
+
+    if (!formData.govIl) {
+      debugPrint(
+        '[Yad2-A11y] govIl is false: waiting 800ms and tapping manual entry button...',
+      );
+      await Future.delayed(const Duration(milliseconds: 800));
+      final manualTap = await _retryUntil(
+        () => _performWithPopupHandling(
+          () => tapSmart('המשך לפרסום ידני|פרסום ידני|הזנה ידנית|הזנת נתונים ידנית|לפרסום ידני|מילוי ידני'),
+        ),
+        timeout: const Duration(seconds: 3),
+      );
+
+      if (!manualTap) {
+        debugPrint('[Yad2-A11y] Failed to tap manual entry button');
+      }
+
+      await Future.delayed(const Duration(milliseconds: 600));
+      _pausedPhase = AutomationPhase.phase4;
+      pauseAutomation(resumePhase: AutomationPhase.phase4);
+      onManualVehicleDetailsRequired?.call();
+    }
+
+    return const _StepActionResult.success();
   }
 
   Future<_StepActionResult> _openDropdownByLabel(
@@ -1251,7 +1394,9 @@ class Yad2AccessibilityAutomationService {
         final lower = existingText.toLowerCase();
         if (!lower.contains('בחיר') &&
             !lower.contains('בחר') &&
-            !lower.contains('הזן')) {
+            !lower.contains('הזן') &&
+            !lower.contains('שנה') &&
+            !lower.contains('חודש')) {
           debugPrint(
             '[Yad2-A11y] Dropdown "$label" already filled with: "$existingText". Treating as complete: ${skipToPhase.name}.',
           );
@@ -1264,7 +1409,7 @@ class Yad2AccessibilityAutomationService {
       'dropdown:$label',
       () => _retryUntil(
         () => _performWithPopupHandling(() async {
-          if (await toolTapNodeAfter(label)) return true;
+          if (await toolTapNodeAfter(label, offset: checkOffset) != null) return true;
           return tapSmart(label);
         }),
         timeout: const Duration(seconds: 8),
@@ -1347,24 +1492,6 @@ class Yad2AccessibilityAutomationService {
         () => _performWithPopupHandling(() => tapSmart('ללא טסט')),
         timeout: const Duration(seconds: 4),
       );
-    }
-    return const _StepActionResult.success();
-  }
-
-  Future<_StepActionResult> _actionTestDate() async {
-    if (!formData.govIl && !formData.noTest) {
-      if (formData.testMonth != null && formData.testMonth!.isNotEmpty) {
-        final monthHebrew = VehiclePublishData.monthToHebrew(formData.testMonth!);
-        await _selectOpenOption(
-          _variants(monthHebrew, formData.testMonth!),
-          selectedValue: monthHebrew,
-        );
-      }
-      if (formData.testYear != null && formData.testYear!.isNotEmpty) {
-        // Open year dropdown and select
-        await _openDropdownByLabel('שנה');
-        await _selectOpenOption(formData.testYear!, selectedValue: formData.testYear!);
-      }
     }
     return const _StepActionResult.success();
   }
@@ -1503,7 +1630,7 @@ class Yad2AccessibilityAutomationService {
     final km = _nonEmpty(formData.kilometers, fallback: '0');
     final entered = await _retryUntil(
       () => _performWithPopupHandling(() async {
-        if (!await toolTapNodeAfter('קילומטראז|קילומטר|נסועה')) return false;
+        if ((await toolTapNodeAfter('קילומטראז|קילומטר|נסועה')) == null) return false;
         await Future.delayed(const Duration(milliseconds: 500));
         await toolEnterTextAtFocused(km);
         if (await _verifyInputAfter('קילומטראז|קילומטר|נסועה', km)) return true;
@@ -1708,7 +1835,7 @@ class Yad2AccessibilityAutomationService {
     }
 
     final fieldTapped = await _retryUntil(
-      () => toolTapNodeAfter(label),
+      () async => (await toolTapNodeAfter(label)) != null,
       timeout: const Duration(seconds: 8),
     );
     if (!fieldTapped) {
@@ -1745,7 +1872,7 @@ class Yad2AccessibilityAutomationService {
       'price:enter',
       () => _retryUntil(() async {
         if (await _isDescriptionStep()) return false;
-        if (!await toolTapNodeAfter(_priceLabel)) return false;
+        if ((await toolTapNodeAfter(_priceLabel)) == null) return false;
         await Future<void>.delayed(const Duration(milliseconds: 500));
         await toolEnterTextAtFocused(price);
         if (await _verifyInputAfter(_priceLabel, price)) return true;
@@ -1816,7 +1943,7 @@ class Yad2AccessibilityAutomationService {
       'dropdown:$label',
       () => _retryUntil(
         () => _performWithPopupHandling(() async {
-          if (await toolTapNodeAfter(label, offset: labelOffset)) return true;
+          if ((await toolTapNodeAfter(label, offset: labelOffset)) != null) return true;
           if (await tapSmart(label)) return true;
           return false;
         }),
@@ -1883,9 +2010,15 @@ class Yad2AccessibilityAutomationService {
               // await showToast('Terms Check: Found ${allCheckboxes.length} CheckBoxes');
 
               if (allCheckboxes.isNotEmpty) {
-                debugPrint('[Yad2-A11y] Tapping CheckBoxes via native ACTION_CLICK.');
-                final clickedCount = await _automationChannel.invokeMethod<int>('clickCheckboxes');
-                debugPrint('[Yad2-A11y] Native ACTION_CLICK clicked $clickedCount checkboxes.');
+                debugPrint(
+                  '[Yad2-A11y] Tapping CheckBoxes via native ACTION_CLICK.',
+                );
+                final clickedCount = await _automationChannel.invokeMethod<int>(
+                  'clickCheckboxes',
+                );
+                debugPrint(
+                  '[Yad2-A11y] Native ACTION_CLICK clicked $clickedCount checkboxes.',
+                );
                 await Future.delayed(const Duration(milliseconds: 600));
                 _termsCheckboxAttempted = true;
                 return true;
@@ -2072,28 +2205,37 @@ class Yad2AccessibilityAutomationService {
     }
   }
 
-  Future<bool> toolTapNodeAfter(
+  Future<String?> toolTapNodeAfter(
     String targetText, {
     int targetInstance = 1,
     double threshold = 0.82,
     double deltaX = 0,
     double deltaY = 0,
     int offset = 1,
+    String? matchClassName,
   }) async {
-    if (_inputBlocked) return false;
+    if (_inputBlocked) return null;
     try {
-      final bounds = await _getStableBounds('findNodeAfterAndGetBounds', {
-        'target': targetText,
-        'targetInstance': targetInstance,
-        'threshold': threshold,
-        'offset': offset,
-      });
-      if (bounds == null) return false;
-      await _tapBounds(bounds, deltaX: deltaX, deltaY: deltaY);
-      return true;
+      final result = await _automationChannel.invokeMapMethod<String, dynamic>(
+        'findNodeAfterAndGetBounds',
+        {
+          'target': targetText,
+          'targetInstance': targetInstance,
+          'threshold': threshold,
+          'offset': offset,
+          if (matchClassName != null) 'matchClassName': matchClassName,
+        },
+      );
+      if (result == null) return null;
+      final x = result['x'] as double;
+      final y = result['y'] as double;
+      final className = result['className'] as String?;
+      
+      await _tapBounds({'x': x, 'y': y}, deltaX: deltaX, deltaY: deltaY);
+      return className ?? '';
     } catch (e) {
       debugPrint('[Yad2-A11y] tapNodeAfter failed: $e');
-      return false;
+      return null;
     }
   }
 
@@ -2197,7 +2339,7 @@ class Yad2AccessibilityAutomationService {
 
   Future<bool> toolEnterTextNear(String label, String value) async {
     if (_inputBlocked) return false;
-    final tapped = await toolTapNodeAfter(label) || await tapSmart(label);
+    final tapped = (await toolTapNodeAfter(label)) != null || await tapSmart(label);
     if (!tapped) return false;
     await Future.delayed(const Duration(milliseconds: 500));
     return await toolEnterTextAtFocused(value);
@@ -2205,6 +2347,8 @@ class Yad2AccessibilityAutomationService {
 
   Future<void> toolTapScreen(double x, double y) async {
     if (_inputBlocked) throw StateError('Automation paused before tap');
+    _lastTapScreenPhysicalX = x;
+    _lastTapScreenPhysicalY = y;
     final tapped = await _automationChannel.invokeMethod<bool>('tapScreen', {
       'x': x,
       'y': y,
@@ -2296,7 +2440,7 @@ class Yad2AccessibilityAutomationService {
             deltaY: (call.args['deltaY'] as num?)?.toDouble() ?? 0,
             deltaX: (call.args['deltaX'] as num?)?.toDouble() ?? 0,
           );
-          return Yad2ToolResult(ok, ok ? 'tapped node after' : 'tap failed');
+          return Yad2ToolResult(ok != null, ok != null ? 'tapped node after' : 'tap failed');
         case Yad2ToolName.tapNodeBefore:
           final ok = await toolTapNodeBefore(
             call.args['label'] as String? ?? call.args['text'] as String? ?? '',
@@ -3091,6 +3235,8 @@ class Yad2AccessibilityAutomationService {
       case AutomationPhase.phase5c2:
         return AutomationPhase.phase5c3;
       case AutomationPhase.phase5c3:
+        return AutomationPhase.phase5c4;
+      case AutomationPhase.phase5c4:
         return AutomationPhase.phase5d;
       case AutomationPhase.phase5d:
         return AutomationPhase.phase5e;

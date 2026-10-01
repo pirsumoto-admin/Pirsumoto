@@ -64,23 +64,27 @@ class P2PAutoPublishLauncher {
 
       // 4. Route to Facebook or Yad2 automation based on includeYad2
       bool includeYad2 = publishData.includeYad2;
-      if (!data.containsKey('includeYad2') && !data.containsKey('include_yad2')) {
-        try {
-          final uid = FirebaseChatReceiver.activeOwnerUid ?? FirebaseAuth.instance.currentUser?.uid;
-          if (uid != null && uid.isNotEmpty) {
-            final settings = await DBService().getSettingsData(uid);
-            if (settings != null && settings.containsKey('includeYad2')) {
-              includeYad2 = settings['includeYad2'] == true;
-            }
+      try {
+        final uid =
+            FirebaseChatReceiver.activeOwnerUid ??
+            FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null && uid.isNotEmpty) {
+          final settings = await DBService().getSettingsData(uid);
+          if (settings != null && settings.containsKey('includeYad2')) {
+            includeYad2 = settings['includeYad2'] == true;
           }
-        } catch (e) {
-          debugPrint('[P2PAutoPublish] Error checking user settings: $e');
         }
+      } catch (e) {
+        debugPrint('[P2PAutoPublish] Error checking user settings: $e');
       }
 
-      debugPrint('[P2PAutoPublish] Routing publication: includeYad2 = $includeYad2');
+      debugPrint(
+        '[P2PAutoPublish] Routing publication: includeYad2 = $includeYad2',
+      );
       if (!includeYad2) {
-        return await _openFacebookScreen(publishData.copyWith(includeYad2: false));
+        return await _openFacebookScreen(
+          publishData.copyWith(includeYad2: false),
+        );
       } else {
         return await _openYad2Screen(publishData.copyWith(includeYad2: true));
       }
@@ -115,9 +119,63 @@ class P2PAutoPublishLauncher {
     }
 
     final rawIncludeYad2 = data['includeYad2'] ?? data['include_yad2'];
-    final bool includeYad2 = rawIncludeYad2 != null
-        ? rawIncludeYad2.toString().toLowerCase() != 'false'
-        : true;
+    final bool includeYad2 =
+        rawIncludeYad2 != null
+            ? rawIncludeYad2.toString().toLowerCase() != 'false'
+            : true;
+
+    final testUntil = data['test_until']?.toString() ?? '';
+    String? testYear = data['test_year']?.toString();
+    String? testMonth = data['test_month']?.toString();
+    if (testUntil.isNotEmpty &&
+        ((testYear == null || testYear.isEmpty) ||
+            (testMonth == null || testMonth.isEmpty))) {
+      final parts = testUntil.split(RegExp(r'[/.-]'));
+      if (parts.length >= 2) {
+        if (testMonth == null || testMonth.isEmpty) testMonth = parts[0].trim();
+        if (testYear == null || testYear.isEmpty) {
+          String y = parts[1].trim();
+          if (y.length == 2) y = '20$y';
+          testYear = y;
+        }
+      }
+    }
+
+    final rawGovIl = data['govIl']?.toString().trim();
+    String desc = data['description']?.toString() ?? '';
+    bool hasNoGovilMarker = desc.contains('[NO_GOVIL]');
+    bool hasGovilMarker = desc.contains('[GOVIL]');
+    
+    final bool isGovIl;
+    if (hasNoGovilMarker) {
+      isGovIl = false;
+    } else if (hasGovilMarker) {
+      isGovIl = true;
+    } else {
+      isGovIl = (rawGovIl != null && rawGovIl.isNotEmpty)
+          ? (rawGovIl.toLowerCase() == 'true' || rawGovIl == '1')
+          : (testUntil.isEmpty &&
+              (data['maker'] != null &&
+                  data['maker']!.toString().isNotEmpty &&
+                  data['maker'] != 'לא ידוע'));
+    }
+
+    if (hasNoGovilMarker || hasGovilMarker) {
+      desc = desc.replaceAll('[NO_GOVIL]', '').replaceAll('[GOVIL]', '').trim();
+      data['description'] = desc;
+    }
+
+    final rawHandicapped = data['handicapped']?.toString().trim();
+    final bool handicapped =
+        rawHandicapped == 'כן' ||
+        rawHandicapped?.toLowerCase() == 'true' ||
+        rawHandicapped == '1';
+
+    final rawNoTest = data['no_test']?.toString().trim();
+    final bool noTest =
+        rawNoTest == 'כן' ||
+        rawNoTest?.toLowerCase() == 'true' ||
+        rawNoTest == '1';
 
     return VehiclePublishData(
       publicationIdentity: identity,
@@ -138,8 +196,8 @@ class P2PAutoPublishLauncher {
         data['test_month'],
       ], fallback: DateTime.now().month.toString()),
       price: _firstNonEmpty([data['price']]),
-      handicapped: data['handicapped'] == 'כן',
-      noTest: data['no_test'] == 'כן',
+      handicapped: handicapped,
+      noTest: noTest,
       images: resolvedImages,
       maker: _firstNonEmpty([data['maker']]),
       model: _firstNonEmpty([data['model']]),
@@ -151,9 +209,9 @@ class P2PAutoPublishLauncher {
       ], fallback: 'טוב'),
       description: _firstNonEmpty([data['description']]),
       expectedImageCount: expectedCount,
-      testYear: data['test_year'],
-      testMonth: data['test_month'],
-      govIl: (data['govIl'] ?? true) != false && data['govIl'] != 'false',
+      testYear: testYear,
+      testMonth: testMonth,
+      govIl: isGovIl,
       includeYad2: includeYad2,
     );
   }
