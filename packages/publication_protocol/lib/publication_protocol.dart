@@ -1,4 +1,7 @@
+export 'vehicle_description_template.dart';
 export 'vehicle_schema.dart';
+export 'vehicle_listing_extras.dart';
+export 'publication_notification.dart';
 
 /// Immutable correlation carried through both platform screens and callbacks.
 class PublicationIdentity {

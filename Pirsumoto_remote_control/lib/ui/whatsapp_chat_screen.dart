@@ -1,3 +1,5 @@
+import 'package:path/path.dart' as p;
+import '../services/publication_image.dart';
 import '../models/chat_message.dart';
 export '../models/chat_message.dart';
 import 'dart:convert';
@@ -17,6 +19,8 @@ import 'package:audioplayers/audioplayers.dart';
 import '../signaling/controller_signaling.dart';
 import '../webrtc/controller_webrtc_session.dart';
 import 'app_theme.dart';
+import 'audio_plate_dialog.dart';
+import '../services/audio_vehicle_form.dart';
 import 'chat_message_bubble.dart';
 import 'remote_control_screen.dart';
 import 'chat_sessions_list_screen.dart';
@@ -60,6 +64,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   final ImagePicker _picker = ImagePicker();
   final AudioRecorder _audioRecorder = AudioRecorder();
   final AudioPlayer _audioPlayer = AudioPlayer();
+  // Move the same editable form to the latest bot bubble after a correction.
+  GlobalKey<_MissingFieldsInlineFormState> _missingFieldsFormKey = GlobalKey();
 
   final List<ChatMessageItem> _messages = [];
   StreamSubscription? _firestoreSub;
@@ -68,6 +74,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   StreamSubscription? _playerPositionSub;
 
   bool _isRecording = false;
+  bool _recordingBusy = false;
+  bool _isTranscribing = false;
+  bool _fetchingGovernment = false;
   int _recordSeconds = 0;
   Timer? _recordTimer;
   late final Stream<DocumentSnapshot<Map<String, dynamic>>> _deviceStatusStream;
@@ -98,6 +107,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         ChatSessionStatus.failed => 'failed',
         _ => null,
       };
+
+  bool get _canEditPublication =>
+      ChatSessionManager.canEditPublication(_publicationState);
+  bool _savingFields = false;
 
   @override
   void initState() {
@@ -133,6 +146,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _allDataFilled =
           saved != null &&
           RemoteValidationService.getMissingFields(saved.vehicleData).isEmpty &&
+          RemoteValidationService.validateValues(saved.vehicleData).isEmpty &&
           saved.imagePaths.isNotEmpty;
       _localStatus = saved?.status;
       _vehicleData = saved?.vehicleData ?? {};
@@ -258,7 +272,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Future<void> _clearChatData() async {
-    if (_publicationState != null || _submitting || _pendingTurns > 0) {
+    if (_publicationState != null ||
+        _submitting ||
+        _pendingTurns > 0 ||
+        _recordingBusy) {
       _showError('לא ניתן לנקות שיחה במהלך פרסום או עיבוד');
       return;
     }
@@ -278,6 +295,9 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _savedMessages.clear();
       _allDataFilled = false;
       _currentLicensePlate = '';
+      _vehicleData = {};
+      _missingFieldsFormKey = GlobalKey();
+      _formSaveFeedback = null;
       _addInitialWelcomeMessage();
     });
     await _saveMessagesToPrefs();
@@ -336,7 +356,53 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     try {
       await _turns;
       if (!_sameAccount) return;
-      await ChatSessionManager.control(widget.deviceId, _sessionId, command);
+      String? resumePhase;
+      final request = ChatSessionManager.request(widget.deviceId, _sessionId);
+      if (command == 'resume' && request?['parked'] != true) {
+        final choices = List<Map<String, dynamic>>.from(
+          (request?['resumeOptions'] as List? ?? []).map(
+            (v) => Map<String, dynamic>.from(v as Map),
+          ),
+        );
+        if (choices.isNotEmpty) {
+          if (!mounted) return;
+          resumePhase = await showDialog<String>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('מאיזה שלב להמשיך?'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: choices
+                      .map(
+                        (choice) => ListTile(
+                          title: Text(choice['label'] as String),
+                          onTap: () => Navigator.of(
+                            dialogContext,
+                          ).pop(choice['name'] as String),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('השאר מושהה'),
+                ),
+              ],
+            ),
+          );
+          if (resumePhase == null || !mounted) return;
+        }
+      }
+      await ChatSessionManager.control(
+        widget.deviceId,
+        _sessionId,
+        command,
+        resumePhase: resumePhase,
+      );
     } catch (e) {
       _showError('$e');
     } finally {
@@ -345,7 +411,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Future<void> _onPublishTapped() async {
-    if (_submitting || _publicationState != null) return;
+    if (_submitting || _savingFields || !_canEditPublication) return;
     setState(() => _submitting = true);
     try {
       await _turns;
@@ -494,12 +560,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (norm.contains('סגול')) return 'סגול';
     if (norm.contains('ורוד')) return 'ורוד';
     if (norm.contains('שחור')) return 'שחור';
-    
+
     // Also try substring matching backwards (e.g., if allowed is "כסוף" and rawColor is "כסף")
     for (final allowed in allowedColors) {
       if (allowed.contains(norm)) return allowed;
     }
-    
+
     return rawColor;
   }
 
@@ -583,23 +649,49 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       unawaited(_onPublishTapped());
       return;
     }
-    if (_publicationState != null || _submitting) {
+    if (!_canEditPublication || _submitting) {
       _showError('הבקשה הוגשה. לשינוי הפרטים יש לבטל ולפתוח בקשה חדשה.');
       return;
     }
+    _queueTextTurn(text);
+  }
+
+  void _queueTextTurn(
+    String text, {
+    Map<String, String>? recordedAudioFields,
+    String? confirmedAudioPlate,
+  }) {
+    if (!mounted || !_sameAccount) return;
+    if (!_canEditPublication || _submitting) {
+      _showError('הבקשה הוגשה. לשינוי הפרטים יש לבטל ולפתוח בקשה חדשה.');
+      return;
+    }
+    final recorded = recordedAudioFields == null
+        ? null
+        : Map<String, String>.unmodifiable(recordedAudioFields);
     _pendingTurns++;
     setState(() {});
     _turns = _turns
-        .then((_) => _processTextTurn(text))
+        .then(
+          (_) => _processTextTurn(
+            text,
+            recordedAudioFields: recorded,
+            confirmedAudioPlate: confirmedAudioPlate,
+          ),
+        )
         .catchError((Object e) => _showError('$e'))
         .whenComplete(() {
           _pendingTurns--;
-          if (mounted) setState(() {});
+          if (mounted) setState(() => _fetchingGovernment = false);
         });
   }
 
-  Future<void> _processTextTurn(String text) async {
-    if (!mounted || !_sameAccount || _publicationState != null) return;
+  Future<void> _processTextTurn(
+    String text, {
+    Map<String, String>? recordedAudioFields,
+    String? confirmedAudioPlate,
+  }) async {
+    if (!mounted || !_sameAccount || !_canEditPublication) return;
     // Serialize turns so a slow response cannot overwrite a newer correction.
     final userMessage = ChatMessageItem(
       id: 'msg_${DateTime.now().microsecondsSinceEpoch}',
@@ -628,6 +720,24 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         )
         .toList();
 
+    if (recordedAudioFields != null &&
+        (currentVehicleData['license_plate'] != confirmedAudioPlate ||
+            currentVehicleData['govIl'] != 'true')) {
+      setState(() {
+        _fetchingGovernment = true;
+        _messages.add(
+          ChatMessageItem(
+            id: 'gov_status_${DateTime.now().microsecondsSinceEpoch}',
+            sender: ChatSender.bot,
+            text: 'מאחזר נתוני רכב מ־gov.il…',
+            timestamp: DateTime.now(),
+          ),
+        );
+      });
+      _scrollToBottom();
+      _saveMessagesToPrefs();
+    }
+
     // The authenticated backend extracts fields and looks up the vehicle.
     final result = await RemoteValidationService.processTurn(
       deviceId: widget.deviceId,
@@ -635,13 +745,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       currentVehicleData: currentVehicleData,
       chatHistory: historyList,
       currentImagePaths: currentImagePaths,
+      recordedAudioFields: recordedAudioFields,
+      confirmedAudioPlate: confirmedAudioPlate,
     );
 
     if (!mounted || !_sameAccount) return;
     if ((currentVehicleData['license_plate'] ?? '').isNotEmpty &&
         currentVehicleData['license_plate'] !=
-            result.vehicleData['license_plate'])
+            result.vehicleData['license_plate']) {
       currentImagePaths = [];
+      _missingFieldsFormKey = GlobalKey();
+    }
     if (result.vehicleData['license_plate'] != null) {
       _currentLicensePlate = result.vehicleData['license_plate']!;
     }
@@ -651,32 +765,54 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         : (result.vehicleData['license_plate'] ?? '');
 
     // Merge vehicle data with gov.il sources if needed
-    final mergedVehicleData = Map<String, String>.from(result.vehicleData);
-    if (plate.isNotEmpty) {
+    final reviewAudioData =
+        recordedAudioFields != null ||
+        (currentVehicleData.containsKey('audio_form_fields') &&
+            currentVehicleData['license_plate'] ==
+                result.vehicleData['license_plate']);
+    final mergedVehicleData = <String, String>{
+      if (reviewAudioData && currentVehicleData['license_plate'] == plate)
+        ...currentVehicleData,
+      ...result.vehicleData,
+    };
+    final needsGovernmentEnrichment =
+        recordedAudioFields == null ||
+        currentVehicleData['license_plate'] != plate ||
+        currentVehicleData['govIl'] != 'true';
+    if (plate.isNotEmpty && needsGovernmentEnrichment) {
       try {
         final govInfo = await VehicleDataService.fetchVehicleData(plate);
         if (govInfo != null && govInfo.isNotEmpty) {
-          mergedVehicleData['govIl'] = 'true';
-          for (final entry in govInfo.entries) {
-            final key = entry.key;
-            final val = entry.value?.toString().trim() ?? '';
-            if (val.isNotEmpty &&
-                (mergedVehicleData[key] == null ||
-                    mergedVehicleData[key]!.isEmpty)) {
-              mergedVehicleData[key] = val;
+          if (recordedAudioFields != null) {
+            AudioVehicleForm.enrichGovernment(mergedVehicleData, govInfo);
+          } else {
+            mergedVehicleData['govIl'] = 'true';
+            for (final entry in govInfo.entries) {
+              final key = entry.key;
+              final val = entry.value?.toString().trim() ?? '';
+              if (val.isNotEmpty && (mergedVehicleData[key] ?? '').isEmpty) {
+                mergedVehicleData[key] = val;
+              }
             }
           }
-        } else {
+        } else if (mergedVehicleData['govIl'] != 'true') {
           mergedVehicleData['govIl'] = 'false';
         }
       } catch (e) {
-        mergedVehicleData['govIl'] = 'false';
+        if (mergedVehicleData['govIl'] != 'true') {
+          mergedVehicleData['govIl'] = 'false';
+        }
         debugPrint('[WhatsAppChat] Error fetching gov.il data in turn: $e');
       }
-    } else {
+    } else if (plate.isEmpty) {
       mergedVehicleData['govIl'] = 'false';
     }
 
+    if (reviewAudioData) {
+      mergedVehicleData.addAll(
+        AudioVehicleForm.markForReview(mergedVehicleData),
+      );
+    }
     final missing = RemoteValidationService.getMissingFields(mergedVehicleData);
 
     if (mergedVehicleData['initial_missing_fields'] == null) {
@@ -700,11 +836,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final guidance = missing.isNotEmpty
           ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
           : (currentImagePaths.isNotEmpty
-                ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.'
+                ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על כפתור הפרסום להתחלת הפרסום ביד2.'
                 : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
       final errorLines = errors.map((e) => '⚠️ $e').toList();
       finalBotReply = [
         if (summary.isNotEmpty) summary,
+        ...result.governmentConflicts,
         ...errorLines,
         guidance,
       ].join('\n\n');
@@ -770,12 +907,26 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }).toList();
   }
 
+  String? _formSaveFeedback;
+
   Future<void> _saveMissingFields(Map<String, String> updatedValues) async {
+    if (!_canEditPublication || _submitting || !_sameAccount || _savingFields) {
+      throw StateError('לא ניתן לערוך בקשה במהלך פרסום');
+    }
+    setState(() => _savingFields = true);
+    try {
+      await _persistVehicleFields(updatedValues);
+    } finally {
+      if (mounted) setState(() => _savingFields = false);
+    }
+  }
+
+  Future<void> _persistVehicleFields(Map<String, String> updatedValues) async {
     final merged = Map<String, String>.from(_vehicleData);
     for (final entry in updatedValues.entries) {
       final key = entry.key;
       var val = entry.value.trim();
-      if (val.isEmpty) continue;
+      if (val.isEmpty && key != 'highlights') continue;
       if (key == 'price' ||
           key == 'km' ||
           key == 'hand' ||
@@ -860,7 +1011,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (isComplete) {
       if (currentImagePaths.isNotEmpty) {
         botReply =
-            '✅ כל פרטי הרכב הושלמו ומאומתים!\nלחץ על "פרסם עכשיו" להתחלת הפרסום ביד2.';
+            '✅ כל פרטי הרכב הושלמו ומאומתים!\nלחץ על כפתור הפרסום להתחלת הפרסום ביד2.';
       } else {
         botReply =
             '✅ כל פרטי הרכב הושלמו ומאומתים!\n📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.';
@@ -878,12 +1029,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       id: 'bot_${DateTime.now().microsecondsSinceEpoch}',
       sender: ChatSender.bot,
       text: botReply,
+      mediaType: !isComplete ? 'missing_fields_form' : null,
       timestamp: DateTime.now(),
     );
 
     if (mounted) {
       setState(() {
         _messages.add(botMsg);
+        _formSaveFeedback = '✅ הפרטים נשמרו';
       });
       _scrollToBottom();
     }
@@ -920,7 +1073,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Future<void> _sendSingleImageFile(File file) {
-    if (_publicationState != null || _submitting) {
+    if (!_canEditPublication || _submitting) {
       _showError('לא ניתן לשנות תמונות לאחר ההגשה');
       return Future.value();
     }
@@ -936,7 +1089,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Future<void> _persistImage(File file) async {
-    if (!mounted || !_sameAccount || _publicationState != null) return;
+    if (!mounted || !_sameAccount || !_canEditPublication) return;
     final messageId =
         'img_${DateTime.now().microsecondsSinceEpoch}_${file.hashCode.abs()}';
 
@@ -1027,6 +1180,17 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     }
   }
 
+  Future<File> _prepareImage(String path) async {
+    final directory = Directory(
+      p.join(
+        (await getApplicationDocumentsDirectory()).path,
+        'p2p_chat_media_local',
+      ),
+    );
+    await directory.create(recursive: true);
+    return preparePublicationImage(File(path), directory);
+  }
+
   Future<void> _pickImage(ImageSource source) async {
     try {
       final picked = await _picker.pickImage(
@@ -1035,10 +1199,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         maxWidth: 1920,
       );
       if (picked == null) return;
-      final permFile = await _saveToPermanentStorage(File(picked.path));
+      final permFile = await _prepareImage(picked.path);
       await _sendSingleImageFile(permFile);
     } catch (e) {
-      debugPrint('[WhatsAppChat] Pick image failed: $e');
+      _showError('לא ניתן לצרף את התמונה: $e');
     }
   }
 
@@ -1051,12 +1215,12 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       if (pickedList.isEmpty) return;
 
       for (final picked in pickedList) {
-        final permFile = await _saveToPermanentStorage(File(picked.path));
+        final permFile = await _prepareImage(picked.path);
         await _sendSingleImageFile(permFile);
         await Future.delayed(const Duration(milliseconds: 120));
       }
     } catch (e) {
-      debugPrint('[WhatsAppChat] Pick multi image failed: $e');
+      _showError('לא ניתן לצרף את התמונות: $e');
     }
   }
 
@@ -1064,7 +1228,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   /// backend Firestore and Firebase Storage, and updating the session imagePaths
   /// and readiness state so it is never published to the main Pirsumoto app.
   Future<void> _deleteImageMessage(ChatMessageItem message) async {
-    if (_publicationState != null || _submitting) {
+    if (!_canEditPublication || _submitting) {
       _showError('לא ניתן למחוק תמונות במהלך פרסום או עיבוד');
       return;
     }
@@ -1205,7 +1369,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   /// Batch delete multiple selected image paths
   Future<void> _deleteSelectedImages(List<String> pathsToDelete) async {
-    if (_publicationState != null || _submitting) {
+    if (!_canEditPublication || _submitting) {
       _showError('לא ניתן למחוק תמונות במהלך פרסום או עיבוד');
       return;
     }
@@ -1329,7 +1493,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   void _confirmAndDeleteImage(ChatMessageItem message) {
-    if (_publicationState != null || _submitting) {
+    if (!_canEditPublication || _submitting) {
       _showError('לא ניתן למחוק תמונות במהלך פרסום');
       return;
     }
@@ -1439,7 +1603,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                       ),
                       onPressed: () => Navigator.pop(ctx),
                     ),
-                    if (_publicationState == null && !_submitting)
+                    if (_canEditPublication && !_submitting)
                       IconButton(
                         tooltip: 'מחק תמונה',
                         icon: const Icon(
@@ -1655,8 +1819,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                                       ),
                                     ),
                                     // Single delete icon
-                                    if (_publicationState == null &&
-                                        !_submitting)
+                                    if (_canEditPublication && !_submitting)
                                       Positioned(
                                         bottom: 4,
                                         left: 4,
@@ -1704,7 +1867,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                       Row(
                         children: [
                           if (selected.isNotEmpty &&
-                              _publicationState == null &&
+                              _canEditPublication &&
                               !_submitting) ...[
                             Expanded(
                               child: ElevatedButton.icon(
@@ -1810,9 +1973,14 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   // --- Voice Recording ---
 
   Future<void> _startRecording() async {
+    if (_recordingBusy || _isRecording || !_canEditPublication) return;
+    _recordingBusy = true;
     try {
       final hasPermission = await _audioRecorder.hasPermission();
-      if (!hasPermission) return;
+      if (!hasPermission) {
+        _showError('יש לאפשר גישה למיקרופון בהגדרות המכשיר כדי להקליט.');
+        return;
+      }
 
       final tempDir = await getTemporaryDirectory();
       final path =
@@ -1823,6 +1991,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         path: path,
       );
 
+      if (!mounted) {
+        await _audioRecorder.cancel();
+        return;
+      }
       setState(() {
         _isRecording = true;
         _recordSeconds = 0;
@@ -1835,17 +2007,21 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         }
       });
     } catch (e) {
-      debugPrint('[WhatsAppChat] Start recording error: $e');
+      _showError('לא ניתן להתחיל הקלטה: $e');
+    } finally {
+      _recordingBusy = false;
     }
   }
 
   Future<void> _stopAndSendRecording({bool cancel = false}) async {
+    if (_recordingBusy || !_isRecording) return;
+    _recordingBusy = true;
     _recordTimer?.cancel();
     _recordTimer = null;
 
     try {
       final path = await _audioRecorder.stop();
-      setState(() => _isRecording = false);
+      if (mounted) setState(() => _isRecording = false);
 
       if (cancel || path == null) {
         if (path != null) {
@@ -1875,17 +2051,77 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
       setState(() {
         _messages.add(msgItem);
+        _isTranscribing = true;
       });
       _scrollToBottom();
       _saveMessagesToPrefs();
 
-      // Transcribe locally via Whisper on controller phone!
-      final transcribedText = await RemoteValidationService.transcribeAudio(
+      // Transcribe on the authenticated backend, then review before applying.
+      final transcriptionResult = await RemoteValidationService.transcribeAudio(
         permFile,
         deviceId: widget.deviceId,
+        currentVehicleData: _vehicleData,
       );
+      if (!mounted || !_sameAccount) return;
+      setState(() => _isTranscribing = false);
+
+      final transcribedText = transcriptionResult?['text'] as String?;
+      final extractedFields =
+          transcriptionResult?['extracted_fields'] as Map<String, dynamic>? ??
+          {};
+      final plateCandidates =
+          [
+                ...(transcriptionResult?['license_plate_candidates']
+                        as List<dynamic>? ??
+                    []),
+                ...(transcriptionResult?['license_plate_fragments']
+                        as List<dynamic>? ??
+                    []),
+              ]
+              .whereType<String>()
+              .map((plate) => plate.replaceAll(RegExp(r'\D'), ''))
+              .where((plate) => plate.isNotEmpty)
+              .toSet()
+              .toList();
+
       if (transcribedText != null && transcribedText.isNotEmpty) {
-        _sendTextMessage(transcribedText);
+        final fields = <String, String>{
+          for (final entry in extractedFields.entries)
+            if (entry.value != null) entry.key: entry.value.toString(),
+        };
+        // A preceding recording may still be fetching its confirmed vehicle.
+        await _turns;
+        if (!mounted || !_sameAccount) return;
+        final currentPlate = _vehicleData['license_plate'] ?? '';
+        var confirmedPlate = currentPlate;
+        if (plateCandidates.length > 1 ||
+            (plateCandidates.isNotEmpty &&
+                plateCandidates.singleOrNull != currentPlate) ||
+            !_vehicleData.containsKey('audio_form_fields') ||
+            AudioVehicleForm.needsPlateConfirmation(
+              fields['license_plate'],
+              currentPlate,
+            )) {
+          final plate = await showDialog<String>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => AudioPlateDialog(
+              plate: plateCandidates.length > 1
+                  ? ''
+                  : plateCandidates.firstOrNull ??
+                        fields['license_plate'] ??
+                        currentPlate,
+              candidates: plateCandidates,
+            ),
+          );
+          if (!mounted || !_sameAccount || plate == null) return;
+          confirmedPlate = plate;
+        }
+        _queueTextTurn(
+          transcribedText,
+          recordedAudioFields: fields,
+          confirmedAudioPlate: confirmedPlate,
+        );
       } else {
         final errorMsg = ChatMessageItem(
           id: 'bot_${DateTime.now().microsecondsSinceEpoch}',
@@ -1900,8 +2136,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         _saveMessagesToPrefs();
       }
     } catch (e) {
-      debugPrint('[WhatsAppChat] Stop recording error: $e');
-      setState(() => _isRecording = false);
+      _showError('עיבוד ההקלטה נכשל: $e');
+      if (mounted) setState(() => _isRecording = false);
+    } finally {
+      _recordingBusy = false;
+      if (mounted) setState(() => _isTranscribing = false);
     }
   }
 
@@ -2056,6 +2295,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         builder: (_) => RemoteControlScreen(
           session: session!,
           deviceName: widget.deviceName,
+          ownsSession: !identical(session, widget.session),
         ),
       ),
     );
@@ -2106,7 +2346,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 final isLast = index == _messages.length - 1;
                 final isLastBotMessage =
                     index ==
-                    _messages.lastIndexWhere((m) => m.sender == ChatSender.bot);
+                    _messages.lastIndexWhere(
+                      (m) =>
+                          m.sender == ChatSender.bot &&
+                          !m.id.startsWith('gov_status_'),
+                    );
                 return _buildMessageBubble(
                   message,
                   isLastMessage: isLast,
@@ -2116,8 +2360,8 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             ),
           ),
 
-          // Global Action Chips (Publish, Pause, Quit)
-          _buildGlobalActionChips(),
+          if (_isTranscribing || _fetchingGovernment)
+            AudioProcessingIndicator(fetchingGovernment: _fetchingGovernment),
 
           // Bottom Input Bar
           _buildInputBar(),
@@ -2360,7 +2604,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final hasPlate =
         (_vehicleData['license_plate'] ?? '').isNotEmpty ||
         _currentLicensePlate.isNotEmpty;
-    final showMissingFieldsForm = !isUser && isLastBotMessage && hasPlate;
+    final showMissingFieldsForm =
+        message.mediaType == 'missing_fields_form' ||
+        message.text.contains(
+          'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה',
+        );
 
     return ChatMessageBubble(
       isUser: isUser,
@@ -2405,18 +2653,27 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             ),
 
           // Inline Missing Fields Form
-          if (showMissingFieldsForm) ...[
+          if ((showMissingFieldsForm || _vehicleData.isNotEmpty) &&
+              isLastBotMessage) ...[
             const SizedBox(height: 8),
-            MissingFieldsInlineForm(
-              missingFields: missingFields,
-              currentData: _vehicleData,
-              onSave: _saveMissingFields,
+            AbsorbPointer(
+              absorbing: !_canEditPublication,
+              child: MissingFieldsInlineForm(
+                key: _missingFieldsFormKey,
+                missingFields: missingFields,
+                currentData: _vehicleData,
+                onSave: _saveMissingFields,
+                feedback: _formSaveFeedback,
+                enabled: _canEditPublication,
+                editAll: _publicationState != null,
+              ),
             ),
           ],
 
           // Bot Quick Action Chips
-          if (!isUser && isLastBotMessage && _publicationState == null)
+          if (!isUser && isLastBotMessage && _canEditPublication)
             _buildQuickActionChips(message.text),
+          if (!isUser && isLastBotMessage) _buildGlobalActionChips(),
         ],
       ),
     );
@@ -2426,8 +2683,11 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     child: ExpansionTile(
       title: Text('פרטי הרכב — ${_vehicleData['license_plate'] ?? ''}'),
       children: [
-        for (final key in _vehicleData.keys.where((k) => k != 'initial_missing_fields'))
-          if ((_vehicleData[key] ?? '').isNotEmpty && _vehicleData[key] != 'null')
+        for (final key in _vehicleData.keys.where(
+          (k) => k != 'initial_missing_fields',
+        ))
+          if ((_vehicleData[key] ?? '').isNotEmpty &&
+              _vehicleData[key] != 'null')
             ListTile(
               dense: true,
               title: Text(vehicleFieldLabels[key] ?? key),
@@ -2911,9 +3171,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   Widget _buildGlobalActionChips() {
     final state = _publicationState;
-    final busy = _submitting || _pendingTurns > 0;
+    final busy =
+        _submitting || _savingFields || _pendingTurns > 0 || _recordingBusy;
     final actions = <Widget>[];
-    if (busy)
+    if (busy && !_isTranscribing && !_fetchingGovernment)
       actions.add(
         const SizedBox(
           width: 20,
@@ -2929,13 +3190,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
         : (_vehicleData['license_plate'] ?? '');
     if (plate.isNotEmpty || _vehicleData.isNotEmpty)
       action('הצגת פרטי רכב', () => _showAggregatedGovVehicleDetails(plate));
-    final currentImageCount = _messages
-        .where((m) => m.mediaType == 'image')
-        .length;
-    if (currentImageCount > 0)
-      action('תמונות ($currentImageCount)', () => _showManageImagesSheet());
-    if (state == null && _allDataFilled)
-      action('פרסם עכשיו', () => _onPublishTapped());
     if (state == 'queued')
       actions.add(
         Text(ChatSessionManager.queueLabel(widget.deviceId, _sessionId)),
@@ -2945,6 +3199,16 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     if (state == 'paused' || state == 'stuck') {
       action('שליטה מרחוק', () => _switchToRemoteControl());
       action('המשך לאחר בדיקה', () => _control('resume'));
+      final parked =
+          ChatSessionManager.request(widget.deviceId, _sessionId)?['parked'] ==
+          true;
+      if (!parked) action('השאר מושהה והמשך בתור', () => _control('park'));
+      if (parked)
+        actions.add(
+          const Text(
+            'מושהה מחוץ לתור. המשך יחזיר לתור ויתחיל מחדש באתר שלא הושלם; יש לבדוק קודם שלא פורסם.',
+          ),
+        );
     }
     if (state != null &&
         !PublicationState.terminal.contains(state) &&
@@ -2965,26 +3229,43 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 
   Widget _buildQuickActionChips(String text) {
-    if (_publicationState != null || _submitting)
-      return const SizedBox.shrink();
+    if (!_canEditPublication || _submitting) return const SizedBox.shrink();
     final imageCount = _messages.where((m) => m.mediaType == 'image').length;
+    final busy = _savingFields || _pendingTurns > 0 || _recordingBusy;
     return Wrap(
       spacing: 8,
       children: [
         ActionChip(
           label: const Text('העלה תמונות (גלריה)'),
-          onPressed: _pickMultiImage,
+          onPressed: busy ? null : _pickMultiImage,
         ),
         ActionChip(
           label: const Text('צלם תמונה'),
-          onPressed: () => _pickImage(ImageSource.camera),
+          onPressed: busy ? null : () => _pickImage(ImageSource.camera),
         ),
         if (imageCount > 0)
           ActionChip(
             avatar: const Icon(Icons.photo_library_outlined, size: 16),
             label: Text('ניהול תמונות ($imageCount)'),
-            onPressed: _showManageImagesSheet,
+            onPressed: busy ? null : _showManageImagesSheet,
           ),
+        if ((_vehicleData['license_plate'] ?? '').isNotEmpty ||
+            _currentLicensePlate.isNotEmpty) ...[
+          ActionChip(
+            label: Text(
+              _publicationState == 'completed' ? 'פרסם שוב' : 'פרסם עכשיו',
+            ),
+            backgroundColor: _publicationState == 'completed'
+                ? AppColors.warningSoft
+                : null,
+            onPressed: !busy && _allDataFilled ? _onPublishTapped : null,
+          ),
+          if (_publicationState == null)
+            ActionChip(
+              label: const Text('ביטול'),
+              onPressed: busy ? null : _clearChatData,
+            ),
+        ],
       ],
     );
   }
@@ -3065,7 +3346,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
                 ),
               ),
             // Delete button overlay
-            if (_publicationState == null && !_submitting)
+            if (_canEditPublication && !_submitting)
               Positioned(
                 top: 8,
                 left: 8,
@@ -3409,13 +3690,49 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
   }
 }
 
+class AudioProcessingIndicator extends StatelessWidget {
+  final bool fetchingGovernment;
+
+  const AudioProcessingIndicator({super.key, required this.fetchingGovernment});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    child: Row(
+      textDirection: TextDirection.rtl,
+      children: [
+        const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            fetchingGovernment
+                ? 'מאחזר נתוני רכב מ־gov.il…'
+                : 'מתמלל את ההקלטה ומזהה את פרטי הרכב…',
+            textDirection: TextDirection.rtl,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class MissingFieldsInlineForm extends StatefulWidget {
+  final String? feedback;
+  final bool editAll;
+  final bool enabled;
   final List<String> missingFields;
   final Map<String, String> currentData;
   final Future<void> Function(Map<String, String> updatedValues) onSave;
 
   const MissingFieldsInlineForm({
     super.key,
+    this.feedback,
+    this.editAll = false,
+    this.enabled = true,
     required this.missingFields,
     required this.currentData,
     required this.onSave,
@@ -3431,6 +3748,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   final Map<String, String?> _dropdownValues = {};
   bool _isSaving = false;
   bool _noTest = false;
+  String? _saveFeedback;
 
   @override
   void initState() {
@@ -3441,6 +3759,33 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   @override
   void didUpdateWidget(covariant MissingFieldsInlineForm oldWidget) {
     super.didUpdateWidget(oldWidget);
+    for (final field in _fieldsToShow) {
+      if (field == 'test_until') continue;
+      if (oldWidget.currentData[field] == widget.currentData[field]) continue;
+      final value = widget.currentData[field] ?? '';
+      if (field == 'clean_title') {
+        _dropdownValues[field] = {'כן', 'true', '1'}.contains(value)
+            ? 'כן'
+            : 'לא';
+      } else if (_isDropdownField(field)) {
+        _dropdownValues[field] = value;
+      } else {
+        _controllers[field]?.text = value;
+      }
+    }
+    if (oldWidget.currentData['test_month'] !=
+            widget.currentData['test_month'] ||
+        oldWidget.currentData['test_year'] != widget.currentData['test_year'] ||
+        oldWidget.currentData['test_until'] !=
+            widget.currentData['test_until']) {
+      final month = widget.currentData['test_month'] ?? '';
+      final year = widget.currentData['test_year'] ?? '';
+      _controllers['test_until']?.text =
+          widget.currentData['test_until'] ??
+          (month.isNotEmpty && year.isNotEmpty
+              ? '${month.padLeft(2, '0')}/$year'
+              : '');
+    }
     _initFields();
   }
 
@@ -3450,8 +3795,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         widget.currentData['initial_missing_fields']!.isNotEmpty) {
       fields = widget.currentData['initial_missing_fields']!.split(',');
     }
-    
+
     final manuallyFillable = [
+      'license_plate',
       'maker',
       'trim',
       'model',
@@ -3472,6 +3818,8 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       'city',
       'area',
       'contact_name',
+      'vehicle_condition',
+      'description',
     ];
 
     final bool isGovIl = widget.currentData['govIl'] == 'true';
@@ -3479,9 +3827,14 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     final Set<String> combined = Set.from(fields);
     // Include all explicitly requested missing fields
     combined.addAll(widget.missingFields);
-    
+    combined.addAll(
+      (widget.currentData['audio_form_fields'] ?? '')
+          .split(',')
+          .where((field) => field.isNotEmpty),
+    );
+
     // If NOT govIl, include any field that already has a value, so the user can edit it if needed.
-    if (!isGovIl) {
+    if (!isGovIl || widget.editAll) {
       for (final f in manuallyFillable) {
         final val = widget.currentData[f];
         if (val != null && val.isNotEmpty && val != 'null') {
@@ -3489,7 +3842,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         }
       }
     }
-    
+
     fields = combined.toList();
 
     if (!fields.contains('km')) {
@@ -3502,20 +3855,33 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         !fields.contains('current_ownership')) {
       fields.add('current_ownership');
     }
-    final bool hasTestDate = (widget.currentData['test_year'] ?? '').isNotEmpty &&
-                             (widget.currentData['test_month'] ?? '').isNotEmpty;
-    if (!isGovIl || !hasTestDate) {
+    final bool hasTestDate =
+        (widget.currentData['test_year'] ?? '').isNotEmpty &&
+        (widget.currentData['test_month'] ?? '').isNotEmpty;
+    if (!isGovIl || !hasTestDate || widget.editAll) {
       if (!fields.contains('test_until')) fields.add('test_until');
       fields.remove('test_year');
       fields.remove('test_month');
     }
+    fields.remove('clean_title');
+    fields.remove('highlights');
+    fields.addAll(['clean_title', 'highlights']);
     return fields;
   }
 
   void _initFields() {
     for (final field in _fieldsToShow) {
+      if (field == 'clean_title') {
+        _dropdownValues[field] ??=
+            {'כן', 'true', '1'}.contains(widget.currentData[field])
+            ? 'כן'
+            : 'לא';
+        continue;
+      }
       var existingVal = (widget.currentData[field] ?? '').trim();
-      if (field == 'km' && (existingVal.isEmpty || existingVal == '0')) {
+      if (field == 'km' &&
+          (existingVal.isEmpty || existingVal == '0') &&
+          !widget.currentData.containsKey('audio_form_fields')) {
         final estKm =
             (widget.currentData['estimatedKm'] ??
                     widget.currentData['kilometer_test_aharon'] ??
@@ -3538,11 +3904,16 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       }
 
       if (field == 'test_until') {
-        _noTest = widget.currentData['no_test'] == 'true';
+        _noTest = {'true', 'כן', '1'}.contains(widget.currentData['no_test']);
         if (existingVal.isEmpty) {
           final tm = widget.currentData['test_month'];
           final ty = widget.currentData['test_year'];
-          if (tm != null && tm.isNotEmpty && ty != null && ty.isNotEmpty && ty != 'null' && tm != 'null') {
+          if (tm != null &&
+              tm.isNotEmpty &&
+              ty != null &&
+              ty.isNotEmpty &&
+              ty != 'null' &&
+              tm != 'null') {
             existingVal = '${tm.padLeft(2, '0')}/$ty';
           }
         }
@@ -3574,7 +3945,8 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           }
         } else if (existingVal.isNotEmpty) {
           // If the current saved value isn't in the predefined options, we still want to keep it.
-          if (_dropdownValues[field] == null || _dropdownValues[field]!.isEmpty) {
+          if (_dropdownValues[field] == null ||
+              _dropdownValues[field]!.isEmpty) {
             _dropdownValues[field] = existingVal;
           }
         }
@@ -3586,6 +3958,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           });
           _controllers[field] = c;
         } else {
+          if (field == 'highlights') continue;
           if ((_controllers[field]!.text.trim().isEmpty ||
                   _controllers[field]!.text.trim() == '0') &&
               existingVal.isNotEmpty &&
@@ -3609,23 +3982,32 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       return true;
     } else {
       final val = _controllers[field]?.text.trim() ?? '';
-      if (val.isEmpty || val == '0' || val == 'הזן...') {
+      if (val.isEmpty || (val == '0' && field != 'km') || val == 'הזן...') {
         return false;
       }
       final digitsOnly = val.replaceAll(RegExp(r'[^\d]'), '');
       if (digitsOnly.isNotEmpty) {
         final n = int.tryParse(digitsOnly);
-        if (n != null && n == 0) return false;
+        if (n != null && n == 0 && field != 'km') return false;
       }
       return true;
     }
   }
 
   bool get _canSave {
+    if (!widget.enabled) return false;
     if (_isSaving) return false;
     if (_fieldsToShow.isEmpty) return false;
     for (final field in _fieldsToShow) {
-      if (!_isFieldFilled(field)) {
+      if (!{'clean_title', 'highlights'}.contains(field) &&
+          (!_isFieldFilled(field) ||
+              AudioVehicleForm.error(
+                    field,
+                    _isDropdownField(field)
+                        ? (_dropdownValues[field] ?? '')
+                        : (_controllers[field]?.text.trim() ?? ''),
+                  ) !=
+                  null)) {
         return false;
       }
     }
@@ -3641,8 +4023,12 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   bool _isDropdownField(String field) {
+    if (field == 'clean_title') return false;
     if (vehicleEnums.containsKey(field)) return true;
-    if (field == 'month' || field == 'test_month' || field == 'hand') {
+    if (field == 'month' ||
+        field == 'test_month' ||
+        field == 'hand' ||
+        field == 'year') {
       return true;
     }
     return false;
@@ -3663,6 +4049,13 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     if (field == 'hand') {
       return List.generate(10, (i) => '${i + 1}');
     }
+    if (field == 'year') {
+      final currentYear = DateTime.now().year;
+      return List.generate(
+        currentYear + 1 - 2005 + 1,
+        (i) => '${currentYear + 1 - i}',
+      );
+    }
     return [];
   }
 
@@ -3672,15 +4065,26 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
   Future<void> _handleSave() async {
     if (!_canSave || _isSaving) return;
-    setState(() => _isSaving = true);
+    setState(() {
+      _isSaving = true;
+      _saveFeedback = null;
+    });
     try {
       final updated = <String, String>{};
-      if (_fieldsToShow.contains('test_until')) {
-        updated['no_test'] = _noTest ? 'true' : 'false';
-      }
+      // Always send no_test (independent of govIl / test_until visibility).
+      // _noTest is only initialised when the test_until row exists, so when
+      // that row is hidden keep the value we already have.
+      final bool noTestValue = _fieldsToShow.contains('test_until')
+          ? _noTest
+          : {'true', 'כן', '1'}.contains(widget.currentData['no_test']);
+      updated['no_test'] = noTestValue ? 'true' : 'false';
       final bool isGovIl = widget.currentData['govIl'] == 'true';
       updated['govIl'] = isGovIl ? 'true' : 'false';
       for (final field in _fieldsToShow) {
+        if (field == 'clean_title') {
+          updated[field] = _dropdownValues[field] ?? 'לא';
+          continue;
+        }
         if (field == 'test_until' && _noTest) {
           updated[field] = '';
           continue;
@@ -3692,16 +4096,17 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           }
         } else {
           final val = _controllers[field]?.text.trim() ?? '';
-          if (val.isNotEmpty) {
+          if (val.isNotEmpty || field == 'highlights') {
             updated[field] = val;
           }
         }
       }
       if (updated.isNotEmpty) {
         await widget.onSave(updated);
+        if (mounted) setState(() => _saveFeedback = '✅ הפרטים נשמרו');
       }
     } catch (e) {
-      debugPrint('[MissingFieldsInlineForm] Error saving fields: $e');
+      if (mounted) setState(() => _saveFeedback = 'שמירת הפרטים נכשלה: $e');
     } finally {
       if (mounted) {
         setState(() => _isSaving = false);
@@ -3757,7 +4162,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'להשלמת פרטי רכב חסרים:',
+                      widget.editAll
+                          ? 'עריכת פרטי הרכב:'
+                          : 'להשלמת פרטי רכב חסרים:',
                       textDirection: TextDirection.rtl,
                       style: GoogleFonts.heebo(
                         fontSize: 14,
@@ -3789,10 +4196,50 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           const SizedBox(height: 10),
 
           // Fields list
-          ..._fieldsToShow.map((field) => _buildFieldRow(field)),
+          ..._fieldsToShow
+              .where((field) => !{'clean_title', 'highlights'}.contains(field))
+              .map((field) => _buildFieldRow(field)),
+          const Divider(key: ValueKey('optional_vehicle_data_divider')),
+          Text(
+            'פרטים נוספים (לא חובה)',
+            textDirection: TextDirection.rtl,
+            style: GoogleFonts.heebo(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          Directionality(
+            textDirection: TextDirection.rtl,
+            child: Material(
+              color: Colors.transparent,
+              child: CheckboxListTile(
+                key: const ValueKey('clean_title_checkbox'),
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: Text(_getFieldLabel('clean_title')),
+                value: _dropdownValues['clean_title'] == 'כן',
+                onChanged: _isSaving
+                    ? null
+                    : (checked) {
+                        setState(
+                          () => _dropdownValues['clean_title'] = checked == true
+                              ? 'כן'
+                              : 'לא',
+                        );
+                      },
+              ),
+            ),
+          ),
+          _buildFieldRow('highlights'),
 
           const SizedBox(height: 12),
 
+          if ((_saveFeedback ?? widget.feedback) != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                _saveFeedback ?? widget.feedback!,
+                textDirection: TextDirection.rtl,
+              ),
+            ),
           // Submit Button
           SizedBox(
             width: double.infinity,
@@ -4017,7 +4464,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   Widget _buildDropdownInput(String field) {
     final options = List<String>.from(_getFieldOptions(field));
     final currentVal = _dropdownValues[field];
-    if (currentVal != null && currentVal.isNotEmpty && !options.contains(currentVal)) {
+    if (currentVal != null &&
+        currentVal.isNotEmpty &&
+        !options.contains(currentVal)) {
       options.add(currentVal);
     }
 
@@ -4072,6 +4521,8 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
 
   Widget _buildTextInput(String field) {
     final controller = _controllers[field];
+    final value = controller?.text.trim() ?? '';
+    final error = value.isEmpty ? null : AudioVehicleForm.error(field, value);
     final isNumeric =
         field == 'price' ||
         field == 'km' ||
@@ -4086,24 +4537,32 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     if (field == 'km') suffix = 'ק״מ';
 
     return Container(
-      height: 38,
+      height: field == 'highlights' || error != null ? null : 38,
       decoration: BoxDecoration(
         color: AppColors.surfaceSubtle,
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: AppColors.border),
       ),
       child: TextField(
+        key: ValueKey('missing_field_$field'),
         controller: controller,
+        minLines: field == 'highlights' ? 2 : 1,
+        maxLines: field == 'highlights' ? 4 : 1,
         onChanged: (_) => setState(() {}),
         textDirection: isNumeric ? TextDirection.ltr : TextDirection.rtl,
         textAlign: isNumeric ? TextAlign.center : TextAlign.right,
-        keyboardType: isNumeric ? TextInputType.number : TextInputType.text,
+        keyboardType: isNumeric
+            ? TextInputType.number
+            : field == 'highlights'
+            ? TextInputType.multiline
+            : TextInputType.text,
         style: GoogleFonts.heebo(
           fontSize: 13,
           color: AppColors.onSurface,
           fontWeight: isNumeric ? FontWeight.w600 : FontWeight.normal,
         ),
         decoration: InputDecoration(
+          errorText: error,
           isDense: true,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 8,

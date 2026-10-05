@@ -570,21 +570,32 @@ class RemoteSessionManager extends ChangeNotifier {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
       debugPrint('[RemoteSessionManager] WebRTC connection closed');
       terminateSession();
-    } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+    } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+        state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
       debugPrint(
         '[RemoteSessionManager] WebRTC connection failed, allowing 3s grace period for reconnect',
       );
       _failureGraceTimer?.cancel();
-      _failureGraceTimer = Timer(const Duration(seconds: 3), () {
-        if (_sessionInfo.state == RemoteSessionState.active &&
-            _webrtc?.connectionState ==
-                RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-          debugPrint(
-            '[RemoteSessionManager] WebRTC remained in failed state after grace period, terminating',
-          );
-          terminateSession();
-        }
-      });
+      final generation = _sessionGeneration;
+      _failureGraceTimer = Timer(
+        Duration(
+          seconds:
+              state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected
+                  ? 8
+                  : 3,
+        ),
+        () {
+          if (generation == _sessionGeneration &&
+              (_sessionInfo.state == RemoteSessionState.active ||
+                  _sessionInfo.state == RemoteSessionState.connectingWebRTC) &&
+              _webrtc?.connectionState == state) {
+            debugPrint(
+              '[RemoteSessionManager] WebRTC remained in failed state after grace period, terminating',
+            );
+            terminateSession();
+          }
+        },
+      );
     }
   }
 

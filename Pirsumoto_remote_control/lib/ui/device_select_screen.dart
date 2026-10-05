@@ -19,8 +19,10 @@ class DeviceSelectScreen extends StatefulWidget {
 
 class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
   final TextEditingController _searchController = TextEditingController();
-  final TextEditingController _customDeviceIdController = TextEditingController();
-  final TextEditingController _controllerNameController = TextEditingController();
+  final TextEditingController _customDeviceIdController =
+      TextEditingController();
+  final TextEditingController _controllerNameController =
+      TextEditingController();
 
   String? _connectingDeviceId;
   String? _connectingType;
@@ -32,9 +34,8 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
   void initState() {
     super.initState();
     final user = FirebaseAuth.instance.currentUser;
-    _controllerNameController.text = user?.displayName ??
-        user?.email?.split('@').first ??
-        'Controller';
+    _controllerNameController.text =
+        user?.displayName ?? user?.email?.split('@').first ?? 'Controller';
     _searchController.addListener(() {
       setState(() {
         _searchQuery = _searchController.text.trim().toLowerCase();
@@ -50,10 +51,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
     super.dispose();
   }
 
-  void _openChatScreen({
-    required String deviceId,
-    String? modelName,
-  }) {
+  void _openChatScreen({required String deviceId, String? modelName}) {
     if (deviceId.isEmpty) {
       setState(() => _error = 'נא להזין מזהה מכשיר');
       return;
@@ -65,10 +63,8 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
 
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => WhatsAppChatScreen(
-          deviceId: deviceId,
-          deviceName: displayName,
-        ),
+        builder: (_) =>
+            WhatsAppChatScreen(deviceId: deviceId, deviceName: displayName),
       ),
     );
   }
@@ -128,7 +124,8 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
       final user = FirebaseAuth.instance.currentUser;
       final controllerId = _controllerNameController.text.trim().isNotEmpty
           ? _controllerNameController.text.trim()
-          : (user?.displayName ?? 'Controller_${DateTime.now().millisecondsSinceEpoch % 1000}');
+          : (user?.displayName ??
+                'Controller_${DateTime.now().millisecondsSinceEpoch % 1000}');
 
       final signaling = ControllerSignalingClient(
         deviceId: deviceId,
@@ -159,6 +156,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
           builder: (_) => RemoteControlScreen(
             session: session,
             deviceName: displayName,
+            ownsSession: true,
           ),
         ),
       );
@@ -251,7 +249,10 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                     onTap: _signOut,
                     borderRadius: BorderRadius.circular(8),
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 6,
+                      ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -306,15 +307,24 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
             if (_error != null)
               Container(
                 margin: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
                 decoration: BoxDecoration(
                   color: AppColors.errorSoft,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.error.withValues(alpha: 0.3)),
+                  border: Border.all(
+                    color: AppColors.error.withValues(alpha: 0.3),
+                  ),
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.error_outline_rounded, color: AppColors.error, size: 18),
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      color: AppColors.error,
+                      size: 18,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -327,7 +337,11 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close_rounded, size: 16, color: AppColors.error),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        size: 16,
+                        color: AppColors.error,
+                      ),
                       onPressed: () => setState(() => _error = null),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
@@ -339,7 +353,10 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
             // Main Scrollable Area
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 16,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -394,12 +411,19 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                           ),
                           suffixIcon: _searchQuery.isNotEmpty
                               ? IconButton(
-                                  icon: const Icon(Icons.clear, size: 18, color: AppColors.secondary),
+                                  icon: const Icon(
+                                    Icons.clear,
+                                    size: 18,
+                                    color: AppColors.secondary,
+                                  ),
                                   onPressed: () => _searchController.clear(),
                                 )
                               : null,
                           border: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
                         ),
                       ),
                     ),
@@ -410,21 +434,30 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
                         InkWell(
-                          onTap: () => setState(() => _showManualInput = !_showManualInput),
+                          onTap: () => setState(
+                            () => _showManualInput = !_showManualInput,
+                          ),
                           borderRadius: BorderRadius.circular(6),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 4,
+                            ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
-                                  _showManualInput ? Icons.expand_less_rounded : Icons.add_circle_outline_rounded,
+                                  _showManualInput
+                                      ? Icons.expand_less_rounded
+                                      : Icons.add_circle_outline_rounded,
                                   size: 16,
                                   color: AppColors.secondary,
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  _showManualInput ? 'סגור הזנה ידנית' : 'התחברות לפי מזהה ידני',
+                                  _showManualInput
+                                      ? 'סגור הזנה ידנית'
+                                      : 'התחברות לפי מזהה ידני',
                                   style: GoogleFonts.heebo(
                                     fontSize: 12.5,
                                     fontWeight: FontWeight.w500,
@@ -469,10 +502,15 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                 hintTextDirection: TextDirection.ltr,
                                 filled: true,
                                 fillColor: AppColors.surfaceSubtle,
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(10),
-                                  borderSide: const BorderSide(color: AppColors.border),
+                                  borderSide: const BorderSide(
+                                    color: AppColors.border,
+                                  ),
                                 ),
                               ),
                             ),
@@ -484,21 +522,31 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                     height: 40,
                                     child: ElevatedButton.icon(
                                       onPressed: () => _connectToDevice(
-                                        deviceId: _customDeviceIdController.text.trim(),
+                                        deviceId: _customDeviceIdController.text
+                                            .trim(),
                                         sessionType: 'chat',
                                       ),
                                       style: ElevatedButton.styleFrom(
                                         backgroundColor: AppColors.primarySoft,
-                                        foregroundColor: AppColors.primaryAction,
+                                        foregroundColor:
+                                            AppColors.primaryAction,
                                         elevation: 0,
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(10),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
                                         ),
                                       ),
-                                      icon: const Icon(Icons.chat_bubble_outline_rounded, size: 16),
+                                      icon: const Icon(
+                                        Icons.chat_bubble_outline_rounded,
+                                        size: 16,
+                                      ),
                                       label: Text(
                                         'צ׳אט',
-                                        style: GoogleFonts.heebo(fontWeight: FontWeight.w600, fontSize: 13),
+                                        style: GoogleFonts.heebo(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 13,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -509,21 +557,31 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                     height: 40,
                                     child: ElevatedButton.icon(
                                       onPressed: () => _connectToDevice(
-                                        deviceId: _customDeviceIdController.text.trim(),
+                                        deviceId: _customDeviceIdController.text
+                                            .trim(),
                                         sessionType: 'remote_control',
                                       ),
                                       style: ElevatedButton.styleFrom(
-                                        backgroundColor: AppColors.primaryAction,
+                                        backgroundColor:
+                                            AppColors.primaryAction,
                                         foregroundColor: Colors.white,
                                         elevation: 0,
                                         shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(10),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
                                         ),
                                       ),
-                                      icon: const Icon(Icons.screen_share_outlined, size: 16),
+                                      icon: const Icon(
+                                        Icons.screen_share_outlined,
+                                        size: 16,
+                                      ),
                                       label: Text(
                                         'שליטה מרחוק',
-                                        style: GoogleFonts.heebo(fontWeight: FontWeight.w600, fontSize: 13),
+                                        style: GoogleFonts.heebo(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 13,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -535,20 +593,30 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                               height: 38,
                               child: OutlinedButton.icon(
                                 onPressed: () => _openDeviceHistory(
-                                  deviceId: _customDeviceIdController.text.trim(),
+                                  deviceId: _customDeviceIdController.text
+                                      .trim(),
                                   modelName: 'מכשיר מותאם אישית',
                                 ),
                                 style: OutlinedButton.styleFrom(
                                   foregroundColor: AppColors.onSurface,
-                                  side: const BorderSide(color: AppColors.border),
+                                  side: const BorderSide(
+                                    color: AppColors.border,
+                                  ),
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                 ),
-                                icon: const Icon(Icons.receipt_long_rounded, size: 16, color: AppColors.primaryAction),
+                                icon: const Icon(
+                                  Icons.receipt_long_rounded,
+                                  size: 16,
+                                  color: AppColors.primaryAction,
+                                ),
                                 label: Text(
                                   'היסטוריית מודעות למכשיר זה',
-                                  style: GoogleFonts.heebo(fontWeight: FontWeight.w600, fontSize: 13),
+                                  style: GoogleFonts.heebo(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
                                 ),
                               ),
                             ),
@@ -565,7 +633,8 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                           .where('ownerUid', isEqualTo: currentUid)
                           .snapshots(),
                       builder: (context, snapshot) {
-                        if (snapshot.connectionState == ConnectionState.waiting) {
+                        if (snapshot.connectionState ==
+                            ConnectionState.waiting) {
                           return const Center(
                             child: Padding(
                               padding: EdgeInsets.symmetric(vertical: 40),
@@ -581,9 +650,12 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                         final docs = allDocs.where((doc) {
                           if (_searchQuery.isEmpty) return true;
                           final data = doc.data();
-                          final model = (data['modelName'] as String? ?? '').toLowerCase();
-                          final id = (data['deviceId'] as String? ?? doc.id).toLowerCase();
-                          final os = (data['os'] as String? ?? '').toLowerCase();
+                          final model = (data['modelName'] as String? ?? '')
+                              .toLowerCase();
+                          final id = (data['deviceId'] as String? ?? doc.id)
+                              .toLowerCase();
+                          final os = (data['os'] as String? ?? '')
+                              .toLowerCase();
                           return model.contains(_searchQuery) ||
                               id.contains(_searchQuery) ||
                               os.contains(_searchQuery);
@@ -592,8 +664,11 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                         // Count line (e.g. "3 מכשירים • 2 מחוברים")
                         final totalCount = docs.length;
                         final onlineCount = docs.where((d) {
-                          final st = (d.data()['status'] as String? ?? '').toLowerCase();
-                          return st == 'online' || st == 'idle' || st == 'ready';
+                          final st = (d.data()['status'] as String? ?? '')
+                              .toLowerCase();
+                          return st == 'online' ||
+                              st == 'idle' ||
+                              st == 'ready';
                         }).length;
 
                         return Column(
@@ -621,21 +696,31 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                 shrinkWrap: true,
                                 physics: const NeverScrollableScrollPhysics(),
                                 itemCount: docs.length,
-                                separatorBuilder: (context, index) => const SizedBox(height: 12),
+                                separatorBuilder: (context, index) =>
+                                    const SizedBox(height: 12),
                                 itemBuilder: (context, index) {
                                   final data = docs[index].data();
-                                  final deviceId = data['deviceId'] as String? ?? docs[index].id;
-                                  final modelName = data['modelName'] as String? ?? 'מכשיר אנדרואיד';
-                                  final status = data['status'] as String? ?? 'idle';
-                                  final osType = (data['os'] as String? ?? 'android').toLowerCase();
-                                  final contextSubtitle = data['contextTitle'] as String? ??
+                                  final deviceId =
+                                      data['deviceId'] as String? ??
+                                      docs[index].id;
+                                  final modelName =
+                                      data['modelName'] as String? ??
+                                      'מכשיר אנדרואיד';
+                                  final status =
+                                      data['status'] as String? ?? 'idle';
+                                  final osType =
+                                      (data['os'] as String? ?? 'android')
+                                          .toLowerCase();
+                                  final contextSubtitle =
+                                      data['contextTitle'] as String? ??
                                       (osType.contains('win')
                                           ? 'מחשב ראשי - Windows'
                                           : (osType.contains('mac')
-                                              ? 'מחשב משרד - macOS'
-                                              : 'מכשיר נייד - Android'));
+                                                ? 'מחשב משרד - macOS'
+                                                : 'מכשיר נייד - Android'));
 
-                                  final isConnectingThis = _connectingDeviceId == deviceId;
+                                  final isConnectingThis =
+                                      _connectingDeviceId == deviceId;
                                   final isBusy = _connectingDeviceId != null;
 
                                   return _buildDeviceTile(
@@ -644,8 +729,12 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                     subtitle: contextSubtitle,
                                     status: status,
                                     osType: osType,
-                                    isConnectingRemote: isConnectingThis && _connectingType == 'remote_control',
-                                    isConnectingChat: isConnectingThis && _connectingType == 'chat',
+                                    isConnectingRemote:
+                                        isConnectingThis &&
+                                        _connectingType == 'remote_control',
+                                    isConnectingChat:
+                                        isConnectingThis &&
+                                        _connectingType == 'chat',
                                     isDisabled: isBusy && !isConnectingThis,
                                     onConnectRemote: () => _connectToDevice(
                                       deviceId: deviceId,
@@ -660,16 +749,20 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                                     onOpenHistory: () => _openDeviceHistory(
                                       deviceId: deviceId,
                                       modelName: modelName,
-                                      ownerUid: data['ownerUid'] as String? ?? currentUid,
+                                      ownerUid:
+                                          data['ownerUid'] as String? ??
+                                          currentUid,
                                     ),
-                                    onOpenQueue: () => Navigator.of(context).push(
-                                      MaterialPageRoute(
-                                        builder: (_) => ChatSessionsListScreen(
-                                          deviceId: deviceId,
-                                          deviceName: modelName,
+                                    onOpenQueue: () =>
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                ChatSessionsListScreen(
+                                                  deviceId: deviceId,
+                                                  deviceName: modelName,
+                                                ),
+                                          ),
                                         ),
-                                      ),
-                                    ),
                                   );
                                 },
                               ),
@@ -705,7 +798,9 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
           ),
           const SizedBox(height: 14),
           Text(
-            _searchQuery.isNotEmpty ? 'לא נמצאו מכשירים התואמים לחיפוש' : 'אין עדיין מכשירים מחוברים',
+            _searchQuery.isNotEmpty
+                ? 'לא נמצאו מכשירים התואמים לחיפוש'
+                : 'אין עדיין מכשירים מחוברים',
             textAlign: TextAlign.center,
             style: GoogleFonts.heebo(
               fontSize: 16,
@@ -719,10 +814,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                 ? 'נסה חיפוש במילה אחרת או נקה את שורת החיפוש.'
                 : 'התחבר עם מכשיר פרסומוטו לאותו החשבון או השתמש בהזנה ידנית למעלה.',
             textAlign: TextAlign.center,
-            style: GoogleFonts.heebo(
-              fontSize: 13,
-              color: AppColors.secondary,
-            ),
+            style: GoogleFonts.heebo(fontSize: 13, color: AppColors.secondary),
           ),
         ],
       ),
@@ -743,8 +835,13 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
     required VoidCallback onOpenHistory,
     required VoidCallback onOpenQueue,
   }) {
-    final isOnline = status == 'online' || status == 'idle' || status == 'ready' || status == 'connected';
-    final isBusy = status == 'busy' || status == 'in_call' || status == 'streaming';
+    final isOnline =
+        status == 'online' ||
+        status == 'idle' ||
+        status == 'ready' ||
+        status == 'connected';
+    final isBusy =
+        status == 'busy' || status == 'in_call' || status == 'streaming';
 
     // Status Badge Configuration
     Color? badgeBg;
@@ -768,7 +865,9 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
       osIcon = Icons.window_rounded;
       osColor = AppColors.windows;
       osBg = AppColors.windows.withValues(alpha: 0.1);
-    } else if (osType.contains('mac') || osType.contains('apple') || osType.contains('ios')) {
+    } else if (osType.contains('mac') ||
+        osType.contains('apple') ||
+        osType.contains('ios')) {
       osIcon = Icons.apple_rounded;
       osColor = AppColors.mac;
       osBg = AppColors.mac.withValues(alpha: 0.12);
@@ -850,9 +949,14 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
               ),
 
               // Status Badge (physical left in RTL) - only shown when online / in use
-              if (badgeLabel != null && badgeBg != null && badgeTextColor != null)
+              if (badgeLabel != null &&
+                  badgeBg != null &&
+                  badgeTextColor != null)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: badgeBg,
                     borderRadius: BorderRadius.circular(999),
@@ -893,7 +997,9 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                 child: SizedBox(
                   height: 44,
                   child: ElevatedButton.icon(
-                    onPressed: isDisabled || isConnectingChat ? null : onConnectChat,
+                    onPressed: isDisabled || isConnectingChat
+                        ? null
+                        : onConnectChat,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primarySoft,
                       foregroundColor: AppColors.primaryAction,
@@ -906,9 +1012,15 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                         ? const SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primaryAction),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.primaryAction,
+                            ),
                           )
-                        : const Icon(Icons.chat_bubble_outline_rounded, size: 18),
+                        : const Icon(
+                            Icons.chat_bubble_outline_rounded,
+                            size: 18,
+                          ),
                     label: Text(
                       'צ׳אט',
                       style: GoogleFonts.heebo(
@@ -927,7 +1039,9 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                 child: SizedBox(
                   height: 44,
                   child: OutlinedButton.icon(
-                    onPressed: isDisabled || isConnectingRemote ? null : onConnectRemote,
+                    onPressed: isDisabled || isConnectingRemote
+                        ? null
+                        : onConnectRemote,
                     style: OutlinedButton.styleFrom(
                       backgroundColor: AppColors.surface,
                       foregroundColor: AppColors.primaryAction,
@@ -943,7 +1057,10 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                         ? const SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primaryAction),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.primaryAction,
+                            ),
                           )
                         : const Icon(Icons.screen_share_outlined, size: 18),
                     label: Text(
@@ -994,7 +1111,7 @@ class _DeviceSelectScreenState extends State<DeviceSelectScreen> {
                   ),
                 ),
               ),
-              
+
               const SizedBox(width: 8),
 
               // Publication History Button (Left in RTL reading order)

@@ -57,4 +57,13 @@ void main() {
     expect(queue.aheadOf('a'), 2);
     expect(queue.aheadOf('b'), 3);
   });
+  test('a parked paused car does not block the queue or count as an active predecessor', () {
+    final queue = PublicationQueue({
+      'parked': {'state':'paused', 'parked':true},
+      'next': {'state':'queued', 'enqueuedAt':Timestamp.fromMillisecondsSinceEpoch(1)},
+    });
+    expect(queue.activeCount, 0);
+    expect(queue.aheadOf('next'), 0);
+  });
+
 }

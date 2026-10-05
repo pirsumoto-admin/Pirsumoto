@@ -33,6 +33,7 @@ void main() {
         'city': 'חיפה',
         'handicapped': 'לא',
         'no_test': 'לא',
+        'test_until': '01/2027',
       };
       final missingComplete = RemoteValidationService.getMissingFields(
         complete,
@@ -50,38 +51,43 @@ void main() {
       expect(validErrors, isEmpty);
     });
 
-    test('Normalizes Hebrew speech to digits', () {
+    test('Preserves the original Hebrew transcript for review', () {
       final raw = 'מספר רכב שבע שמונה שמונה שתיים ארבע שלוש שלוש';
       final normalized = RemoteValidationService.normalizeTranscribedText(raw);
-      expect(normalized, contains('7'));
-      expect(normalized, contains('8'));
-      expect(normalized, contains('2'));
+      expect(normalized, raw);
+      expect(
+        RemoteValidationService.normalizeTranscribedText(' אני מבאר שבע '),
+        'אני מבאר שבע',
+      );
     });
 
-    test('Non-govIl vehicles disregard govIl and test_until in standard required validation', () {
-      final nonGovVehicle = {
-        'license_plate': '12345678',
-        'maker': 'רנו',
-        'model': 'קליאו',
-        'year': '2019',
-        'km': '95000',
-        'price': '38000',
-        'hand': '2',
-        'color': 'שחור',
-        'fuel_type': 'בנזין',
-        'gear_type': 'אוטומטי',
-        'current_ownership': 'פרטית',
-        'previous_ownership': 'ליסינג',
-        'month': '8',
-        'vehicle_condition': 'מצוין',
-        'govIl': 'false',
-        'test_until': '08/2026',
-        'no_test': 'לא',
-      };
-      final missing = RemoteValidationService.getMissingFields(nonGovVehicle);
-      final errors = RemoteValidationService.validateValues(nonGovVehicle);
-      expect(missing, isEmpty);
-      expect(errors, isEmpty);
-    });
+    test(
+      'Non-govIl vehicles disregard govIl and test_until in standard required validation',
+      () {
+        final nonGovVehicle = {
+          'license_plate': '12345678',
+          'maker': 'רנו',
+          'model': 'קליאו',
+          'year': '2019',
+          'km': '95000',
+          'price': '38000',
+          'hand': '2',
+          'color': 'שחור',
+          'fuel_type': 'בנזין',
+          'gear_type': 'אוטומטי',
+          'current_ownership': 'פרטית',
+          'previous_ownership': 'ליסינג',
+          'month': '8',
+          'vehicle_condition': 'מצוין',
+          'govIl': 'false',
+          'test_until': '08/2026',
+          'no_test': 'לא',
+        };
+        final missing = RemoteValidationService.getMissingFields(nonGovVehicle);
+        final errors = RemoteValidationService.validateValues(nonGovVehicle);
+        expect(missing, isEmpty);
+        expect(errors, isEmpty);
+      },
+    );
   });
 }

@@ -211,6 +211,7 @@ class VehicleDataService {
             }
           }
           
+          hand = nonSocher.length.toString();
           if (nonSocher.isNotEmpty) {
             currentOwnership = nonSocher.last;
             if (nonSocher.length >= 2) {

@@ -209,9 +209,9 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
       AppColors.error,
     ),
     ChatSessionStatus.done => (
-      AppColors.successSoft,
-      AppColors.success,
-      AppColors.success,
+      Color(0xFFE8F1FC),
+      AppColors.focus,
+      AppColors.focus,
     ),
   };
 
@@ -268,38 +268,27 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                     child: Text('אין בקשות. לחץ + להוספת רכב.'),
                   );
                 }
-                final anyRunning = _sessions.any((sess) {
-                  final req = ChatSessionManager.request(
-                    widget.deviceId,
-                    sess.id,
-                  );
-                  return req != null &&
-                      !PublicationState.terminal.contains(req['state']) &&
-                      req['state'] != 'canceled';
-                });
                 final s = _sessions[index],
                     r = ChatSessionManager.request(
                       widget.deviceId,
                       _sessions[index].id,
                     );
+                final status = ChatSessionManager.effectiveStatus(s, r);
                 final isRunning =
                     r != null &&
                     !PublicationState.terminal.contains(r['state']) &&
                     r['state'] != 'canceled';
-                final canStart =
-                    (s.status == ChatSessionStatus.draft ||
-                        s.status == ChatSessionStatus.canceled ||
-                        s.status == ChatSessionStatus.failed) &&
-                    (s.isReadyToPublish ||
-                        (VehicleSchema.isComplete(s.vehicleData) &&
-                            s.imagePaths.isNotEmpty));
+                final canStart = ChatSessionManager.canStartPublication(
+                  s,
+                  status,
+                );
                 final title = [
                   s.vehicleData['maker'],
                   s.vehicleData['model'],
                   s.vehicleData['year'],
                 ].whereType<String>().join(' ');
                 final (statusBg, statusBorder, statusText) = _statusColors(
-                  s.status,
+                  status,
                 );
                 return Card(
                   margin: const EdgeInsets.symmetric(
@@ -390,12 +379,12 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                     ),
                                   ),
                                   child: Text(
-                                    s.status == ChatSessionStatus.waiting
+                                    status == ChatSessionStatus.waiting
                                         ? ChatSessionManager.queueLabel(
                                             widget.deviceId,
                                             s.id,
                                           )
-                                        : _label(s.status),
+                                        : _label(status),
                                     style: TextStyle(
                                       color: statusText,
                                       fontSize: 11,
@@ -491,11 +480,13 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                           ),
                                         ),
                                       ),
-                                    ]
-                                    else ...[
-                                      if (canStart && !anyRunning) ...[
+                                    ] else ...[
+                                      if (canStart) ...[
                                         Tooltip(
-                                          message: 'התחל פרסום',
+                                          message:
+                                              status == ChatSessionStatus.done
+                                              ? 'פרסם שוב'
+                                              : 'התחל פרסום',
                                           child: TextButton.icon(
                                             icon: const Icon(
                                               Icons.play_circle_outline_rounded,
@@ -503,7 +494,9 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                               size: 15,
                                             ),
                                             label: Text(
-                                              'התחל',
+                                              status == ChatSessionStatus.done
+                                                  ? 'פרסם שוב'
+                                                  : 'התחל',
                                               style: GoogleFonts.heebo(
                                                 color: AppColors.success,
                                                 fontSize: 12,
@@ -521,7 +514,10 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                                   MaterialTapTargetSize
                                                       .shrinkWrap,
                                               backgroundColor:
-                                                  AppColors.successSoft,
+                                                  status ==
+                                                      ChatSessionStatus.done
+                                                  ? AppColors.warningSoft
+                                                  : AppColors.successSoft,
                                               shape: RoundedRectangleBorder(
                                                 borderRadius:
                                                     BorderRadius.circular(8),
@@ -531,14 +527,16 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                                 ),
                                               ),
                                             ),
-                                            onPressed: () => _act(
-                                              s,
-                                              () =>
-                                                  ChatSessionManager.startPublication(
-                                                    widget.deviceId,
+                                            onPressed: _busy.contains(s.id)
+                                                ? null
+                                                : () => _act(
                                                     s,
+                                                    () =>
+                                                        ChatSessionManager.startPublication(
+                                                          widget.deviceId,
+                                                          s,
+                                                        ),
                                                   ),
-                                            ),
                                           ),
                                         ),
                                         const SizedBox(width: 4),

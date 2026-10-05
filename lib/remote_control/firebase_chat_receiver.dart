@@ -1,3 +1,4 @@
+import '../services/publication_session_deadline.dart';
 import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
@@ -34,6 +35,7 @@ class FirebaseChatReceiver {
   final void Function(String event)? onActivity;
   String? _watchedRequestId;
   bool _paused = false;
+  PublicationSessionDeadline? _deadline;
   Map<String, String>? _preparedVehicle;
   Future<void> poll() => _requestTick();
   late final String _runId;
@@ -45,14 +47,18 @@ class FirebaseChatReceiver {
   bool _tickAgain = false, _maintenancePending = false;
   DateTime? _reportedExpiry;
   Future<void> _serial = Future.value();
-  PublicationIdentity? _active, _takeoverPausedIdentity;
+  PublicationIdentity? _active;
   String? _uid, _activeOwnerUid;
   bool _disposed = false;
   bool _recovered = false;
   DateTime? _leaseExpiry;
   Future<void> Function()? _pause;
   VoidCallback? _resume;
+  Future<bool> Function(String? phase)? _prepareResume;
+  List<Map<String, String>> Function()? _resumeChoices;
   Future<void> Function()? _stop;
+  Future<void> Function(String state)? _shutdown;
+  Future<void> Function()? _expire;
   Object? _controlOwner;
   final List<Future<void> Function()> _pendingReports = [];
 
@@ -105,14 +111,22 @@ class FirebaseChatReceiver {
     Object owner, {
     required Future<void> Function() pause,
     required VoidCallback resume,
+    Future<bool> Function(String? phase)? prepareResume,
+    List<Map<String, String>> Function()? resumeChoices,
     required Future<void> Function() stop,
+    Future<void> Function(String state)? shutdown,
+    Future<void> Function()? expire,
   }) {
     final self = _instance;
     if (id == null || self == null || !isCurrent(id)) return;
     self._controlOwner = owner;
     self._pause = pause;
     self._resume = resume;
+    self._prepareResume = prepareResume;
+    self._resumeChoices = resumeChoices;
     self._stop = stop;
+    self._shutdown = shutdown;
+    self._expire = expire;
     if (self._paused) self._pauseSafely();
   }
 
@@ -121,7 +135,11 @@ class FirebaseChatReceiver {
     if (self?._controlOwner != owner) return;
     self!._pause = null;
     self._resume = null;
+    self._prepareResume = null;
+    self._resumeChoices = null;
     self._stop = null;
+    self._shutdown = null;
+    self._expire = null;
     self._controlOwner = null;
   }
 
@@ -135,13 +153,12 @@ class FirebaseChatReceiver {
           (await self._requests.doc(identity.requestId).get()).data()?['state'];
       if (!['publishing', 'preparing'].contains(state)) return;
       await self._pause?.call();
-      if (await self._report(
-        identity,
-        'paused',
-        'האוטומציה הושהתה לשליטה מרחוק',
-      )) {
-        self._takeoverPausedIdentity = identity;
-      } else if (isCurrent(identity)) {
+      if (!await self._report(
+            identity,
+            'paused',
+            'האוטומציה הושהתה לשליטה מרחוק',
+          ) &&
+          isCurrent(identity)) {
         throw StateError('Unable to acknowledge automation pause');
       }
     }, propagateErrors: true);
@@ -159,10 +176,11 @@ class FirebaseChatReceiver {
       if (state == 'canceling' || PublicationState.terminal.contains(state))
         return;
       if (paused) {
-        self._takeoverPausedIdentity = null;
         await self._pause?.call();
         await self._report(id, 'paused', 'האוטומציה הושהתה');
       } else if (!self._recovered) {
+        if (await self._prepareResume?.call(null) == false || !isCurrent(id))
+          return;
         if (!await self._report(id, 'publishing', 'האוטומציה ממשיכה')) return;
         if (await waitUntilPublishing(id)) await self._resumeExecution(id);
       }
@@ -170,21 +188,8 @@ class FirebaseChatReceiver {
   }
 
   static void resumeAfterTakeover() {
-    final self = _instance;
-    if (self?._active == null || self!._recovered) return;
-    final identity = self._takeoverPausedIdentity;
-    self._takeoverPausedIdentity = null;
-    if (identity == null || !isCurrent(identity)) return;
-    unawaited(
-      self._schedule(() async {
-        if (self._active?.matches(identity) != true) return;
-        final data =
-            (await self._requests.doc(self._active!.requestId).get()).data();
-        if (data?['state'] != 'paused') return;
-        if (await self._report(identity, 'publishing', 'האוטומציה ממשיכה'))
-          await self._resumeExecution(identity);
-      }),
-    );
+    // Releasing input ownership or disconnecting is not a publication resume.
+    // Only an explicit resume command may restart a paused publication.
   }
 
   Future<void> _schedule(
@@ -391,6 +396,8 @@ class FirebaseChatReceiver {
 
   void dispose() {
     _disposed = true;
+    unawaited(_deadline?.cancel());
+    _deadline = null;
     _timer?.cancel();
     _recoveryTimer?.cancel();
     _retryTimer?.cancel();
@@ -436,7 +443,7 @@ class FirebaseChatReceiver {
           return;
         if (_active != null) {
           final activeIdentity = _active!;
-          await _stop?.call();
+          await _shutdownPublication(data?['state'] as String? ?? 'failed');
           unawaited(_cleanupMedia(activeIdentity));
         }
         final released = await _firestore.runTransaction<bool>((tx) async {
@@ -521,6 +528,16 @@ class FirebaseChatReceiver {
           _recovered = true;
         }
         _watchActive(activeId);
+        final started = (data['startedAt'] as Timestamp?)?.toDate();
+        await _armDeadline(
+          _active!,
+          remaining:
+              started == null
+                  ? const Duration(minutes: 15)
+                  : started
+                      .add(const Duration(minutes: 15))
+                      .difference(DateTime.now()),
+        );
         await _heartbeat();
         await _handleControl();
         return;
@@ -564,20 +581,61 @@ class FirebaseChatReceiver {
     }
     _paused = false;
     _watchActive(_active!.requestId);
+    await _armDeadline(_active!);
     await _prepare(selected);
   }
 
+  static String deadlineToken(PublicationIdentity id) =>
+      _instance?._active?.matches(id) == true && _instance?._deadline != null
+          ? _instance!._deadline!.token
+          : '${id.deviceId}/${id.requestId}/${id.attemptId}';
+
+  Future<void> _armDeadline(
+    PublicationIdentity id, {
+    Duration remaining = const Duration(minutes: 15),
+  }) async {
+    if (_deadline != null) return;
+    final deadline = PublicationSessionDeadline(
+      '${id.deviceId}/${id.requestId}/${id.attemptId}/$_runId/${DateTime.now().microsecondsSinceEpoch}',
+    );
+    _deadline = deadline;
+    await deadline.start(() async {
+      if (!isCurrent(id) || !identical(_deadline, deadline)) return;
+      _pauseSafely();
+      await _schedule(() async {
+        if (!isCurrent(id)) return;
+        if (_expire != null) {
+          await _expire!();
+        } else {
+          await _shutdownPublication('failed');
+        }
+        final state =
+            (await _requests.doc(id.requestId).get()).data()?['state'];
+        await _report(
+          id,
+          state == 'canceling' ? 'canceled' : 'failed',
+          'הפרסום נסגר לאחר 15 דקות. יש לבדוק אם פורסם לפני ניסיון נוסף.',
+        );
+      });
+    }, remaining: remaining);
+  }
+
   void _clearActive() {
+    unawaited(_deadline?.cancel());
+    _deadline = null;
     _watchActive(null);
     _active = null;
     _activeOwnerUid = null;
-    _takeoverPausedIdentity = null;
     _preparedVehicle = null;
     _leaseExpiry = null;
     _reportedExpiry = null;
     _pause = null;
     _resume = null;
+    _prepareResume = null;
+    _resumeChoices = null;
     _stop = null;
+    _shutdown = null;
+    _expire = null;
     _controlOwner = null;
     _paused = false;
   }
@@ -616,6 +674,8 @@ class FirebaseChatReceiver {
       if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(id.attemptId))
         throw StateError('Invalid attempt');
       final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
+      if ((data['completedPlatforms'] as List? ?? []).contains('yad2'))
+        vehicle['includeYad2'] = 'false';
       try {
         final ownerUid = data['ownerUid'] as String?;
         if (ownerUid != null && ownerUid.isNotEmpty) {
@@ -736,6 +796,14 @@ class FirebaseChatReceiver {
     }
   }
 
+  Future<void> _shutdownPublication(String state) async {
+    if (_shutdown != null) {
+      await _shutdown!(state);
+    } else {
+      await _stop?.call();
+    }
+  }
+
   Future<void> _handleControl() async {
     final id = _active;
     if (id == null) return;
@@ -746,8 +814,43 @@ class FirebaseChatReceiver {
         control['attemptId'] != id.attemptId)
       return;
     final command = control['command'];
-    if (command == 'cancel') {
-      _takeoverPausedIdentity = null;
+    if (command == 'park') {
+      _pauseSafely();
+      await _shutdownPublication('paused');
+      final released = await _firestore.runTransaction<bool>((tx) async {
+        final request = _requests.doc(id.requestId);
+        final d = (await tx.get(_device)).data();
+        final r = (await tx.get(request)).data();
+        if (!isCurrent(id) ||
+            d?['workerRunId'] != _runId ||
+            d?['activeRequestId'] != id.requestId ||
+            r?['attemptId'] != id.attemptId ||
+            r?['control']?['id'] != control['id'] ||
+            !['paused', 'stuck'].contains(r?['state']))
+          return false;
+        tx.update(request, {
+          'state': 'paused',
+          'parked': true,
+          'appliedControlId': control['id'],
+          'revision': (r!['revision'] as int) + 1,
+          'lastMessage': 'הפרסום נשמר מושהה והתור ממשיך',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        tx.update(_device, {
+          'activeRequestId': FieldValue.delete(),
+          'workerRunId': FieldValue.delete(),
+          'leaseUntil': FieldValue.delete(),
+        });
+        return true;
+      });
+      if (released) {
+        _clearActive();
+        unawaited(_requestTick());
+      }
+    } else if (command == 'cancel') {
+      // A leftover control is not cancellation authorization for a live run.
+      // The backend first commits canceling for this attempt.
+      if (data?['state'] != 'canceling') return;
       // Stop drains in-flight automation before the terminal acknowledgement releases the queue.
       await _stop?.call();
       await _report(
@@ -757,7 +860,6 @@ class FirebaseChatReceiver {
         controlId: control['id'] as String,
       );
     } else if (command == 'pause') {
-      _takeoverPausedIdentity = null;
       await _pause?.call();
       await _report(
         id,
@@ -782,6 +884,19 @@ class FirebaseChatReceiver {
           controlId: control['id'] as String,
         );
       } else {
+        if (await _prepareResume?.call(control['resumePhase'] as String?) ==
+            false) {
+          await _report(
+            id,
+            'paused',
+            'הפרסום נשאר מושהה',
+            controlId: control['id'] as String,
+          );
+          return;
+        }
+        if (!isCurrent(id)) return;
+        final latest = (await _requests.doc(id.requestId).get()).data();
+        if (latest?['control']?['id'] != control['id']) return;
         if (await _report(
           id,
           'publishing',
@@ -791,6 +906,27 @@ class FirebaseChatReceiver {
           _resume!.call();
       }
     }
+  }
+
+  static Future<void> saveDescription(
+    PublicationIdentity? id,
+    String description,
+  ) async {
+    final self = _instance;
+    if (self == null ||
+        id == null ||
+        !isCurrent(id) ||
+        description.trim().isEmpty)
+      return;
+    await self._firestore.runTransaction((tx) async {
+      final ref = self._requests.doc(id.requestId);
+      final data = (await tx.get(ref)).data();
+      if (!isCurrent(id) ||
+          data?['attemptId'] != id.attemptId ||
+          data?['workerRunId'] != self._runId)
+        return;
+      tx.update(ref, {'vehicleData.description': description});
+    });
   }
 
   static Future<void> reportAutomationStatus({
@@ -847,6 +983,7 @@ class FirebaseChatReceiver {
           r?['ownerUid'] != _uid)
         return null;
       final state = r!['state'] as String;
+      if (status == 'canceled' && state != 'canceling') return null;
       if (controlId != null && (r['control'] as Map?)?['id'] != controlId)
         return null;
       if (state == 'canceling' && status != 'canceled') return null;
@@ -862,10 +999,20 @@ class FirebaseChatReceiver {
           return null;
         if (complete.contains(platform)) return null;
         complete.add(platform);
-        next =
-            (r['platforms'] as List).every(complete.contains)
-                ? 'completed'
-                : state;
+
+        bool expectsYad2 = true;
+        if (r['vehicleData'] != null) {
+          final vd = r['vehicleData'] as Map;
+          if (vd['includeYad2'] == 'false' || vd['include_yad2'] == 'false') {
+            expectsYad2 = false;
+          }
+        }
+        final expectedPlatforms =
+            (r['platforms'] as List)
+                .where((p) => expectsYad2 || p != 'yad2')
+                .toList();
+
+        next = expectedPlatforms.every(complete.contains) ? 'completed' : state;
       } else if (status == 'step') {
         next = state;
       }
@@ -878,6 +1025,8 @@ class FirebaseChatReceiver {
         'revision': revision,
         'lastMessage': text,
         'completedPlatforms': complete,
+        if (next == 'paused' || next == 'stuck')
+          'resumeOptions': _resumeChoices?.call() ?? [],
         if (controlId != null) 'appliedControlId': controlId,
         'updatedAt': FieldValue.serverTimestamp(),
       });

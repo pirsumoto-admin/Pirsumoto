@@ -349,6 +349,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
   final _priceController = TextEditingController();
   final _handicappedController = ValueNotifier<bool>(false);
   final _noTestController = ValueNotifier<bool>(false);
+  final _cleanTitleController = ValueNotifier<bool>(false);
+  final _highlightsController = TextEditingController();
   final _vehicleConditionController = TextEditingController();
   final _makerController = TextEditingController();
   final _modelController = TextEditingController();
@@ -401,6 +403,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _testYearController.text = (DateTime.now().year + 1).toString();
     _handicappedController.value = false;
     _noTestController.value = false;
+    _cleanTitleController.value = false;
     _vehicleConditionController.text = 'טוב';
 
     // [WHATSAPP-DISABLED] WhatsApp listener disabled check removed.
@@ -423,6 +426,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _priceController.dispose();
     _handicappedController.dispose();
     _noTestController.dispose();
+    _cleanTitleController.dispose();
+    _highlightsController.dispose();
     _vehicleConditionController.dispose();
     _makerController.dispose();
     _modelController.dispose();
@@ -451,6 +456,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _kmController.text = s.km;
     _priceController.text = s.price;
     _handicappedController.value = s.handicapped == 'כן';
+    _cleanTitleController.value = s.cleanTitle;
+    _highlightsController.text = s.highlights;
     _vehicleConditionController.text =
         s.vehicleCondition.isNotEmpty ? s.vehicleCondition : 'טוב';
     _makerController.text = s.maker;
@@ -498,6 +505,15 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     if (data['handicapped'] != null) {
       _handicappedController.value = data['handicapped'].toString() == 'כן';
     }
+    if (data['noTest'] != null) {
+      _noTestController.value = data['noTest'] == true || data['noTest'] == 'true';
+    }
+    if (data['cleanTitle'] != null) {
+      _cleanTitleController.value = data['cleanTitle'] == true || data['cleanTitle'] == 'true';
+    }
+    if (data['highlights'] != null) {
+      _highlightsController.text = data['highlights'].toString();
+    }
     if (data['vehicleCondition'] != null) {
       _vehicleConditionController.text = data['vehicleCondition'].toString();
     }
@@ -531,6 +547,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
     _priceController.clear();
     _handicappedController.value = false;
     _noTestController.value = false;
+    _cleanTitleController.value = false;
+    _highlightsController.clear();
     _vehicleConditionController.text = 'טוב';
     _makerController.clear();
     _modelController.clear();
@@ -1435,6 +1453,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       price: _priceController.text,
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
+      cleanTitle: _cleanTitleController.value,
+      highlights: _highlightsController.text,
       testYear: _testYearController.text,
       testMonth: _testMonthController.text,
       govIl: _isGovIl,
@@ -1677,6 +1697,8 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       price: _priceController.text,
       handicapped: _handicappedController.value,
       noTest: _noTestController.value,
+      cleanTitle: _cleanTitleController.value,
+      highlights: _highlightsController.text,
       testYear: _testYearController.text,
       testMonth: _testMonthController.text,
       govIl: _isGovIl,
@@ -2128,6 +2150,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           ),
           _buildToggleField('add_car.handicapped'.tr(), _handicappedController),
+          _buildToggleField('ללא טסט', _noTestController),
           _buildDropdownField(
             'מצב הרכב',
             _vehicleConditionController,
@@ -2165,6 +2188,16 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
             _gearController,
             (v) => notifier.updateField('gear', v),
             hintText: 'לדוגמה: הילוכים אוטומטיים, שידור ידני',
+          ),
+          _buildTextField(
+            'חוזקות',
+            _highlightsController,
+            (v) => notifier.updateField('highlights', v),
+            hintText: 'לדוגמה: רכב שמור מאוד, ללא תאונות',
+          ),
+          _buildToggleField(
+            'לרכב זה יש טייטל נקי',
+            _cleanTitleController,
           ),
 
           const SizedBox(height: 24),

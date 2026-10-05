@@ -9,30 +9,40 @@ const STATUS_STATES = new Set([
 // Firestore. Keep vehicle/chat details out of the system-rendered payload:
 // the app validates the signed-in owner before opening the request.
 function publicationMessage(after, {deviceId, requestId}, tokens) {
+  const manualInput = after.state === 'paused' &&
+    typeof after.lastMessage === 'string' && after.lastMessage.includes('נדרשת הזנה ידנית');
+  const urgent = manualInput || ['stuck', 'failed', 'completed'].includes(after.state);
+  const title = manualInput ? 'פרסומוטו — נדרשת הזנה ידנית'
+    : after.state === 'completed' ? 'פרסומוטו — הפרסום הושלם בהצלחה'
+    : ['stuck', 'failed'].includes(after.state) ? 'פרסומוטו — נדרשת התערבות' : 'פרסומוטו';
+  const body = manualInput ? after.lastMessage
+    : after.state === 'completed' ? 'בקשת הפרסום הושלמה בהצלחה.'
+    : ['stuck', 'failed'].includes(after.state) ? 'האוטומציה נעצרה. פתחו את האפליקציה לבדיקה ולהמשך.'
+    : 'מצב בקשת הפרסום עודכן. פתחו את האפליקציה לצפייה בעדכון.';
   const thread = crypto.createHash('sha256')
     .update(`${after.ownerUid}/${deviceId}/${requestId}`).digest('hex');
   return {
     tokens,
     notification: {
-      title: 'פרסומוטו',
-      body: 'מצב בקשת הפרסום עודכן. פתחו את האפליקציה לצפייה בעדכון.',
+      title, body,
     },
     android: {
       priority: 'high',
       notification: {
-        channelId: 'pirsumoto_chat_notifications',
+        channelId: manualInput ? 'pirsumoto_manual_input_alerts_v1' : urgent ? 'pirsumoto_publication_outcomes_v1' : 'pirsumoto_chat_notifications',
         tag: thread,
-        notificationPriority: 'PRIORITY_LOW',
-        defaultSound: false,
+        notificationPriority: urgent ? 'PRIORITY_MAX' : 'PRIORITY_LOW',
+        defaultSound: urgent,
+        defaultVibrateTimings: urgent,
       },
     },
     apns: {
       headers: {
         'apns-push-type': 'alert',
-        'apns-priority': '5',
+        'apns-priority': urgent ? '10' : '5',
         'apns-collapse-id': thread,
       },
-      payload: {aps: {threadId: thread}},
+      payload: {aps: {threadId: thread, ...(urgent ? {sound: 'default', 'interruption-level': 'active'} : {})}},
     },
     data: {
       ownerUid: after.ownerUid,
@@ -54,7 +64,7 @@ async function sendPublicationNotification(event, db, messaging, logger = consol
     return;
   }
   const latest = (await event.data.after.ref.get()).data();
-  if (!latest || latest.revision !== after.revision || latest.archived ||
+  if (!latest || latest.revision !== after.revision || latest.state !== after.state || latest.archived ||
       latest.ownerUid !== after.ownerUid || latest.attemptId !== after.attemptId) {
     logger.info('publication_notification_skipped', {...context, reason: 'stale_or_archived'});
     return;

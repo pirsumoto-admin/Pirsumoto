@@ -1,3 +1,4 @@
+import 'package:publication_protocol/publication_protocol.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -33,6 +34,8 @@ class ChatNotificationService with WidgetsBindingObserver {
   ChatNotificationService._internal();
   static final instance = ChatNotificationService._internal();
   static const channelId = 'pirsumoto_chat_notifications';
+  static const outcomeChannelId = 'pirsumoto_publication_outcomes_v1';
+  static const manualInputChannelId = 'pirsumoto_manual_input_alerts_v1';
   static const channelName = 'עדכוני פרסום';
   static const channelDesc = 'מצב בקשות הפרסום';
   final _localNotifications = FlutterLocalNotificationsPlugin();
@@ -68,8 +71,7 @@ class ChatNotificationService with WidgetsBindingObserver {
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
-    // Recreate the channel with low importance so notifications are silent and do not pop up
-    await android?.deleteNotificationChannel(channelId: channelId);
+    // Routine progress stays silent; outcomes have a separate audible channel.
     await android?.createNotificationChannel(
       const AndroidNotificationChannel(
         channelId,
@@ -79,6 +81,28 @@ class ChatNotificationService with WidgetsBindingObserver {
         playSound: false,
         enableVibration: false,
         showBadge: false,
+      ),
+    );
+    await android?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        manualInputChannelId,
+        'נדרשת הזנה ידנית',
+        description: 'התראות דחופות לפרסומים הממתינים להזנה ידנית',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        showBadge: true,
+      ),
+    );
+    await android?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        outcomeChannelId,
+        'תוצאות פרסום והתערבות נדרשת',
+        description: 'התראות על אוטומציה שנתקעה או פרסום שהסתיים',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        showBadge: true,
       ),
     );
     _notificationsInitialized = true;
@@ -183,6 +207,8 @@ class ChatNotificationService with WidgetsBindingObserver {
                       final old = _states[key];
                       _states[key] = data['state'] as String;
                       if (first ||
+                          old == null ||
+                          data['archived'] == true ||
                           old == data['state'] ||
                           data['state'] == 'queued') {
                         continue;
@@ -193,7 +219,17 @@ class ChatNotificationService with WidgetsBindingObserver {
                           AppLifecycleState.resumed) {
                         continue;
                       }
-                      if (_isChatVisible(deviceId, request.id)) continue;
+                      final text = PublicationNotification.textFor(
+                        data['state'] as String,
+                        data['lastMessage']?.toString() ?? '',
+                      );
+                      if (_isChatVisible(deviceId, request.id) &&
+                          !PublicationNotification.needsAttention(
+                            data['state'] as String,
+                            text,
+                          )) {
+                        continue;
+                      }
                       unawaited(
                         showMessageNotification(
                           deviceId: deviceId,
@@ -202,8 +238,8 @@ class ChatNotificationService with WidgetsBindingObserver {
                           ownerUid: user.uid,
                           attemptId: data['attemptId'] as String,
                           revision: data['revision'] as int,
-                          messageText:
-                              data['lastMessage']?.toString() ?? data['state'],
+                          state: data['state'] as String,
+                          messageText: text,
                         ),
                       );
                     }
@@ -375,7 +411,8 @@ class ChatNotificationService with WidgetsBindingObserver {
         ownerUid: uid,
         attemptId: current['attemptId'],
         revision: current['revision'],
-        messageText: current['lastMessage'] ?? current['state'],
+        state: current['state'] as String,
+        messageText: current['lastMessage']?.toString() ?? '',
       );
     } catch (e) {
       debugPrint('[Notifications] Unable to reconcile push: $e');
@@ -386,6 +423,7 @@ class ChatNotificationService with WidgetsBindingObserver {
     required String deviceId,
     required String deviceName,
     required String messageText,
+    required String state,
     String? sessionId,
     String? ownerUid,
     required String attemptId,
@@ -402,36 +440,66 @@ class ChatNotificationService with WidgetsBindingObserver {
       return;
     }
     if (ownerUid != FirebaseAuth.instance.currentUser?.uid) return;
-    if (_isChatVisible(deviceId, sessionId)) return;
+    final text = PublicationNotification.textFor(state, messageText);
+    if (_isChatVisible(deviceId, sessionId) &&
+        !PublicationNotification.needsAttention(state, text)) {
+      return;
+    }
     await _localNotifications.show(
       id: '$deviceId/$sessionId'.hashCode & 0x7fffffff,
       title: deviceName,
-      body: messageText,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          channelId,
-          channelName,
-          channelDescription: channelDesc,
-          importance: Importance.low,
-          priority: Priority.low,
-          playSound: false,
-          enableVibration: false,
-          icon: 'ic_pirsumoto_notification',
-        ),
-        iOS: DarwinNotificationDetails(
-          presentAlert: true,
-          presentBanner: false,
-          presentSound: false,
-          presentBadge: false,
-          presentList: true,
-        ),
-      ),
+      body: text,
+      notificationDetails: detailsForMessage(text, state: state),
       payload: jsonEncode({
         'deviceId': deviceId,
         'deviceName': deviceName,
         'sessionId': sessionId,
         'ownerUid': ownerUid,
       }),
+    );
+  }
+
+  static NotificationDetails detailsForMessage(
+    String messageText, {
+    String state = '',
+  }) {
+    final manualInput = messageText.contains('נדרשת הזנה ידנית');
+    final urgent =
+        manualInput ||
+        PublicationNotification.needsAttention(state, messageText);
+    return NotificationDetails(
+      android: AndroidNotificationDetails(
+        manualInput
+            ? manualInputChannelId
+            : urgent
+            ? outcomeChannelId
+            : channelId,
+        manualInput
+            ? 'נדרשת הזנה ידנית'
+            : urgent
+            ? 'תוצאות פרסום והתערבות נדרשת'
+            : channelName,
+        channelDescription: manualInput
+            ? 'התראות דחופות לפרסומים הממתינים להזנה ידנית'
+            : urgent
+            ? 'התראות על אוטומציה שנתקעה או פרסום שהסתיים'
+            : channelDesc,
+        importance: urgent ? Importance.max : Importance.low,
+        priority: urgent ? Priority.max : Priority.low,
+        playSound: urgent,
+        enableVibration: urgent,
+        styleInformation: urgent ? BigTextStyleInformation(messageText) : null,
+        icon: 'ic_pirsumoto_notification',
+      ),
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentBanner: urgent,
+        presentSound: urgent,
+        presentBadge: urgent,
+        presentList: true,
+        sound: urgent ? 'default' : null,
+        interruptionLevel: urgent ? InterruptionLevel.active : null,
+      ),
     );
   }
 

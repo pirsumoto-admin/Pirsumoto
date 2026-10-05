@@ -12,18 +12,21 @@ import 'remote_keyboard_handler.dart';
 class RemoteControlScreen extends StatefulWidget {
   final ControllerWebRtcSession session;
   final String deviceName;
+  final bool ownsSession;
 
   const RemoteControlScreen({
     super.key,
     required this.session,
     required this.deviceName,
+    this.ownsSession = false,
   });
 
   @override
   State<RemoteControlScreen> createState() => _RemoteControlScreenState();
 }
 
-class _RemoteControlScreenState extends State<RemoteControlScreen> {
+class _RemoteControlScreenState extends State<RemoteControlScreen>
+    with WidgetsBindingObserver {
   final GlobalKey<TouchFeedbackOverlayState> _touchOverlayKey = GlobalKey();
 
   Offset? _panStartLocal;
@@ -33,10 +36,27 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
   bool _isHumanControl = false;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        !widget.session.isConnected &&
+        !widget.session.isConnecting) {
+      widget.session.connect();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (_isHumanControl) {
       widget.session.sendHandover('automation');
     }
+    if (widget.ownsSession) widget.session.dispose();
     super.dispose();
   }
 
@@ -98,9 +118,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                   return Column(
                     children: [
                       // Video Stream Viewport
-                      Expanded(
-                        child: _buildVideoArea(context),
-                      ),
+                      Expanded(child: _buildVideoArea(context)),
 
                       // Fixed Bottom Toolbar (4 columns in RTL order)
                       _buildBottomToolbar(context),
@@ -158,11 +176,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
-            Icons.videocam_rounded,
-            size: 14,
-            color: AppColors.error,
-          ),
+          const Icon(Icons.videocam_rounded, size: 14, color: AppColors.error),
           const SizedBox(width: 4),
           Container(
             width: 6,
@@ -200,7 +214,10 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
             const SizedBox(height: 14),
             Text(
               widget.session.errorMessage ?? 'החיבור הסתיים',
-              style: GoogleFonts.heebo(color: AppColors.secondary, fontSize: 14),
+              style: GoogleFonts.heebo(
+                color: AppColors.secondary,
+                fontSize: 14,
+              ),
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
@@ -237,7 +254,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                 behavior: HitTestBehavior.opaque,
                 onTapDown: (details) {
                   if (!_isHumanControl) return;
-                  _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
+                  _touchOverlayKey.currentState?.addTouchRipple(
+                    details.localPosition,
+                  );
                 },
                 onTapUp: (details) {
                   if (!_isHumanControl) {
@@ -265,7 +284,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                 },
                 onLongPressStart: (details) {
                   if (!_isHumanControl) return;
-                  _touchOverlayKey.currentState?.addTouchRipple(details.localPosition);
+                  _touchOverlayKey.currentState?.addTouchRipple(
+                    details.localPosition,
+                  );
 
                   final norm = CoordinateMapper.mapLocalToNormalized(
                     localPosition: details.localPosition,
@@ -273,7 +294,11 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                     videoAspectRatio: aspectRatio,
                   );
                   if (norm != null) {
-                    widget.session.sendLongPress(norm.dx, norm.dy, durationMs: 700);
+                    widget.session.sendLongPress(
+                      norm.dx,
+                      norm.dy,
+                      durationMs: 700,
+                    );
                   }
                 },
                 onPanStart: (details) {
@@ -293,17 +318,20 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                 onPanEnd: (details) {
                   if (!_isHumanControl) return;
                   if (_panStartLocal != null && _panCurrentLocal != null) {
-                    final totalDistance = (_panCurrentLocal! - _panStartLocal!).distance;
+                    final totalDistance =
+                        (_panCurrentLocal! - _panStartLocal!).distance;
                     final velocity = details.velocity.pixelsPerSecond;
 
                     if (totalDistance >= 25.0 || velocity.distance >= 250.0) {
-                      final endNormalized = CoordinateMapper.mapLocalToNormalized(
-                        localPosition: _panCurrentLocal!,
-                        containerSize: containerSize,
-                        videoAspectRatio: aspectRatio,
-                      );
+                      final endNormalized =
+                          CoordinateMapper.mapLocalToNormalized(
+                            localPosition: _panCurrentLocal!,
+                            containerSize: containerSize,
+                            videoAspectRatio: aspectRatio,
+                          );
 
-                      if (_panStartNormalized != null && endNormalized != null) {
+                      if (_panStartNormalized != null &&
+                          endNormalized != null) {
                         widget.session.sendSwipe(
                           _panStartNormalized!.dx,
                           _panStartNormalized!.dy,
@@ -326,7 +354,8 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
                       aspectRatio: aspectRatio,
                       child: RTCVideoView(
                         widget.session.videoRenderer,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                       ),
                     ),
                   ),
@@ -408,10 +437,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
         const chunkSize = 400;
         for (var i = 0; i < msgs.docs.length; i += chunkSize) {
           final batch = FirebaseFirestore.instance.batch();
-          final end =
-              (i + chunkSize < msgs.docs.length)
-                  ? i + chunkSize
-                  : msgs.docs.length;
+          final end = (i + chunkSize < msgs.docs.length)
+              ? i + chunkSize
+              : msgs.docs.length;
           for (var j = i; j < end; j++) {
             batch.delete(msgs.docs[j].reference);
           }
@@ -436,14 +464,14 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
           .collection('messages')
           .doc(messageId)
           .set({
-        'id': messageId,
-        'sender': 'user',
-        'type': 'reset',
-        'text': '',
-        'status': 'pending',
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+            'id': messageId,
+            'sender': 'user',
+            'type': 'reset',
+            'text': '',
+            'status': 'pending',
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
     } catch (_) {}
 
     if (mounted) {
@@ -465,16 +493,15 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: const BoxDecoration(
         color: AppColors.surface,
-        border: Border(
-          top: BorderSide(color: AppColors.border, width: 1),
-        ),
+        border: Border(top: BorderSide(color: AppColors.border, width: 1)),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
           // 1. Back (חזרה) - Physical Right in RTL
           _buildActionButton(
-            icon: Icons.arrow_forward_rounded, // Right-pointing back arrow in RTL
+            icon:
+                Icons.arrow_forward_rounded, // Right-pointing back arrow in RTL
             label: 'חזרה',
             color: _isHumanControl ? AppColors.onSurface : AppColors.secondary,
             onTap: () {
@@ -500,7 +527,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
           _buildActionButton(
             icon: Icons.touch_app_rounded,
             label: _isHumanControl ? 'שחרור שליטה' : 'קבלת שליטה',
-            color: _isHumanControl ? AppColors.primaryAction : AppColors.secondary,
+            color: _isHumanControl
+                ? AppColors.primaryAction
+                : AppColors.secondary,
             isHighlighted: _isHumanControl,
             onTap: () {
               final nextState = !_isHumanControl;

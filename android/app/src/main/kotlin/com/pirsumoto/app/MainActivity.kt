@@ -146,6 +146,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         AutomationWebViewLifecycle.register(flutterEngine)
+        PublicationDeadlineReceiver.register(this, flutterEngine)
         // [WHATSAPP-DISABLED] WhatsApp auto-publish intent capture disabled.
         // WhatsAppAutoPublishStore.captureIntent(intent)
         // [WHATSAPP-DISABLED] WhatsApp MethodChannel and EventChannel registration disabled.
@@ -471,6 +472,22 @@ class MainActivity : FlutterActivity() {
                         result.success(accepted)
                     }
                 }
+                "replaceInputText", "getInputText" -> {
+                    val input = service.findInputByIdOrLabel(
+                        rootNode,
+                        call.argument<String>("viewId"),
+                        call.argument<String>("labels")
+                    )
+                    if (call.method == "getInputText") {
+                        val showingHint = Build.VERSION.SDK_INT >= 26 && input?.isShowingHintText == true
+                        result.success(if (input == null) null else if (showingHint) "" else input.text?.toString() ?: "")
+                    } else {
+                        val accepted = input != null && input.isEnabled &&
+                            service.replaceAllTextInNode(input, call.argument<String>("value") ?: "")
+                        Log.d("A11Y", "replaceInputText: found=${input != null}, id=${input?.viewIdResourceName}, accepted=$accepted")
+                        result.success(accepted)
+                    }
+                }
                 "replaceFocusedWebViewText" -> {
                     val identifier = call.argument<Number>("identifier")?.toLong()
                     @Suppress("DEPRECATION")
@@ -668,7 +685,11 @@ class MainActivity : FlutterActivity() {
                     } else {
                         cleared = clearFocused(rootNode)
                     }
-                    result.success(cleared)
+                    val keyboardVisible = service.windows?.any { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
+                    if (keyboardVisible) {
+                        service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                    }
+                    result.success(cleared || keyboardVisible)
                 }
                 "pressBack" -> {
                     val pressed = service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
@@ -852,9 +873,14 @@ class MainActivity : FlutterActivity() {
                     val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
                     val componentName = android.content.ComponentName(context, DeviceAdminReceiver::class.java)
                     if (dpm.isDeviceOwnerApp(context.packageName)) {
-                        dpm.setLockTaskPackages(componentName, arrayOf(context.packageName))
-                        startLockTask()
-                        result.success(true)
+                        try {
+                            dpm.setLockTaskPackages(componentName, arrayOf(context.packageName))
+                            KioskUpdatePolicy.enter(context, dpm, componentName)
+                            startLockTask()
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("KIOSK_POLICY_ERROR", e.message, null)
+                        }
                     } else {
                         result.error("NOT_DEVICE_OWNER", "App is not a device owner", null)
                     }
@@ -862,6 +888,10 @@ class MainActivity : FlutterActivity() {
                 "stopKioskMode" -> {
                     try {
                         stopLockTask()
+                        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                        if (dpm.isDeviceOwnerApp(context.packageName)) {
+                            KioskUpdatePolicy.exit(context, dpm, android.content.ComponentName(context, DeviceAdminReceiver::class.java))
+                        }
                         result.success(true)
                     } catch (e: Exception) {
                         result.error("KIOSK_ERROR", e.message, null)

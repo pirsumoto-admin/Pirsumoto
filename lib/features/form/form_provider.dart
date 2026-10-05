@@ -24,6 +24,8 @@ abstract class FormState with _$FormState {
     @Default('') String handicapped,
     @Default('טוב') String vehicleCondition,
     @Default('') String description,
+    @Default('') String highlights,
+    @Default(false) bool cleanTitle,
     @Default('') String fuelType,
     @Default('') String gear,
     @Default([]) List<String> images,
@@ -93,6 +95,12 @@ class FormController extends _$FormController {
       case 'description':
         state = state.copyWith(description: value);
         break;
+      case 'highlights':
+        state = state.copyWith(highlights: value);
+        break;
+      case 'cleanTitle':
+        state = state.copyWith(cleanTitle: value == 'true');
+        break;
       case 'fuelType':
         state = state.copyWith(fuelType: value);
         break;
@@ -115,6 +123,10 @@ class FormController extends _$FormController {
   }
 
   void updateFromAI(Map<String, dynamic> data) {
+    final incomingLicense = data['license']?.toString() ?? '';
+    if (incomingLicense.isNotEmpty && incomingLicense != state.license) {
+      state = const FormState();
+    }
     state = state.copyWith(
       license: data['license']?.toString() ?? state.license,
       maker: data['maker']?.toString() ?? state.maker,
@@ -132,6 +144,8 @@ class FormController extends _$FormController {
       vehicleCondition:
           data['vehicleCondition']?.toString() ?? state.vehicleCondition,
       description: data['description']?.toString() ?? state.description,
+      highlights: data['highlights']?.toString() ?? state.highlights,
+      cleanTitle: data['cleanTitle'] ?? state.cleanTitle,
       fuelType: data['fuelType']?.toString() ?? state.fuelType,
       gear: data['gear']?.toString() ?? state.gear,
       isTypingMode: true,
@@ -185,6 +199,8 @@ class FormController extends _$FormController {
       handicapped: listing['handicapped']?.toString() ?? '',
       vehicleCondition: listing['vehicleCondition']?.toString() ?? 'טוב',
       description: listing['description']?.toString() ?? '',
+      highlights: listing['highlights']?.toString() ?? '',
+      cleanTitle: listing['cleanTitle'] ?? false,
       gear: listing['gear']?.toString() ?? '',
       fuelType: listing['fuelType']?.toString() ?? '',
       images: images,

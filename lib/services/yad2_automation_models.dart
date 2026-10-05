@@ -26,6 +26,8 @@ class VehiclePublishData {
   final List<String> treatments;
   final List<String> services;
   final String description;
+  final String highlights;
+  final bool cleanTitle;
   final int? expectedImageCount;
   final String? testYear;
   final String? testMonth;
@@ -58,6 +60,8 @@ class VehiclePublishData {
     this.treatments = const [],
     this.services = const [],
     this.description = '',
+    this.highlights = '',
+    this.cleanTitle = false,
     this.expectedImageCount,
     this.testYear,
     this.testMonth,
@@ -90,6 +94,8 @@ class VehiclePublishData {
     List<String>? treatments,
     List<String>? services,
     String? description,
+    String? highlights,
+    bool? cleanTitle,
     int? expectedImageCount,
     String? testYear,
     String? testMonth,
@@ -122,12 +128,57 @@ class VehiclePublishData {
       treatments: treatments ?? this.treatments,
       services: services ?? this.services,
       description: description ?? this.description,
+      highlights: highlights ?? this.highlights,
+      cleanTitle: cleanTitle ?? this.cleanTitle,
       expectedImageCount: expectedImageCount ?? this.expectedImageCount,
       testYear: testYear ?? this.testYear,
       testMonth: testMonth ?? this.testMonth,
       govIl: govIl ?? this.govIl,
       includeYad2: includeYad2 ?? this.includeYad2,
     );
+  }
+
+  String descriptionFromTemplate(String template) {
+    final fields = <String, String>{
+      'maker': maker,
+      'model': model,
+      'year': year,
+      'color': color,
+      'hand': hand,
+      'km': kilometers,
+      'vehicle_condition': vehicleCondition,
+      'highlights': highlights,
+      'price': price,
+      'license_plate': licenseNumber,
+      'city': city,
+      'fuel_type': fuelType,
+    };
+    final rendered = VehicleDescriptionTemplate.render(template, fields);
+    final original =
+        description.isEmpty
+            ? ''
+            : VehicleDescriptionTemplate.render(description, fields);
+    final freeText =
+        highlights.isEmpty
+            ? original
+            : original.replaceAll('חשוב לדעת: $highlights', '');
+    // Keep optional claims and free text without duplicating template highlights.
+    final additional = freeText
+        .split('\n')
+        .where(
+          (line) =>
+              line.trim().isNotEmpty &&
+              !rendered.contains(line.trim()) &&
+              line.trim() != 'לרכב זה יש טייטל נקי' &&
+              (highlights.isEmpty || line.trim() != 'חשוב לדעת: $highlights'),
+        )
+        .join('\n');
+    return [
+      rendered,
+      if (additional.isNotEmpty) additional,
+      if (cleanTitle || description.contains('לרכב זה יש טייטל נקי'))
+        'לרכב זה יש טייטל נקי',
+    ].join('\n');
   }
 
   /// Maps a numeric or plain hand value to Hebrew text for Yad2.
@@ -230,4 +281,38 @@ enum AutomationPhase {
   final int targetInstance;
 
   const AutomationPhase(this.description, this.targetText, this.targetInstance);
+
+  String get resumeLabel =>
+      const <AutomationPhase, String>{
+        AutomationPhase.phase1: 'פתיחת מסך הפרסום',
+        AutomationPhase.phase2: 'מספר רישוי וחיפוש הרכב',
+        AutomationPhase.phase3: 'המשך מפרטי הרכב',
+        AutomationPhase.phase4: 'פתיחת בחירת צבע',
+        AutomationPhase.phase5: 'בחירת צבע',
+        AutomationPhase.phase5a: 'פתיחת חודש עלייה לכביש',
+        AutomationPhase.phase5b: 'בחירת חודש עלייה לכביש',
+        AutomationPhase.phase5c: 'ללא טסט',
+        AutomationPhase.phase5c1: 'פתיחת שנת טסט',
+        AutomationPhase.phase5c2: 'בחירת שנת טסט',
+        AutomationPhase.phase5c3: 'פתיחת חודש טסט',
+        AutomationPhase.phase5c4: 'בחירת חודש טסט',
+        AutomationPhase.phase5d: 'אחריות',
+        AutomationPhase.phase5e: 'טיפולים',
+        AutomationPhase.phase5f: 'שירותים',
+        AutomationPhase.phase6: 'פתיחת בחירת יד',
+        AutomationPhase.phase7: 'בחירת מספר היד',
+        AutomationPhase.phase8: 'פתיחת בעלות נוכחית',
+        AutomationPhase.phase9: 'בחירת בעלות נוכחית',
+        AutomationPhase.phase10: 'פתיחת בעלות קודמת',
+        AutomationPhase.phase11: 'בחירת בעלות קודמת',
+        AutomationPhase.phase12: 'קילומטראז׳',
+        AutomationPhase.phase13: 'התאמה לנכים',
+        AutomationPhase.phase14: 'מלל ופרטים נוספים',
+        AutomationPhase.phase15: 'בחירת עיר',
+        AutomationPhase.phase16: 'מחיר והמשך',
+        AutomationPhase.phase17: 'תמונות והמשך',
+        AutomationPhase.phase18: 'אישור התקנון והמשך',
+        AutomationPhase.phase19: 'סגירת מסך קידום',
+        AutomationPhase.complete: 'בדיקת אישור הפרסום',
+      }[this]!;
 }

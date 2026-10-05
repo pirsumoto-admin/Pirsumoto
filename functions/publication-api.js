@@ -63,7 +63,7 @@ function createPublicationApi(admin, db) {
         if (!selected) return {ok:true, request:null};
         const data = selected.data();
         const update = {state:'preparing', workerRunId:body.workerRunId,
-          revision:data.revision+1, lastMessage:'בודק פרטים ותמונות',
+          revision:data.revision+1, startedAt:admin.firestore.Timestamp.fromMillis(Date.now()), lastMessage:'בודק פרטים ותמונות',
           updatedAt:admin.firestore.FieldValue.serverTimestamp()};
         tx.set(deviceRef, {activeRequestId:selected.id, workerRunId:body.workerRunId,
           leaseUntil:admin.firestore.Timestamp.fromMillis(Date.now()+60000)}, {merge:true});
@@ -107,6 +107,11 @@ function createPublicationApi(admin, db) {
           }
         }
         const prevRev = (existing.exists && Number.isInteger(existing.data().revision)) ? existing.data().revision : 0;
+        // Keep the prior result and submitted parameters when this chat is
+        // explicitly published again with a fresh attempt and edited values.
+        if (existing.exists && validId(existing.data().attemptId)) {
+          tx.set(ref.collection('attempts').doc(existing.data().attemptId), existing.data());
+        }
         const data = {protocolVersion:1, ownerUid:uid, deviceId, requestId, sessionId:requestId, attemptId,
           state:'queued', archived:false, revision:prevRev+1, vehicleData, attachments:attachments.map(({path,size,sha256,generation})=>({path,size,sha256,generation})),
           platforms:['yad2','facebook'], completedPlatforms:[], enqueuedAt:admin.firestore.FieldValue.serverTimestamp(),
@@ -136,11 +141,23 @@ function createPublicationApi(admin, db) {
       });
       return {ok:true};
     }
-    if (action !== 'control_publication' || !['pause','resume','cancel'].includes(body.command)) fail(400, 'invalid_command');
+    if (action !== 'control_publication' || !['pause','resume','cancel','park'].includes(body.command)) fail(400, 'invalid_command');
     return db.runTransaction(async tx => {
       const snap = await tx.get(ref), data = snap.data();
       if (!data || data.ownerUid !== uid || data.attemptId !== attemptId) fail(409, 'stale_request');
       if (terminal.has(data.state)) return {ok:true, request:data};
+      if (body.command === 'park' && (!['paused','stuck'].includes(data.state) || data.parked === true)) fail(409, 'cannot_park');
+      if (data.parked === true) {
+        if (!['resume','cancel'].includes(body.command)) fail(409, 'request_parked');
+        const update = {state:body.command === 'resume' ? 'queued' : 'canceled', parked:false,
+          control:null, workerRunId:null, updatedAt:admin.firestore.FieldValue.serverTimestamp(),
+          revision:data.revision+1, lastMessage:body.command === 'resume' ? 'חזר לתור; מתחיל מחדש באתר שלא הושלם' : 'הפרסום בוטל'};
+        if (body.command === 'resume') update.enqueuedAt = admin.firestore.FieldValue.serverTimestamp();
+        tx.update(ref, update);
+        return {ok:true,request:{...data,...update}};
+      }
+
+      if (body.resumePhase != null && (body.command !== 'resume' || !(data.resumeOptions || []).some(option => option.name === body.resumePhase))) fail(400, 'invalid_resume_phase');
       if (body.command === 'resume' && !['paused','stuck'].includes(data.state)) fail(409, 'cannot_resume');
       if (body.command === 'pause' && !['preparing','publishing'].includes(data.state)) fail(409, 'cannot_pause');
       if (data.state === 'canceling' && body.command !== 'cancel') fail(409, 'cancel_in_progress');
@@ -151,7 +168,7 @@ function createPublicationApi(admin, db) {
         Object.assign(update, {state:'canceled',lastMessage:'הבקשה בוטלה לפני הפרסום'});
       } else {
         if (body.command === 'cancel') Object.assign(update, {state:'canceling',lastMessage:'ממתין לאישור ביטול מהמכשיר'});
-        update.control = {id:crypto.randomUUID(),command:body.command,attemptId};
+        update.control = {id:crypto.randomUUID(),command:body.command,attemptId, ...(body.resumePhase != null ? {resumePhase:body.resumePhase} : {})};
       }
       tx.update(ref, update);
       return {ok:true, request:{...data,...update}};

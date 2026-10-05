@@ -1,6 +1,8 @@
+import 'package:publication_protocol/publication_protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:pirsumoto_remote_control/services/chat_notification_service.dart';
 import 'package:pirsumoto_remote_control/services/notification_visibility.dart';
 import 'package:pirsumoto_remote_control/ui/whatsapp_chat_screen.dart';
@@ -22,6 +24,95 @@ void main() {
             'sessionId': 'request',
           },
         ),
+      );
+    },
+  );
+
+  test(
+    'manual entry alerts expand text and enable heads-up priority and sound',
+    () {
+      const body = 'נדרשת הזנה ידנית של פרטי הרכב ביד2 (שליטה מרחוק).';
+      final details = ChatNotificationService.detailsForMessage(body);
+      expect(
+        details.android!.channelId,
+        ChatNotificationService.manualInputChannelId,
+      );
+      expect(details.android!.importance, Importance.max);
+      expect(details.android!.priority, Priority.max);
+      expect(details.android!.playSound, isTrue);
+      expect(details.android!.enableVibration, isTrue);
+      expect(
+        (details.android!.styleInformation as BigTextStyleInformation).bigText,
+        body,
+      );
+      expect(details.iOS!.presentBanner, isTrue);
+      expect(details.iOS!.presentSound, isTrue);
+      expect(details.iOS!.sound, 'default');
+      expect(details.iOS!.interruptionLevel, InterruptionLevel.active);
+    },
+  );
+
+  test('routine updates keep the silent channel', () {
+    final details = ChatNotificationService.detailsForMessage(
+      'האוטומציה הושהתה',
+    );
+    expect(details.android!.channelId, ChatNotificationService.channelId);
+    expect(details.android!.importance, Importance.low);
+    expect(details.android!.playSound, isFalse);
+    expect(details.iOS!.presentBanner, isFalse);
+    expect(details.iOS!.presentSound, isFalse);
+  });
+
+  test('outcomes use audible heads-up and iOS banners', () {
+    for (final state in ['stuck', 'failed', 'completed']) {
+      final details = ChatNotificationService.detailsForMessage(
+        'Update',
+        state: state,
+      );
+      expect(
+        details.android!.channelId,
+        ChatNotificationService.outcomeChannelId,
+      );
+      expect(details.android!.importance, Importance.max);
+      expect(details.android!.priority, Priority.max);
+      expect(details.android!.playSound, isTrue);
+      expect(details.iOS!.presentBanner, isTrue);
+      expect(details.iOS!.presentSound, isTrue);
+      expect(details.iOS!.sound, 'default');
+      expect(PublicationNotification.needsAttention(state, 'Update'), isTrue);
+    }
+  });
+
+  test(
+    'stale cancellation text never describes an active or successful request',
+    () {
+      for (final state in [
+        'queued',
+        'preparing',
+        'publishing',
+        'paused',
+        'stuck',
+        'failed',
+        'completed',
+        'canceling',
+      ]) {
+        final text = PublicationNotification.textFor(state, 'הפרסום בוטל');
+        expect(text, isNot(contains('בוטל')), reason: state);
+      }
+      expect(
+        PublicationNotification.textFor('canceled', 'הפרסום בוטל'),
+        'הפרסום בוטל',
+      );
+      expect(
+        PublicationNotification.textFor(
+          'completed',
+          'הפרסום ביד2 הושלם בהצלחה',
+        ),
+        'הפרסום ביד2 הושלם בהצלחה',
+      );
+      expect(
+        PublicationNotification.needsAttention('publishing', 'Progress'),
+        isFalse,
       );
     },
   );

@@ -135,6 +135,9 @@ void main() {
                   missingFields: const ['price'],
                   currentData: const {
                     'maker': 'מאזדה',
+                    'govIl': 'true',
+                    'test_year': '2027',
+                    'test_month': '1',
                     'km': '85000',
                     'previous_ownership': 'פרטית',
                   },
@@ -186,6 +189,7 @@ void main() {
       expect(validBtn.onPressed, isNotNull);
 
       // Tap save button
+      await tester.ensureVisible(saveBtnFinder);
       await tester.tap(saveBtnFinder);
       await tester.pumpAndSettle();
 
@@ -193,6 +197,8 @@ void main() {
       expect(savedValues!['price'], '45000');
       expect(savedValues!['km'], '85000');
       expect(savedValues!['previous_ownership'], 'פרטית');
+      expect(savedValues!['highlights'], '');
+      expect(find.text('✅ הפרטים נשמרו'), findsOneWidget);
     },
   );
 }

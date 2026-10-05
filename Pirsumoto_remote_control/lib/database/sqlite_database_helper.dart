@@ -18,7 +18,7 @@ class SqliteDatabaseHelper {
     return 'remote_control_chat_${sha256.convert(utf8.encode(uid))}.db';
   }
 
-  static const int _databaseVersion = 3;
+  static const int _databaseVersion = 4;
 
   static const String tableSessions = 'chat_sessions';
   static const String tableMessages = 'chat_messages';
@@ -57,7 +57,8 @@ class SqliteDatabaseHelper {
         vehicleDataJson TEXT,
         imagePathsJson TEXT,
         expectedImageCount INTEGER,
-        isReadyToPublish INTEGER
+        isReadyToPublish INTEGER,
+        draftBaseAttemptId TEXT
       )
     ''');
 
@@ -84,6 +85,11 @@ class SqliteDatabaseHelper {
   }
 
   Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 4) {
+      await db.execute(
+        'ALTER TABLE $tableSessions ADD COLUMN draftBaseAttemptId TEXT',
+      );
+    }
     if (oldVersion < 3) await _createNotificationReceipts(db);
     if (oldVersion < 2) {
       try {

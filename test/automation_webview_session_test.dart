@@ -219,4 +219,20 @@ void main() {
       expect(platform.controllers, hasLength(2));
     },
   );
+  test(
+    'expired session forces failed drain cleanup and cannot close its successor',
+    () async {
+      var detached = false;
+      final expired = await open(
+        stop: () async => throw StateError('stuck phase'),
+        detach: () async => detached = true,
+      );
+      await expired!.expire();
+      expect(detached, isTrue);
+      var successorClosed = false;
+      await open(detach: () async => successorClosed = true);
+      await expired.expire();
+      expect(successorClosed, isFalse);
+    },
+  );
 }

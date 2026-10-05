@@ -16,10 +16,43 @@ MAIN_ACTIVITY="com.pirsumoto.app.MainActivity"
 # NOTE: You must create this receiver in your Android code for Device Owner to work!
 ADMIN_RECEIVER="com.pirsumoto.app.DeviceAdminReceiver" 
 
+DEVICE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -s|--device)
+      DEVICE_ID="$2"
+      shift 2
+      ;;
+    *)
+      DEVICE_ID="$1"
+      shift
+      ;;
+  esac
+done
+
 ADB_CMD="adb"
-if [ ! -z "$1" ]; then
-  echo "Using specific device: $1"
-  ADB_CMD="$ADB_CMD -s $1"
+if [ -n "$DEVICE_ID" ]; then
+  echo "Using specific device: $DEVICE_ID"
+  ADB_CMD="adb -s $DEVICE_ID"
+else
+  # Check connected devices
+  CONNECTED_DEVICES=($(adb devices | grep -v "List of devices" | awk '$2=="device" {print $1}'))
+  if [ ${#CONNECTED_DEVICES[@]} -gt 1 ]; then
+    echo "Error: Multiple ADB devices detected (${#CONNECTED_DEVICES[@]}):"
+    for dev in "${CONNECTED_DEVICES[@]}"; do
+      echo "  - $dev"
+    done
+    echo ""
+    echo "Please specify target device ID:"
+    echo "  $0 <device_id>"
+    echo "  e.g.: $0 ${CONNECTED_DEVICES[0]}"
+    exit 1
+  elif [ ${#CONNECTED_DEVICES[@]} -eq 1 ]; then
+    DEVICE_ID="${CONNECTED_DEVICES[0]}"
+    ADB_CMD="adb -s $DEVICE_ID"
+    echo "Auto-detected single device: $DEVICE_ID"
+  fi
 fi
 
 echo "======================================================"

@@ -118,6 +118,59 @@ void main() {
     );
   });
 
+  for (final interrupt in ['none', 'pause', 'stop']) {
+    testWidgets('Yad2 handoff after five seconds: $interrupt', (tester) async {
+      wakelockPlusPlatformInstance = _Wakelock();
+      final webView = _WebView()..accessibilityOnly = true;
+      final completed = <bool>[];
+      final nativeCalls = <String>[];
+      final service = Yad2AccessibilityAutomationService(
+        controller: WebViewController.fromPlatform(webView),
+        formData: const VehiclePublishData(
+          licenseNumber: '1234567',
+          color: 'כחול',
+          shade: 'כחול',
+          hand: 'ראשונה',
+          currentOwnership: 'פרטית',
+          previousOwnership: 'פרטית',
+          kilometers: '100',
+          month: '1',
+          price: '80000',
+          handicapped: false,
+          noTest: false,
+        ),
+        onAutomationComplete: completed.add,
+      );
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        nativeCalls.add(call.method);
+        // No accessible popup close button or success heading is available.
+        return call.method == 'checkAutomationWindow' ? true : null;
+      });
+      await service.selectResumePhase(AutomationPhase.phase19);
+      service.resumeAutomation();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 4));
+      expect(completed, isEmpty);
+      if (interrupt == 'pause') service.pauseAutomation();
+      if (interrupt == 'stop') service.stop();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(completed, interrupt == 'none' ? [true] : isEmpty);
+      expect(nativeCalls, ['checkAutomationWindow']);
+      expect(webView.forbiddenCalls, 0);
+      if (interrupt == 'pause') {
+        expect(service.pausedPhase, AutomationPhase.phase19);
+        service.resumeAutomation();
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pump();
+        expect(completed, [true]);
+      }
+      service.dispose();
+      messenger.setMockMethodCallHandler(channel, null);
+    });
+  }
+
   for (final scenario in [
     'normal',
     'pause after entry',
@@ -127,6 +180,7 @@ void main() {
     'readback missing',
     'terms delayed',
     'terms missing',
+    'terms deadline',
     'terms pause after checkbox',
     'terms next temporarily unavailable',
   ]) {
@@ -152,9 +206,11 @@ void main() {
       bool termsReady() =>
           photoSubmittedAt != null &&
           scenario != 'terms missing' &&
+          scenario != 'terms deadline' &&
           tester.binding.clock.now().difference(photoSubmittedAt!) >=
               Duration(seconds: scenario == 'terms delayed' ? 6 : 0);
       final events = <String>[];
+      final errors = <String>[];
       service = Yad2AccessibilityAutomationService(
         controller: WebViewController.fromPlatform(webView),
         formData: const VehiclePublishData(
@@ -170,6 +226,11 @@ void main() {
           handicapped: false,
           noTest: false,
         ),
+        settingsLoader: () async => {'yad2Desc': description},
+        phaseTimeout: Duration(
+          seconds: scenario == 'terms deadline' ? 15 : 120,
+        ),
+        onPhaseError: (_, error) => errors.add(error),
         enableLlmRecovery: false,
         allowOcrFallback: false,
         onPhaseChanged: (phase) {
@@ -189,6 +250,21 @@ void main() {
         final target = args['target']?.toString() ?? '';
         final phase = service.currentPhase;
         if (call.method == 'checkAutomationWindow') return true;
+        if (call.method == 'getInputTextBeforeTarget') return '1234567';
+        if (call.method == 'replaceInputText') return true;
+        if (call.method == 'getInputText') return description;
+        if (call.method == 'ensureCheckableChecked') {
+          // The captured Android hierarchy exposes an unlabeled checkbox
+          // with DOM id eula; the adjacent terms link is not the checkbox.
+          expectSync(target.split('|'), contains('eula'));
+          expectSync(target.split('|'), isNot(contains('subscribe')));
+          if (!termsReady()) return 'failed';
+          if (checkboxClicks == 0) {
+            checkboxClicks++;
+            events.add('checkbox');
+          }
+          return 'checked';
+        }
         if (call.method == 'logTree') {
           if (onPrice) return node('android.view.View', 'מחיר');
           // Match the user's working flow: the description is already
@@ -196,6 +272,7 @@ void main() {
           return descriptionTree(description);
         }
         if (call.method == 'findNodeTextAfterTarget') {
+          if (target.contains('קילומטראז')) return '100';
           if (target.contains('מחיר')) {
             if (scenario == 'readback missing') return null;
             return scenario == 'readback mismatch' ? '12345' : price;
@@ -206,6 +283,12 @@ void main() {
           if ([
             'התחברות',
             'כניסה לאזור',
+            'כניסה לאזור האישי',
+            'כניסה באמצעות',
+            'אימייל/מספר טלפון',
+            'שם משתמש',
+            'Password',
+            'מספר נייד או אימייל',
             'דוא"ל',
             'סיסמה',
             'הרשמה',
@@ -250,7 +333,7 @@ void main() {
           price = args['value'] as String;
           return true;
         }
-        if (call.method == 'pressBack' && phase == AutomationPhase.phase16) {
+        if (call.method == 'clearFocus' && phase == AutomationPhase.phase16) {
           priceBackPresses++;
         }
         if (call.method == 'tapScreen') {
@@ -308,12 +391,24 @@ void main() {
         service.pauseAutomation();
         expect(priceClicks, 0);
         expect(priceBackPresses, 0);
+      } else if (scenario.startsWith('readback')) {
+        await until(tester, () => service.isPaused);
+        expect(priceClicks, 0);
+        expect(priceBackPresses, 0);
       } else {
-        if (scenario == 'terms missing') {
+        if (scenario == 'terms missing' || scenario == 'terms deadline') {
           await until(tester, () => photoClicks == 1);
-          for (var i = 0; i < 300; i++) {
-            await tester.pump(const Duration(milliseconds: 100));
-          }
+          await until(tester, () => service.isPaused);
+          expect(errors, hasLength(1));
+          expect(service.pausedPhase, AutomationPhase.phase18);
+          expect(
+            errors.single,
+            contains(
+              scenario == 'terms deadline' ? 'לא התקדם בזמן' : 'Stuck at',
+            ),
+          );
+          await tester.pump(const Duration(seconds: 5));
+          expect(errors, hasLength(1));
           expect(service.currentPhase, AutomationPhase.phase18);
           expect(checkboxClicks, 0);
           expect(termsClicks, 0);
@@ -330,7 +425,7 @@ void main() {
         }
         if (testingTerms) {
           expect(photoClicks, 1);
-          if (scenario != 'terms missing') {
+          if (scenario != 'terms missing' && scenario != 'terms deadline') {
             expect(checkboxClicks, 1);
             expect(termsClicks, 1);
             expect(
@@ -343,7 +438,7 @@ void main() {
             );
           }
         }
-        expect(priceEntries, 1);
+        expect(priceEntries, scenario == 'pause after entry' ? 2 : 1);
         expect(priceClicks, 1);
         expect(priceBackPresses, 1);
         expect(

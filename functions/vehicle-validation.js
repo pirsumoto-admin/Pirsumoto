@@ -24,10 +24,14 @@ function sanitizeFields(raw, {allowPlate = false} = {}) {
     if (!Object.hasOwn(schema.labels, key) || (key === 'license_plate' && !allowPlate)) continue;
     if (!['string','number'].includes(typeof rawValue)) continue;
     let value = String(rawValue).trim();
-    if (value.length > (key === 'description' ? 4000 : 200)) continue;
+    if (value.length > (['description', 'highlights'].includes(key) ? 4000 : 200)) continue;
     // Only strip thousands separators in correctly grouped numbers. Preserve invalid values for correction.
     if (['km','price'].includes(key) && /^\d{1,3}(,\d{3})+$/.test(value)) value = value.replace(/,/g, '');
     if (key === 'hand') value = normalizeHand(value);
+    if (key === 'clean_title') {
+      if (value === 'true' || value === '1') value = 'כן';
+      if (value === 'false' || value === '0') value = 'לא';
+    }
     if (['current_ownership','previous_ownership'].includes(key)) {
       if (value === 'פרטי') value = 'פרטית';
       if (value === 'או"ם') value = 'או״ם';
@@ -47,11 +51,12 @@ function getMissingFields(state) {
 function validateValues(state) {
   const errors = [];
   const year = new Date().getFullYear();
-  const ranges = {km:[0,1500000],price:[1,100000000],hand:[1,20],year:[1900,year+1],month:[1,12],test_month:[1,12],test_year:[1900,year+3]};
+  const ranges = {km:[0,1500000],price:[1,100000000],hand:[1,20],year:[1900,year+1],month:[1,12],test_month:[1,12],test_year:[1900,year+3],engine_capacity:[1,20000]};
   const disregarded = new Set(['city', 'handicapped', 'no_test', 'govIl', 'includeYad2', 'include_yad2', 'test_until', 'force_show_current_ownership', 'history_records']);
   for (const [key, value] of Object.entries(state)) {
     if (!value || disregarded.has(key)) continue;
     let invalid = key === 'license_plate' && !/^\d{7,8}$/.test(value);
+    if (key === 'phone') invalid ||= !/^(?:0[2-9]\d{7,8}|\+?972[2-9]\d{7,8})$/.test(value);
     if (ranges[key]) invalid ||= !/^\d+$/.test(value) || Number(value) < ranges[key][0] || Number(value) > ranges[key][1];
     // Disregard strict enum validation for color since color text is normalized internally
     if (key !== 'color' && schema.enums[key]) {

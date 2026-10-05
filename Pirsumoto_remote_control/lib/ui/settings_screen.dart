@@ -1,3 +1,4 @@
+import 'package:publication_protocol/publication_protocol.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -72,11 +73,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ];
 
   // Platform description templates
-  final _yad2DescController = TextEditingController();
-  final _fbAutoPostDescController = TextEditingController();
-  final _fbGroupXxxDescController = TextEditingController();
-  final _fbGroupYyyDescController = TextEditingController();
-  final _carWizDescController = TextEditingController();
+  final _yad2DescController = TextEditingController(
+    text: VehicleDescriptionTemplate.defaultText,
+  );
+  final _fbAutoPostDescController = TextEditingController(
+    text: VehicleDescriptionTemplate.defaultText,
+  );
+  final _fbGroupXxxDescController = TextEditingController(
+    text: VehicleDescriptionTemplate.defaultText,
+  );
+  final _fbGroupYyyDescController = TextEditingController(
+    text: VehicleDescriptionTemplate.defaultText,
+  );
+  final _carWizDescController = TextEditingController(
+    text: VehicleDescriptionTemplate.defaultText,
+  );
 
   bool _isSaving = false;
   bool _isLoading = true;
@@ -102,58 +113,83 @@ class _SettingsScreenState extends State<SettingsScreen> {
           .collection('users')
           .doc(userId)
           .snapshots()
-          .listen((doc) {
-        if (mounted) {
-          final settings = doc.exists ? (doc.data()?['settings'] as Map<String, dynamic>?) : null;
-          if (settings != null) {
-            setState(() {
-              if (!_isSaving) { // Avoid overwriting while typing/saving locally
-                _includeYad2 = settings['includeYad2'] ?? true;
-                _yad2DescController.text = settings['yad2Desc'] ?? '';
-                _fbAutoPostDescController.text = settings['fbAutoPostDesc'] ?? '';
-                _fbGroupXxxDescController.text = settings['fbGroupXxxDesc'] ?? '';
-                _fbGroupYyyDescController.text = settings['fbGroupYyyDesc'] ?? '';
-                _carWizDescController.text = settings['carWizDesc'] ?? '';
+          .listen(
+            (doc) {
+              if (mounted) {
+                final settings = doc.exists
+                    ? (doc.data()?['settings'] as Map<String, dynamic>?)
+                    : null;
+                if (settings != null) {
+                  setState(() {
+                    if (!_isSaving) {
+                      // Avoid overwriting while typing/saving locally
+                      _includeYad2 = settings['includeYad2'] ?? true;
+                      _yad2DescController.text =
+                          VehicleDescriptionTemplate.setting(
+                            settings['yad2Desc'],
+                          );
+                      _fbAutoPostDescController.text =
+                          VehicleDescriptionTemplate.setting(
+                            settings['fbAutoPostDesc'],
+                          );
+                      _fbGroupXxxDescController.text =
+                          VehicleDescriptionTemplate.setting(
+                            settings['fbGroupXxxDesc'],
+                          );
+                      _fbGroupYyyDescController.text =
+                          VehicleDescriptionTemplate.setting(
+                            settings['fbGroupYyyDesc'],
+                          );
+                      _carWizDescController.text =
+                          VehicleDescriptionTemplate.setting(
+                            settings['carWizDesc'],
+                          );
 
-                // Load Benefits & Services
-                _selectedWarranties.clear();
-                if (settings['warranties'] != null) {
-                  _selectedWarranties.addAll(
-                    List<String>.from(settings['warranties']),
-                  );
-                }
+                      // Load Benefits & Services
+                      _selectedWarranties.clear();
+                      if (settings['warranties'] != null) {
+                        _selectedWarranties.addAll(
+                          List<String>.from(settings['warranties']),
+                        );
+                      }
 
-                _warrantyDurations.clear();
-                if (settings['warrantyDurations'] != null) {
-                  final Map<String, dynamic> savedDurations =
-                      Map<String, dynamic>.from(settings['warrantyDurations']);
-                  savedDurations.forEach((k, v) {
-                    _warrantyDurations[k] = v.toString();
+                      _warrantyDurations.clear();
+                      if (settings['warrantyDurations'] != null) {
+                        final Map<String, dynamic> savedDurations =
+                            Map<String, dynamic>.from(
+                              settings['warrantyDurations'],
+                            );
+                        savedDurations.forEach((k, v) {
+                          _warrantyDurations[k] = v.toString();
+                        });
+                      }
+
+                      _selectedTreatments.clear();
+                      if (settings['treatments'] != null) {
+                        _selectedTreatments.addAll(
+                          List<String>.from(settings['treatments']),
+                        );
+                      }
+
+                      _selectedServices.clear();
+                      if (settings['services'] != null) {
+                        _selectedServices.addAll(
+                          List<String>.from(settings['services']),
+                        );
+                      }
+                    }
                   });
                 }
-
-                _selectedTreatments.clear();
-                if (settings['treatments'] != null) {
-                  _selectedTreatments.addAll(
-                    List<String>.from(settings['treatments']),
-                  );
-                }
-
-                _selectedServices.clear();
-                if (settings['services'] != null) {
-                  _selectedServices.addAll(List<String>.from(settings['services']));
+                if (_isLoading) {
+                  setState(() => _isLoading = false);
                 }
               }
-            });
-          }
-          if (_isLoading) {
-            setState(() => _isLoading = false);
-          }
-        }
-      }, onError: (e) {
-        debugPrint('[SettingsScreen] Error listening to settings: $e');
-        if (mounted) setState(() => _isLoading = false);
-      });
+            },
+            onError: (e) {
+              debugPrint('[SettingsScreen] Error listening to settings: $e');
+              if (mounted) setState(() => _isLoading = false);
+            },
+          );
     } else {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -266,30 +302,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           'treatments': _selectedTreatments.toList(),
           'services': _selectedServices.toList(),
           'updatedAt': DateTime.now().toIso8601String(),
-        }
+        },
       }, SetOptions(merge: true));
 
       if (mounted) {
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'ההגדרות נשמרו בהצלחה',
-              textAlign: TextAlign.right,
-            ),
+            content: Text('ההגדרות נשמרו בהצלחה', textAlign: TextAlign.right),
             backgroundColor: Colors.green,
           ),
         );
       }
-    } catch(e) {
+    } catch (e) {
       if (mounted) {
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'שגיאה בשמירת ההגדרות',
-              textAlign: TextAlign.right,
-            ),
+            content: Text('שגיאה בשמירת ההגדרות', textAlign: TextAlign.right),
             backgroundColor: Colors.red,
           ),
         );
@@ -410,18 +440,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             Switch(
               value: _includeYad2,
-              activeColor: const Color(0xFF3B5BDB),
+              activeThumbColor: const Color(0xFF3B5BDB),
               onChanged: (v) async {
                 setState(() => _includeYad2 = v);
                 final userId = _currentUserId;
                 if (userId != null && userId.isNotEmpty) {
                   try {
-                    await FirebaseFirestore.instance.collection('users').doc(userId).set({
-                      'settings': {
-                        'includeYad2': v,
-                        'updatedAt': DateTime.now().toIso8601String(),
-                      }
-                    }, SetOptions(merge: true));
+                    await FirebaseFirestore.instance
+                        .collection('users')
+                        .doc(userId)
+                        .set({
+                          'settings': {
+                            'includeYad2': v,
+                            'updatedAt': DateTime.now().toIso8601String(),
+                          },
+                        }, SetOptions(merge: true));
                   } catch (e) {
                     debugPrint('[Settings] Error auto-saving includeYad2: $e');
                   }
@@ -503,30 +536,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ..._warranties
                       .where((opt) => _selectedWarranties.contains(opt))
                       .map((option) {
-                    final label = option.startsWith('על')
-                        ? 'אחריות ${option.substring(2).trim()}'
-                        : 'אחריות $option';
-                    final currentValue =
-                        _warrantyDurations[option] ?? 'לא הוגדר זמן';
-                    final isBattery = option == 'על הסוללה';
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 10.0),
-                      child: _buildDropdownField(
-                        label: label,
-                        value: currentValue,
-                        items: isBattery
-                            ? _batteryDurationOptions
-                            : _durationOptions,
-                        onChanged: (newVal) {
-                          if (newVal != null) {
-                            setState(() {
-                              _warrantyDurations[option] = newVal;
-                            });
-                          }
-                        },
-                      ),
-                    );
-                  }),
+                        final label = option.startsWith('על')
+                            ? 'אחריות ${option.substring(2).trim()}'
+                            : 'אחריות $option';
+                        final currentValue =
+                            _warrantyDurations[option] ?? 'לא הוגדר זמן';
+                        final isBattery = option == 'על הסוללה';
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10.0),
+                          child: _buildDropdownField(
+                            label: label,
+                            value: currentValue,
+                            items: isBattery
+                                ? _batteryDurationOptions
+                                : _durationOptions,
+                            onChanged: (newVal) {
+                              if (newVal != null) {
+                                setState(() {
+                                  _warrantyDurations[option] = newVal;
+                                });
+                              }
+                            },
+                          ),
+                        );
+                      }),
                 ],
 
                 const Divider(height: 28),
@@ -595,7 +628,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   }).toList(),
                 ),
               ],
-            )
+            ),
           ],
         ),
       ),
@@ -623,7 +656,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Text(
           label,
           style: TextStyle(
-            color: isSelected ? const Color(0xFF3B5BDB) : const Color(0xFF1E293B),
+            color: isSelected
+                ? const Color(0xFF3B5BDB)
+                : const Color(0xFF1E293B),
             fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
             fontSize: 13,
           ),
@@ -663,10 +698,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               dropdownColor: Colors.white,
               isExpanded: true,
               alignment: AlignmentDirectional.centerStart,
-              icon: const Icon(
-                Icons.arrow_drop_down,
-                color: Color(0xFF64748B),
-              ),
+              icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF64748B)),
               items: items.map((val) {
                 return DropdownMenuItem<String>(
                   value: val,
@@ -764,7 +796,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             children: [
                               Icon(
                                 Icons.camera_alt_rounded,
-                                color: const Color(0xFF3B5BDB).withOpacity(0.7),
+                                color: const Color(
+                                  0xFF3B5BDB,
+                                ).withValues(alpha: 0.7),
                                 size: 22,
                               ),
                               const SizedBox(height: 2),
@@ -810,7 +844,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _inputField(
             controller: _yad2DescController,
             hint: 'הזן תבנית טקסט לתיאור הרכב',
-            maxLines: 3,
+            maxLines: 5,
           ),
         ],
       ),
@@ -826,7 +860,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         border: Border.all(color: Colors.grey.shade200),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
+            color: Colors.black.withValues(alpha: 0.04),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -856,10 +890,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         filled: true,
         fillColor: Colors.white,
         hintText: hint,
-        hintStyle: TextStyle(
-          color: Colors.grey.shade400,
-          fontSize: 13,
-        ),
+        hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide(color: Colors.grey.shade300),
@@ -870,10 +901,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(
-            color: Color(0xFF3B5BDB),
-            width: 1.5,
-          ),
+          borderSide: const BorderSide(color: Color(0xFF3B5BDB), width: 1.5),
         ),
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 14,

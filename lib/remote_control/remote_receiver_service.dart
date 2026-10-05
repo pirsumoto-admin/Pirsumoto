@@ -84,7 +84,7 @@ class RemoteControlReceiverService {
           '[RemoteControlReceiver] Resuming automation after remote human control',
         );
         FirebaseChatReceiver.resumeAfterTakeover();
-        onResumeAutomation?.call();
+
       };
 
       await _manager!.startListening();

@@ -44,6 +44,7 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
   Timer? _pingTimer;
   Timer? _connectionTimer;
+  Timer? _disconnectionTimer;
   bool _disposed = false;
   int _connectionGeneration = 0;
   bool _transportConnected = false;
@@ -55,6 +56,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
       return;
     }
     _connectionTimer?.cancel();
+    _disconnectionTimer?.cancel();
+    _disconnectionTimer = null;
     _isConnected = true;
     _isConnecting = false;
     _startPingTimer();
@@ -147,6 +150,20 @@ class ControllerWebRtcSession extends ChangeNotifier {
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
           _transportConnected = true;
           _updateConnectionReadiness();
+        } else if (state ==
+            RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+          _transportConnected = false;
+          _isConnected = false;
+          notifyListeners();
+          _disconnectionTimer?.cancel();
+          _disconnectionTimer = Timer(const Duration(seconds: 8), () {
+            if (_peerConnection == peer && !_transportConnected) {
+              unawaited(_failConnection('החיבור נותק. יש להתחבר מחדש.'));
+            }
+          });
+        } else if (state ==
+            RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+          unawaited(disconnect());
         } else if (state ==
             RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
           unawaited(
@@ -536,10 +553,14 @@ class ControllerWebRtcSession extends ChangeNotifier {
 
   Future<void> _disconnect() async {
     _connectionGeneration++;
+    _disconnectionTimer?.cancel();
+    _disconnectionTimer = null;
     _connectionTimer?.cancel();
     _connectionTimer = null;
     _transportConnected = false;
     _hasVideoFrame = false;
+    _remoteWidth = 1080;
+    _remoteHeight = 2400;
     _pingTimer?.cancel();
     _pingTimer = null;
 

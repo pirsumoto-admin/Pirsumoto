@@ -70,7 +70,9 @@ class P2PAutoPublishLauncher {
             FirebaseAuth.instance.currentUser?.uid;
         if (uid != null && uid.isNotEmpty) {
           final settings = await DBService().getSettingsData(uid);
-          if (settings != null && settings.containsKey('includeYad2')) {
+          if (publishData.includeYad2 &&
+              settings != null &&
+              settings.containsKey('includeYad2')) {
             includeYad2 = settings['includeYad2'] == true;
           }
         }
@@ -145,19 +147,20 @@ class P2PAutoPublishLauncher {
     String desc = data['description']?.toString() ?? '';
     bool hasNoGovilMarker = desc.contains('[NO_GOVIL]');
     bool hasGovilMarker = desc.contains('[GOVIL]');
-    
+
     final bool isGovIl;
     if (hasNoGovilMarker) {
       isGovIl = false;
     } else if (hasGovilMarker) {
       isGovIl = true;
     } else {
-      isGovIl = (rawGovIl != null && rawGovIl.isNotEmpty)
-          ? (rawGovIl.toLowerCase() == 'true' || rawGovIl == '1')
-          : (testUntil.isEmpty &&
-              (data['maker'] != null &&
-                  data['maker']!.toString().isNotEmpty &&
-                  data['maker'] != 'לא ידוע'));
+      isGovIl =
+          (rawGovIl != null && rawGovIl.isNotEmpty)
+              ? (rawGovIl.toLowerCase() == 'true' || rawGovIl == '1')
+              : (testUntil.isEmpty &&
+                  (data['maker'] != null &&
+                      data['maker']!.toString().isNotEmpty &&
+                      data['maker'] != 'לא ידוע'));
     }
 
     if (hasNoGovilMarker || hasGovilMarker) {
@@ -207,7 +210,9 @@ class P2PAutoPublishLauncher {
       vehicleCondition: _firstNonEmpty([
         data['vehicle_condition'],
       ], fallback: 'טוב'),
-      description: _firstNonEmpty([data['description']]),
+      description: VehicleListingExtras.description(data, description: desc),
+      highlights: data['highlights']?.toString() ?? '',
+      cleanTitle: {'כן', 'true', '1'}.contains(data['clean_title']?.toString()),
       expectedImageCount: expectedCount,
       testYear: testYear,
       testMonth: testMonth,

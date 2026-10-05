@@ -24,6 +24,7 @@ class ChatSession {
   List<String> imagePaths;
   int? expectedImageCount;
   bool isReadyToPublish;
+  String? draftBaseAttemptId;
 
   ChatSession({
     required this.id,
@@ -36,6 +37,7 @@ class ChatSession {
     List<String>? imagePaths,
     this.expectedImageCount,
     this.isReadyToPublish = false,
+    this.draftBaseAttemptId,
   }) : vehicleData = vehicleData ?? {},
        imagePaths = imagePaths ?? [];
 
@@ -51,6 +53,7 @@ class ChatSession {
       'imagePathsJson': jsonEncode(imagePaths),
       'expectedImageCount': expectedImageCount,
       'isReadyToPublish': isReadyToPublish ? 1 : 0,
+      'draftBaseAttemptId': draftBaseAttemptId,
     };
   }
 
@@ -94,6 +97,7 @@ class ChatSession {
       expectedImageCount: json['expectedImageCount'] as int?,
       isReadyToPublish:
           json['isReadyToPublish'] == 1 || json['isReadyToPublish'] == true,
+      draftBaseAttemptId: json['draftBaseAttemptId'] as String?,
     );
   }
 }

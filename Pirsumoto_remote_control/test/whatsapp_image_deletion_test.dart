@@ -26,6 +26,7 @@ void main() {
         'area': 'מרכז',
         'city': 'תל אביב',
         'month': '5',
+        'test_until': '01/2027',
         'contact_name': 'ישראל',
         'contact_phone': '0501234567',
       };

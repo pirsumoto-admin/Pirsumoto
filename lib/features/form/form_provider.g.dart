@@ -41,7 +41,7 @@ final class FormControllerProvider
   }
 }
 
-String _$formControllerHash() => r'0bd295082ad9000b157b00f219708bf653058149';
+String _$formControllerHash() => r'09023b296d39ac8e8e745a2aa0a8d55be92c05c3';
 
 abstract class _$FormController extends $Notifier<FormState> {
   FormState build();

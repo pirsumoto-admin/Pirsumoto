@@ -57,6 +57,7 @@ void main() {
   late Future<void> Function() stop, pause;
   late int resumes;
   late List<String> activity;
+  late List<String> shutdownStates;
   late Future<DownloadedAttachment> Function(String) download;
   late Future<Map<String, dynamic>?> Function(String) claim;
   final bytes = Uint8List.fromList([1, 2, 3, 4]);
@@ -144,6 +145,7 @@ void main() {
     pause = () async {};
     resumes = 0;
     activity = [];
+    shutdownStates = [];
     download = (_) async => DownloadedAttachment(bytes, '1');
     claim = claimNext;
     await db.doc('remote_control_devices/device').set({'ownerUid': 'owner'});
@@ -165,6 +167,10 @@ void main() {
             resumes++;
           },
           stop: () => stop(),
+          shutdown: (state) {
+            shutdownStates.add(state);
+            return stop();
+          },
         );
         return true;
       },
@@ -369,6 +375,52 @@ void main() {
       expect(launches.map((e) => e.requestId), ['a', 'b']);
     },
   );
+  test('leftover cancel control cannot stop a publishing request', () async {
+    await enqueue('a', 1);
+    await settle();
+    var stops = 0;
+    stop = () async {
+      stops++;
+    };
+    await request('a').update({
+      'control': {
+        'id': 'old-cancel',
+        'command': 'cancel',
+        'attemptId': 'attempt_a',
+      },
+    });
+    await settle();
+    expect(stops, 0);
+    expect((await request('a').get()).data()!['state'], 'publishing');
+    await FirebaseChatReceiver.reportAutomationStatus(
+      identity: launches.first,
+      statusType: 'canceled',
+      text: 'הפרסום בוטל',
+    );
+    expect((await request('a').get()).data()!['state'], 'publishing');
+  });
+
+  for (final terminalState in ['completed', 'failed']) {
+    test(
+      'external $terminalState cleanup never labels shutdown as canceled',
+      () async {
+        await enqueue('a', 1);
+        await enqueue('b', 2);
+        await settle();
+        await request('a').update({'state': terminalState});
+        await waitFor(() => launches.length == 2);
+        expect(shutdownStates, [terminalState]);
+        expect((await request('a').get()).data()!['state'], terminalState);
+        final messages =
+            await db.collection('remote_chats/device/messages').get();
+        expect(
+          messages.docs.any((doc) => doc.data()['statusType'] == 'canceled'),
+          isFalse,
+        );
+      },
+    );
+  }
+
   test(
     'cancel waits for engine shutdown before acknowledging or starting next request',
     () async {
@@ -756,7 +808,7 @@ void main() {
   );
 
   test(
-    'remote disconnect resumes only the publication it paused for takeover',
+    'remote disconnect always leaves publication paused until explicit resume',
     () async {
       await enqueue('a', 1);
       await settle();
@@ -764,13 +816,43 @@ void main() {
       expect((await request('a').get()).data()!['state'], 'paused');
       FirebaseChatReceiver.resumeAfterTakeover();
       await settle();
-      expect(resumes, 1);
+      expect(resumes, 0);
       await FirebaseChatReceiver.setLocalPaused(launches.first, true);
       await FirebaseChatReceiver.pauseForTakeover();
       FirebaseChatReceiver.resumeAfterTakeover();
       await settle();
-      expect(resumes, 1);
+      expect(resumes, 0);
       expect((await request('a').get()).data()!['state'], 'paused');
+    },
+  );
+  test(
+    'park drains current browser and advances queue without canceling paused request',
+    () async {
+      await enqueue('a', 1);
+      await enqueue('b', 2);
+      await settle();
+      final id = launches.first;
+      await FirebaseChatReceiver.setLocalPaused(id, true);
+      final drained = Completer<void>();
+      stop = () => drained.future;
+      await request('a').update({
+        'control': {
+          'id': 'park-a',
+          'command': 'park',
+          'attemptId': id.attemptId,
+        },
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(launches.length, 1);
+      expect((await request('a').get()).data()!['parked'], isNot(true));
+      drained.complete();
+      await waitFor(() => launches.length == 2);
+      final parked = (await request('a').get()).data()!;
+      expect(parked['state'], 'paused');
+      expect(shutdownStates, ['paused']);
+      expect(parked['parked'], true);
+      expect(parked['attachments'], isNotEmpty);
+      expect(launches.last.requestId, 'b');
     },
   );
 }

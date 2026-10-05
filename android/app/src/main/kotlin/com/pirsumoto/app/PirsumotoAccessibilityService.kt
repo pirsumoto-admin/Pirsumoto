@@ -385,6 +385,11 @@ class PirsumotoAccessibilityService : AccessibilityService() {
     fun findCheckableByLabel(root: AccessibilityNodeInfo?, target: String): AccessibilityNodeInfo? {
         val labels = target.split("|").map { normalizeHebrew(it) }.filter { it.isNotEmpty() }
         fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            // HTML checkboxes can expose only their DOM id (eula), while
+            // their label is split into separate text/link nodes.
+            val viewId = node.viewIdResourceName
+            if (node.isCheckable && (viewId in target.split("|") ||
+                    viewId?.substringAfterLast(":id/") in target.split("|"))) return node
             if (node.isCheckable && listOfNotNull(node.text, node.contentDescription)
                     .any { normalizeHebrew(it.toString()) in labels }) return node
             for (i in 0 until node.childCount) {
@@ -635,7 +640,15 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         if (sortedMatches.size >= targetInstance) {
             val targetMatch = sortedMatches[targetInstance - 1]
             var currentOffset = 0
-            for (i in (targetMatch.nodeIndex + 1) until allNodes.size) {
+            // offset > 0 walks forward from the label; offset < 0 walks backward
+            // (for controls that precede their label in tree order).
+            val wanted = Math.abs(offset)
+            val indices = if (offset < 0) {
+                (targetMatch.nodeIndex - 1 downTo 0)
+            } else {
+                ((targetMatch.nodeIndex + 1) until allNodes.size)
+            }
+            for (i in indices) {
                 val node = allNodes[i]
                 val hasText = !node.text.isNullOrEmpty() || !node.contentDescription.isNullOrEmpty()
                 val isTextView = node.className?.toString()?.contains("TextView") == true
@@ -649,7 +662,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
                 if (matchesClass) {
                     currentOffset++
-                    if (currentOffset == offset) {
+                    if (currentOffset == wanted) {
                         val rect = Rect()
                         node.getBoundsInScreen(rect)
                         return Pair(rect, node.className?.toString() ?: "")
@@ -881,6 +894,61 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val arguments = Bundle()
         arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+    }
+
+    /**
+     * Resolves an editable input by its (WebView) element id, falling back to the
+     * first editable node that follows one of the `|`-separated [labels] in tree order.
+     */
+    fun findInputByIdOrLabel(
+        root: AccessibilityNodeInfo?,
+        viewId: String?,
+        labels: String?
+    ): AccessibilityNodeInfo? {
+        if (root == null) return null
+        fun isInput(n: AccessibilityNodeInfo) =
+            n.isEditable || n.className?.toString()?.contains("EditText") == true
+
+        if (!viewId.isNullOrEmpty()) {
+            fun byId(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (n == null) return null
+                val rid = n.viewIdResourceName
+                if (rid != null && (rid == viewId || rid.endsWith("/$viewId")) && isInput(n)) return n
+                for (i in 0 until n.childCount) byId(n.getChild(i))?.let { return it }
+                return null
+            }
+            byId(root)?.let { return it }
+        }
+        val targets = labels?.split("|")?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+        if (targets.isEmpty()) return null
+        var seenLabel = false
+        fun afterLabel(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (n == null) return null
+            val text = n.text?.toString()?.trim().orEmpty()
+            val desc = n.contentDescription?.toString()?.trim().orEmpty()
+            if (!seenLabel && targets.any { text.startsWith(it) || desc.startsWith(it) }) {
+                seenLabel = true
+            } else if (seenLabel && isInput(n)) {
+                return n
+            }
+            for (i in 0 until n.childCount) afterLabel(n.getChild(i))?.let { return it }
+            return null
+        }
+        return afterLabel(root)
+    }
+
+    /** Focuses [node], selects all of its current text, then replaces it with [text]. */
+    fun replaceAllTextInNode(node: AccessibilityNodeInfo, text: String): Boolean {
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val currentLength = node.text?.length ?: 0
+        val selection = Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, currentLength)
+        }
+        val selected = node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection)
+        val replaced = enterTextIntoNode(node, text)
+        Log.d("A11Y", "replaceAllTextInNode: oldLength=$currentLength selected=$selected replaced=$replaced")
+        return replaced
     }
 
     fun scrollNode(node: AccessibilityNodeInfo, percent: Double): Boolean {

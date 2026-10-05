@@ -17,11 +17,14 @@
     <!-- <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" /> -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <application
         android:testOnly="true"
         android:label="פרסומוטו"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon">
+        <receiver android:name=".PublicationDeadlineReceiver" android:exported="false" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <activity
             android:name=".MainActivity"

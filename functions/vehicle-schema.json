@@ -39,7 +39,14 @@
     "test_until": "טסט עד",
     "govIl": "משרד התחבורה",
     "includeYad2": "כולל יד2",
-    "include_yad2": "כולל יד2"
+    "include_yad2": "כולל יד2",
+    "highlights": "חוזקות של הרכב שרוצים להדגיש",
+    "trim": "רמת גימור",
+    "engine_capacity": "נפח מנוע (סמ״ק)",
+    "phone": "טלפון",
+    "area": "אזור",
+    "contact_name": "שם איש קשר",
+    "clean_title": "לרכב זה יש טייטל נקי"
   },
   "enums": {
     "color": [
@@ -118,6 +125,10 @@
       "לא"
     ],
     "no_test": [
+      "כן",
+      "לא"
+    ],
+    "clean_title": [
       "כן",
       "לא"
     ]

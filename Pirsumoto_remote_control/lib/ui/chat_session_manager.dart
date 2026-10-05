@@ -3,6 +3,7 @@ import '../models/publication_queue.dart';
 export '../models/chat_session.dart';
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:crypto/crypto.dart';
@@ -11,7 +12,6 @@ import '../services/remote_api.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../database/sqlite_database_helper.dart';
 import '../webrtc/controller_webrtc_session.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 
 class ChatSessionManager {
   static final _changes = StreamController<String>.broadcast();
@@ -20,6 +20,7 @@ class ChatSessionManager {
   static final Map<String, Map<String, Map<String, dynamic>>> _requests = {};
   static final Map<String, Future<void>> _submissions = {};
   static String? _owner;
+  static final Map<String, Object> _watchErrors = {};
   static final Map<String, String?> _priorities = {};
   static Future<void> _projection = Future.value();
   static Map<String, dynamic>? request(String deviceId, String sessionId) {
@@ -54,12 +55,78 @@ class ChatSessionManager {
     'failed' => ChatSessionStatus.failed,
     _ => ChatSessionStatus.draft,
   };
+  static ChatSessionStatus effectiveStatus(
+    ChatSession session,
+    Map<String, dynamic>? remoteRequest,
+  ) => remoteRequest == null
+      ? session.status
+      : statusFromRequest(remoteRequest['state'] as String? ?? '');
+
+  static bool canEditPublication(String? state) =>
+      state == null || PublicationState.terminal.contains(state);
+
+  static bool canStartPublication(
+    ChatSession session,
+    ChatSessionStatus status,
+  ) =>
+      const {
+        ChatSessionStatus.draft,
+        ChatSessionStatus.done,
+        ChatSessionStatus.canceled,
+        ChatSessionStatus.failed,
+      }.contains(status) &&
+      VehicleSchema.isComplete(session.vehicleData) &&
+      session.imagePaths.isNotEmpty;
+
+  static ChatSession sessionFromRequest(
+    String deviceId,
+    String id,
+    Map<String, dynamic> data, {
+    ChatSession? previous,
+  }) {
+    final rawVehicle = data['vehicleData'];
+    final keepDraft =
+        PublicationState.terminal.contains(data['state']) &&
+        previous?.draftBaseAttemptId != null &&
+        previous!.draftBaseAttemptId == data['attemptId'];
+    final vehicle = keepDraft
+        ? previous.vehicleData
+        : rawVehicle is Map
+        ? rawVehicle.map(
+            (key, value) => MapEntry(key.toString(), value?.toString() ?? ''),
+          )
+        : previous?.vehicleData ?? <String, String>{};
+    return ChatSession(
+      id: id,
+      deviceId: deviceId,
+      licensePlate: vehicle['license_plate'] ?? previous?.licensePlate ?? '',
+      startTimestamp:
+          previous?.startTimestamp ??
+          (data['enqueuedAt'] is Timestamp
+              ? (data['enqueuedAt'] as Timestamp).millisecondsSinceEpoch
+              : DateTime.now().millisecondsSinceEpoch),
+      status: statusFromRequest(data['state'] as String? ?? ''),
+      lastMessage: data['lastMessage'] == null
+          ? null
+          : PublicationNotification.textFor(
+              data['state'] as String? ?? '',
+              data['lastMessage'].toString(),
+            ),
+      vehicleData: vehicle,
+      imagePaths: previous?.imagePaths,
+      expectedImageCount: previous?.expectedImageCount,
+      isReadyToPublish: keepDraft ? previous.isReadyToPublish : true,
+      draftBaseAttemptId: keepDraft ? previous.draftBaseAttemptId : null,
+    );
+  }
+
   static Future<void> reset() async {
     for (final sub in _subscriptions.values) {
       await sub.cancel();
     }
     _subscriptions.clear();
     _requests.clear();
+    _watchErrors.clear();
     _priorities.clear();
     _owner = null;
   }
@@ -73,6 +140,7 @@ class ChatSessionManager {
       }
       _subscriptions.clear();
       _requests.clear();
+      _watchErrors.clear();
       _priorities.clear();
       _owner = uid;
     }
@@ -92,29 +160,50 @@ class ChatSessionManager {
         .collection('requests')
         .where('ownerUid', isEqualTo: uid)
         .snapshots()
-        .listen((snapshot) {
-          _projection = _projection
-              .then((_) async {
-                if (FirebaseAuth.instance.currentUser?.uid != uid) return;
-                for (final change in snapshot.docChanges) {
-                  if (change.type == DocumentChangeType.removed) {
-                    _requests[deviceId]?.remove(change.doc.id);
-                    await SqliteDatabaseHelper.instance.deleteSession(
-                      change.doc.id,
-                    );
-                    continue;
-                  }
-                  final doc = change.doc;
+        .listen(
+          (snapshot) {
+            if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+            _watchErrors.remove(deviceId);
+            _projection = _projection
+                .then((_) async {
                   if (FirebaseAuth.instance.currentUser?.uid != uid) return;
-                  final data = doc.data();
-                  if (data != null) await _project(deviceId, doc.id, data);
-                }
-                _changes.add(deviceId);
-              })
-              .catchError((Object e) {
-                /* next server snapshot retries the projection */
-              });
-        });
+                  for (final change in snapshot.docChanges) {
+                    if (change.type != DocumentChangeType.removed) continue;
+                    _requests[deviceId]?.remove(change.doc.id);
+                    try {
+                      await SqliteDatabaseHelper.instance.deleteSession(
+                        change.doc.id,
+                      );
+                    } catch (error, stack) {
+                      debugPrint(
+                        'Could not remove chat ${change.doc.id}: $error\n$stack',
+                      );
+                    }
+                  }
+                  // Revisit every document so failed local writes are retried.
+                  for (final doc in snapshot.docs) {
+                    if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+                    try {
+                      await _project(deviceId, doc.id, doc.data());
+                    } catch (error, stack) {
+                      debugPrint(
+                        'Could not project chat ${doc.id}: $error\n$stack',
+                      );
+                    }
+                  }
+                  _changes.add(deviceId);
+                })
+                .catchError((Object error, StackTrace stack) {
+                  debugPrint('Chat synchronization failed: $error\n$stack');
+                });
+          },
+          onError: (Object error, StackTrace stack) {
+            if (FirebaseAuth.instance.currentUser?.uid != uid) return;
+            _watchErrors[deviceId] = error;
+            debugPrint('Could not watch chat requests: $error\n$stack');
+            _changes.add(deviceId);
+          },
+        );
   }
 
   static Future<void> _project(
@@ -147,22 +236,7 @@ class ChatSessionManager {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     final old = await SqliteDatabaseHelper.instance.getSession(id);
     if (FirebaseAuth.instance.currentUser?.uid != uid) return;
-    final vehicle = Map<String, String>.from(data['vehicleData'] as Map);
-    final updated = ChatSession(
-      id: id,
-      deviceId: deviceId,
-      licensePlate: vehicle['license_plate'] ?? '',
-      startTimestamp:
-          old?.startTimestamp ??
-          (data['enqueuedAt'] is Timestamp
-              ? (data['enqueuedAt'] as Timestamp).millisecondsSinceEpoch
-              : DateTime.now().millisecondsSinceEpoch),
-      status: statusFromRequest(data['state'] as String),
-      lastMessage: data['lastMessage'] as String?,
-      vehicleData: vehicle,
-      imagePaths: old?.imagePaths,
-      isReadyToPublish: true,
-    );
+    final updated = sessionFromRequest(deviceId, id, data, previous: old);
     await SqliteDatabaseHelper.instance.insertSession(updated);
   }
 
@@ -183,15 +257,32 @@ class ChatSessionManager {
 
   static Future<List<ChatSession>> getSessions(String deviceId) async {
     watchDevice(deviceId);
-    return SqliteDatabaseHelper.instance.getSessions(deviceId);
+    await _projection;
+    final error = _watchErrors[deviceId];
+    if (error != null) {
+      throw StateError('לא ניתן לסנכרן את מצב הפרסומים: $error');
+    }
+    final sessions = await SqliteDatabaseHelper.instance.getSessions(deviceId);
+    // Live state remains authoritative even if a local save failed or a draft
+    // write raced with the snapshot projection.
+    for (final session in sessions) {
+      session.status = effectiveStatus(session, request(deviceId, session.id));
+    }
+    return sessions;
   }
 
   static Future<void> saveSession(ChatSession session) async {
-    // Draft updates cannot overwrite the worker's authoritative state or submitted data.
+    await _projection;
+    // Active attempts remain immutable. Edits after a terminal outcome are a
+    // local draft for the next attempt, preserved across snapshot projection.
     final r = request(session.deviceId, session.id);
-    if (r != null) {
+    if (r != null && !PublicationState.terminal.contains(r['state'])) {
       await _project(session.deviceId, session.id, r);
     } else {
+      if (r != null) {
+        session.status = statusFromRequest(r['state'] as String);
+        session.draftBaseAttemptId = r['attemptId'] as String;
+      }
       await SqliteDatabaseHelper.instance.insertSession(session);
     }
     _changes.add(session.deviceId);
@@ -250,16 +341,18 @@ class ChatSessionManager {
   static Future<void> control(
     String deviceId,
     String sessionId,
-    String command,
-  ) async {
+    String command, {
+    String? resumePhase,
+  }) async {
     var r = request(deviceId, sessionId);
     r ??=
         (await FirebaseFirestore.instance
-            .collection('remote_chats')
-            .doc(deviceId)
-            .collection('requests')
-            .doc(sessionId)
-            .get(const GetOptions(source: Source.server))).data();
+                .collection('remote_chats')
+                .doc(deviceId)
+                .collection('requests')
+                .doc(sessionId)
+                .get(const GetOptions(source: Source.server)))
+            .data();
     if (r == null) {
       if (command == 'cancel') {
         final draft = await SqliteDatabaseHelper.instance.getSession(sessionId);
@@ -276,6 +369,7 @@ class ChatSessionManager {
       'requestId': sessionId,
       'attemptId': r['attemptId'],
       'command': command,
+      if (resumePhase != null) 'resumePhase': resumePhase,
     });
     await _project(
       deviceId,
@@ -353,12 +447,11 @@ class ChatSessionManager {
       final bytes = await file.readAsBytes();
       final path = 'publication_media/$uid/$deviceId/${draft.id}/$attemptId/$i';
       final suffix = file.path.toLowerCase();
-      final mime =
-          suffix.endsWith('.png')
-              ? 'image/png'
-              : suffix.endsWith('.webp')
-              ? 'image/webp'
-              : 'image/jpeg';
+      final mime = suffix.endsWith('.png')
+          ? 'image/png'
+          : suffix.endsWith('.webp')
+          ? 'image/webp'
+          : 'image/jpeg';
       await FirebaseStorage.instance
           .ref(path)
           .putData(bytes, SettableMetadata(contentType: mime))
@@ -379,8 +472,10 @@ class ChatSessionManager {
       vehiclePayload['govIl'] = isGovIl ? 'true' : 'false';
     }
     try {
-      final userDoc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
       final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
       final bool includeYad2 = settings?['includeYad2'] ?? true;
       vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';

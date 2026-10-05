@@ -14,6 +14,7 @@ class PublicationQueue {
            .where(
              (r) =>
                  r['archived'] != true &&
+                 r['parked'] != true &&
                  PublicationState.occupied.contains(r['state']),
            )
            .length;

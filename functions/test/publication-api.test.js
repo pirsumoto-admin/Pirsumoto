@@ -181,3 +181,91 @@ test('archive of active job is rejected and cannot free a live reservation', asy
   await assert.rejects(api.handle({...enqueue,action:'archive_publication'},'owner'),{status:409});
   assert.equal(records.get('remote_chats/device').activeRequestId,'car');
 });
+
+test('vehicle highlights survive schema validation and enqueue', async () => {
+  const {api} = fixture();
+  const response = await api.handle({...structuredClone(enqueue), vehicleData:{...vehicle, highlights:'7 מקומות, מנוע חסכוני'}}, 'owner');
+  assert.equal(response.request.vehicleData.highlights, '7 מקומות, מנוע חסכוני');
+});
+
+test('park requires a paused request and waits for worker acknowledgement', async () => {
+  const {api, records} = fixture();
+  await api.handle(structuredClone(enqueue), 'owner');
+  const request = records.get('remote_chats/device/requests/car');
+  request.state = 'publishing';
+  await assert.rejects(api.handle({...enqueue,action:'control_publication',command:'park'},'owner'), {status:409});
+  request.state = 'paused';
+  const response = await api.handle({...enqueue,action:'control_publication',command:'park'},'owner');
+  assert.equal(response.request.state, 'paused');
+  assert.equal(response.request.control.command, 'park');
+  assert.notEqual(response.request.parked, true);
+});
+
+test('parked request resumes into the queue without canceling or losing completed sites', async () => {
+  const {api, records} = fixture();
+  await api.handle(structuredClone(enqueue), 'owner');
+  const request = records.get('remote_chats/device/requests/car');
+  Object.assign(request, {state:'paused',parked:true,completedPlatforms:['yad2']});
+  records.set('remote_chats/device',{activeRequestId:'other',workerRunId:'other_worker'});
+  const response = await api.handle({...enqueue,action:'control_publication',command:'resume'},'owner');
+  assert.equal(response.request.state,'queued');
+  assert.equal(response.request.parked,false);
+  assert.deepEqual(response.request.completedPlatforms,['yad2']);
+  assert.equal(records.get('remote_chats/device').activeRequestId,'other');
+});
+
+test('resume rejects phases not offered by the active automation', async () => {
+  const {api, records} = fixture();
+  await api.handle(structuredClone(enqueue), 'owner');
+  Object.assign(records.get('remote_chats/device/requests/car'), {state:'paused', resumeOptions:[{name:'phase14',label:'Description'}]});
+  await assert.rejects(api.handle({...enqueue,action:'control_publication',command:'resume',resumePhase:'complete'},'owner'), {status:400});
+  const response = await api.handle({...enqueue,action:'control_publication',command:'resume',resumePhase:'phase14'},'owner');
+  assert.equal(response.request.control.resumePhase,'phase14');
+});
+
+test('optional vehicle data survives enqueue and delivery to the main app', async () => {
+  const {api, records} = fixture();
+  const optional = {clean_title: 'כן', highlights: 'מטופל בזמן\nצמיגים חדשים'};
+  await api.handle({...enqueue, vehicleData: {...vehicle, ...optional}}, 'owner');
+  const stored = records.get('remote_chats/device/requests/car').vehicleData;
+  assert.equal(stored.clean_title, optional.clean_title);
+  assert.equal(stored.highlights, optional.highlights);
+  const delivered = (await api.handle(claim, 'owner')).request.vehicleData;
+  assert.equal(delivered.clean_title, optional.clean_title);
+  assert.equal(delivered.highlights, optional.highlights);
+});
+
+test('clean title remains optional, normalized and validated', () => {
+  assert.deepEqual(v.getMissingFields(vehicle), []);
+  assert.deepEqual(v.sanitizeFields({clean_title: 'false', highlights: ''}), {clean_title: 'לא', highlights: ''});
+  assert.deepEqual(v.sanitizeFields({clean_title: 'true'}), {clean_title: 'כן'});
+  assert.equal(v.validateValues({clean_title: 'אולי'}).length, 1);
+  assert.equal(v.sanitizeFields({highlights: 'א'.repeat(500)}).highlights.length, 500);
+});
+
+test('completed chat can publish again with edited parameters and retains the earlier attempt', async () => {
+  const {api, records} = fixture();
+  await api.handle(structuredClone(enqueue), 'owner');
+  const key = 'remote_chats/device/requests/car';
+  records.set(key, {...records.get(key), state: 'completed', revision: 4,
+    completedPlatforms: ['yad2', 'facebook'], lastMessage: 'Done'});
+  const again = {...structuredClone(enqueue), attemptId: 'again',
+    vehicleData: {...vehicle, price: '65000', km: '110000', highlights: 'צמיגים חדשים'},
+    attachments: [{...enqueue.attachments[0], path: 'publication_media/owner/device/car/again/0'}]};
+  const result = await api.handle(again, 'owner');
+  assert.equal(result.request.state, 'queued');
+  assert.equal(result.request.attemptId, 'again');
+  assert.equal(result.request.revision, 5);
+  assert.equal(result.request.vehicleData.price, '65000');
+  assert.equal(result.request.vehicleData.km, '110000');
+  assert.equal(result.request.vehicleData.highlights, 'צמיגים חדשים');
+  assert.deepEqual(result.request.completedPlatforms, []);
+  assert.equal(result.request.control, undefined);
+  const prior = records.get(`${key}/attempts/attempt`);
+  assert.equal(prior.state, 'completed');
+  assert.equal(prior.vehicleData.price, '70000');
+  assert.deepEqual(prior.completedPlatforms, ['yad2', 'facebook']);
+  // Repeated delivery remains idempotent once the new attempt is queued.
+  const duplicate = await api.handle(again, 'owner');
+  assert.equal(duplicate.request.revision, 5);
+});

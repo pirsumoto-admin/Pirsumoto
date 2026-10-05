@@ -7,10 +7,18 @@ import io.flutter.plugins.webviewflutter.WebViewFlutterAndroidExternalApi
 
 /** Explicit native teardown: the Flutter platform-view wrapper does not destroy WebViews. */
 object AutomationWebViewLifecycle {
+    private val ownedViews = mutableMapOf<Long, Pair<String, android.webkit.WebView>>()
+    fun deactivate(token: String) {
+        ownedViews.values.filter { it.first == token }.forEach {
+            it.second.stopLoading()
+            it.second.settings.javaScriptEnabled = false
+        }
+    }
+
     fun register(engine: FlutterEngine) {
         MethodChannel(engine.dartExecutor.binaryMessenger, "com.pirsumoto/automation_webview")
             .setMethodCallHandler { call, result ->
-                if (call.method != "prepare" && call.method != "destroy") {
+                if (call.method != "prepare" && call.method != "destroy" && call.method != "readPublicationStatus") {
                     result.notImplemented()
                     return@setMethodCallHandler
                 }
@@ -26,11 +34,17 @@ object AutomationWebViewLifecycle {
                         result.error("missing_webview", "WebView $identifier was not found", null)
                         return@setMethodCallHandler
                     }
+                    if (call.method == "readPublicationStatus") {
+                        view.evaluateJavascript("JSON.stringify({text:Array.from(document.querySelectorAll('h1,h2,[role=status],[role=alert]')).filter(e=>!e.closest('input,textarea,[contenteditable=true]')).map(e=>e.innerText).join(' '),url:location.href})") { value -> result.success(value) }
+                        return@setMethodCallHandler
+                    }
                     if (call.method == "prepare") {
                         // Route target=_blank/window.open into the owned WebView.
                         // The plugin otherwise creates untracked temporary WebViews.
                         view.settings.setSupportMultipleWindows(false)
+                        call.argument<String>("sessionToken")?.let { ownedViews[identifier] = it to view }
                     } else {
+                        ownedViews.remove(identifier)
                         view.stopLoading()
                         view.settings.javaScriptEnabled = false
                         // Keep the plugin's clients installed. Its WebView subclass
@@ -38,6 +52,7 @@ object AutomationWebViewLifecycle {
                         // assigning null throws AssertionError and crashes the app.
                         (view.parent as? ViewGroup)?.removeView(view)
                         view.removeAllViews()
+                        android.webkit.CookieManager.getInstance().flush()
                         view.clearHistory()
                         view.destroy()
                     }

@@ -1,3 +1,6 @@
+import 'package:publication_protocol/publication_protocol.dart';
+import '../../services/publication_session_deadline.dart';
+import 'resume_phase_dialog.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -165,6 +168,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   // Shadow AxTree — completed by the JS channel on each observe() call
   Completer<Map<String, dynamic>>? _axTreeCompleter;
 
+  PublicationSessionDeadline? _localDeadline;
   bool _publicationStopped = false;
   bool _publicationPaused = false;
   bool _transitioning = false;
@@ -172,6 +176,12 @@ class _Yad2ScreenState extends State<Yad2Screen> {
   @override
   void initState() {
     super.initState();
+    if (widget.publishData.publicationIdentity == null) {
+      _localDeadline = PublicationSessionDeadline(
+        'local/${DateTime.now().microsecondsSinceEpoch}',
+      );
+      unawaited(_localDeadline!.start(_expireLocalPublication));
+    }
     FirebaseChatReceiver.bindControls(
       widget.publishData.publicationIdentity,
       this,
@@ -188,6 +198,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         }
         await _automationService?.pauseAndWait();
       },
+      expire: _expirePublication,
+      prepareResume: _prepareResume,
+      resumeChoices: _resumeChoices,
       resume: () {
         _publicationPaused = false;
         if (_publicationStopped || _webViewClosed) return;
@@ -205,33 +218,94 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           });
         }
       },
-      stop: () async {
-        _publicationStopped = true;
-        await _closeBrowser();
-        if (mounted) {
-          setState(() {
-            _isPaused = true;
-            _statusMessage = 'הפרסום בוטל';
-          });
-          await WidgetsBinding.instance.endOfFrame;
-          if (mounted) {
-            Navigator.of(context).popUntil((route) => route.isFirst);
-          } else {
-            rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
-          }
-        } else {
-          rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
-        }
-      },
+      shutdown: _shutdownPublication,
+      stop: () => _shutdownPublication('canceled'),
     );
     // Hide status bar + Android soft navigation bar for a full-screen WebView.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _browserInitialization = _initializeBrowser();
   }
 
+  Future<void> _shutdownPublication(String state) async {
+    _publicationStopped = true;
+    await _closeBrowser();
+    if (mounted) {
+      setState(() {
+        _isPaused = true;
+        _statusMessage = PublicationNotification.textFor(state, '');
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      } else {
+        rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+      }
+    } else {
+      rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+    }
+  }
+
+  Future<void> _expirePublication() async {
+    _publicationStopped = true;
+    await _closeBrowser(expired: true);
+    rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+  }
+
+  Future<void> _expireLocalPublication() async {
+    if (!mounted || _webViewClosed || _publicationStopped) return;
+    await _expirePublication();
+  }
+
+  List<Map<String, String>> _resumeChoices() {
+    final service = _automationService;
+    if (service is! Yad2AccessibilityAutomationService) return [];
+    final current =
+        service.pausedPhase ?? service.currentPhase ?? AutomationPhase.phase1;
+    final start = (current.index - 2).clamp(
+      0,
+      AutomationPhase.values.length - 1,
+    );
+    return AutomationPhase.values
+        .skip(start)
+        .map((p) => {'name': p.name, 'label': p.resumeLabel})
+        .toList();
+  }
+
+  Future<bool> _prepareResume([String? phaseName]) async {
+    final service = _automationService;
+    if (!mounted || service is! Yad2AccessibilityAutomationService)
+      return false;
+    final phase =
+        phaseName != null
+            ? AutomationPhase.values
+                .where((p) => p.name == phaseName)
+                .firstOrNull
+            : await selectResumePhase(
+              context,
+              phases: AutomationPhase.values.toList(),
+              current:
+                  service.pausedPhase ??
+                  service.currentPhase ??
+                  AutomationPhase.phase1,
+              label: (p) => '${p.index + 1}. ${p.resumeLabel}',
+            );
+    if (phase == null ||
+        !mounted ||
+        _publicationStopped ||
+        !_resumeChoices().any((choice) => choice['name'] == phase.name))
+      return false;
+    await service.selectResumePhase(phase);
+    return true;
+  }
+
   Future<void> _initializeBrowser() async {
     try {
+      final identity = widget.publishData.publicationIdentity;
       _browserSession = await AutomationWebViewSession.open(
+        sessionToken:
+            identity == null
+                ? _localDeadline?.token
+                : FirebaseChatReceiver.deadlineToken(identity),
         isCurrent:
             () =>
                 mounted &&
@@ -280,10 +354,15 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     await WidgetsBinding.instance.endOfFrame;
   }
 
-  Future<void> _closeBrowser() async {
+  Future<void> _closeBrowser({bool expired = false}) async {
+    unawaited(_localDeadline?.cancel());
     _webViewClosed = true;
     await _browserInitialization;
-    await _browserSession?.close();
+    if (expired) {
+      await _browserSession?.expire();
+    } else {
+      await _browserSession?.close();
+    }
   }
 
   Future<void> _configureBrowser(WebViewController controller) async {
@@ -358,6 +437,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
 
   @override
   void dispose() {
+    if (!_transitioning) unawaited(_localDeadline?.cancel());
     _webViewClosed = true;
     FirebaseChatReceiver.unbindControls(this);
     _browserSession?.closeInBackground();
@@ -547,9 +627,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           !mounted ||
           _publicationStopped)
         return;
-      final desc =
-          (_automationService?.extractedDescription as String?) ??
-          Yad2AccessibilityAutomationService.lastExtractedDescription;
+      final desc = (_automationService?.extractedDescription as String?);
       final hasValidExtractedDesc =
           Yad2AccessibilityAutomationService.isValidExtractedDescription(desc);
 
@@ -562,6 +640,11 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         finalDescription = '';
       }
 
+      await FirebaseChatReceiver.saveDescription(
+        widget.publishData.publicationIdentity,
+        finalDescription,
+      );
+      if (!mounted || _publicationStopped) return;
       final updatedPublishData = widget.publishData.copyWith(
         description: finalDescription,
       );
@@ -579,6 +662,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           builder:
               (_) => FacebookScreen(
                 publishData: updatedPublishData,
+                sessionDeadline: _localDeadline,
               ),
         ),
       );
@@ -675,16 +759,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             if (mounted) {
               setState(() {
                 _isPaused = true;
-                _showPauseButton = false;
+                _showPauseButton = true;
+                _hideOverlayForStep = false;
                 _statusMessage = 'שגיאה: $error';
-              });
-              Future.delayed(const Duration(seconds: 5), () {
-                if (mounted) {
-                  setState(() {
-                    _statusMessage = '';
-                    _showPauseButton = true;
-                  });
-                }
               });
             }
           },
@@ -916,16 +993,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
           if (mounted) {
             setState(() {
               _isPaused = true;
-              _showPauseButton = false;
+              _showPauseButton = true;
+              _hideOverlayForStep = false;
               _statusMessage = 'שגיאה: $error';
-            });
-            Future.delayed(const Duration(seconds: 5), () {
-              if (mounted) {
-                setState(() {
-                  _statusMessage = '';
-                  _showPauseButton = true;
-                });
-              }
             });
           }
         },
@@ -1075,268 +1145,277 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       child: Scaffold(
         body: Stack(
           children: [
-          if (_webViewVisible)
-            RepaintBoundary(
-              key: _webViewKey,
-              child: WebViewWidget(controller: _controller),
-            ),
-          if (!_hideOverlayForStep && !_isManualKeyDataFilling) _buildStatusOverlay(),
-          // Tap preview marker
-          if (_tapMarkerX != null && _tapMarkerY != null)
-            Positioned(
-              left: _tapMarkerX! - 24,
-              top: _tapMarkerY! - 24,
-              child: IgnorePointer(
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.red.withAlpha(80),
-                    border: Border.all(color: Colors.red, width: 2.5),
-                  ),
-                  child: const Icon(
-                    Icons.touch_app,
-                    color: Colors.red,
-                    size: 22,
+            if (_webViewVisible)
+              RepaintBoundary(
+                key: _webViewKey,
+                child: WebViewWidget(controller: _controller),
+              ),
+            if (!_hideOverlayForStep && !_isManualKeyDataFilling)
+              _buildStatusOverlay(),
+            // Tap preview marker
+            if (_tapMarkerX != null && _tapMarkerY != null)
+              Positioned(
+                left: _tapMarkerX! - 24,
+                top: _tapMarkerY! - 24,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.red.withAlpha(80),
+                      border: Border.all(color: Colors.red, width: 2.5),
+                    ),
+                    child: const Icon(
+                      Icons.touch_app,
+                      color: Colors.red,
+                      size: 22,
+                    ),
                   ),
                 ),
               ),
-            ),
-          if ((_showPauseButton || _isPaused) &&
-              (!_hideOverlayForStep || _isPaused) &&
-              !_publicationStopped &&
-              !_automationComplete)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 4,
-              left: 16,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      _isPaused
-                          ? const Color(0xFF1B5E20)
-                          : const Color(0xFFE65100),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 12,
+            if ((_showPauseButton || _isPaused) &&
+                (!_hideOverlayForStep || _isPaused) &&
+                !_publicationStopped &&
+                !_automationComplete)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 4,
+                left: 16,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        _isPaused
+                            ? const Color(0xFF1B5E20)
+                            : const Color(0xFFE65100),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 12,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                    elevation: 6,
                   ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30),
-                  ),
-                  elevation: 6,
-                ),
-                onPressed: () async {
-                  final identity = widget.publishData.publicationIdentity;
-                  if (identity != null) {
-                    _isManualKeyDataFilling = false;
-                    await FirebaseChatReceiver.setLocalPaused(
-                      identity,
-                      !_isPaused,
-                    );
-                    return;
-                  }
-                  if (_isPaused) {
-                    _isManualKeyDataFilling = false;
-                    _publicationPaused = false;
-                    _automationService?.resumeAutomation();
-                    setState(() {
-                      _isPaused =
-                          _automationService
-                                  is Yad2AccessibilityAutomationService
-                              ? _automationService.isPaused as bool
-                              : false;
+                  onPressed: () async {
+                    final identity = widget.publishData.publicationIdentity;
+                    if (identity != null) {
                       _isManualKeyDataFilling = false;
-                      _statusMessage = 'ממשיך משלב $_savedStepDescription';
-                    });
-                    FirebaseChatReceiver.reportAutomationStatus(
-                      identity: widget.publishData.publicationIdentity,
-                      statusType: 'publishing',
-                      text: '▶️ ממשיך אוטומציה ביד2...',
-                    );
-                  } else {
-                    _automationService?.pauseAutomation();
-                    setState(() {
-                      _isPaused = true;
-                      _statusMessage =
-                          'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך.';
-                    });
-                    FirebaseChatReceiver.reportAutomationStatus(
-                      identity: widget.publishData.publicationIdentity,
-                      statusType: 'paused',
-                      text:
-                          'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך מאותו שלב.',
-                    );
-                  }
-                },
+                      await FirebaseChatReceiver.setLocalPaused(
+                        identity,
+                        !_isPaused,
+                      );
+                      return;
+                    }
+                    if (_isPaused) {
+                      _isManualKeyDataFilling = false;
+                      _publicationPaused = false;
+                      if (!await _prepareResume()) return;
+                      _automationService?.resumeAutomation();
+                      setState(() {
+                        _isPaused =
+                            _automationService
+                                    is Yad2AccessibilityAutomationService
+                                ? _automationService.isPaused as bool
+                                : false;
+                        _isManualKeyDataFilling = false;
+                        _statusMessage = 'ממשיך משלב $_savedStepDescription';
+                      });
+                      FirebaseChatReceiver.reportAutomationStatus(
+                        identity: widget.publishData.publicationIdentity,
+                        statusType: 'publishing',
+                        text: '▶️ ממשיך אוטומציה ביד2...',
+                      );
+                    } else {
+                      _automationService?.pauseAutomation();
+                      setState(() {
+                        _isPaused = true;
+                        _statusMessage =
+                            'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך.';
+                      });
+                      FirebaseChatReceiver.reportAutomationStatus(
+                        identity: widget.publishData.publicationIdentity,
+                        statusType: 'paused',
+                        text:
+                            'מושהה בשלב $_savedStepDescription. ניתן לקחת שליטה וללחוץ המשך מאותו שלב.',
+                      );
+                    }
+                  },
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isPaused ? Icons.play_arrow : Icons.pause,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _isPaused ? 'המשך' : 'הפסק',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (_isPaused &&
+                !_publicationStopped &&
+                !_automationComplete &&
+                !_isManualKeyDataFilling)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 4,
+                right: 16,
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(_isPaused ? Icons.play_arrow : Icons.pause, size: 18),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isPaused ? 'המשך' : 'הפסק',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(
+                          0xFFC62828,
+                        ), // Premium red color for exit
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        elevation: 6,
+                      ),
+                      onPressed: () {
+                        Navigator.of(
+                          context,
+                        ).popUntil((route) => route.isFirst);
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.home, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'סיים',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(
+                          0xFF3B5BDB,
+                        ), // Premium brand blue
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30),
+                        ),
+                        elevation: 6,
+                      ),
+                      onPressed: () async {
+                        await _automationService?.stepBack();
+                        if (!mounted || _publicationStopped) return;
+                        final identity = widget.publishData.publicationIdentity;
+                        if (identity != null) {
+                          await FirebaseChatReceiver.setLocalPaused(
+                            identity,
+                            false,
+                          );
+                          return;
+                        }
+                        _publicationPaused = false;
+                        if (!await _prepareResume()) return;
+                        _automationService?.resumeAutomation();
+                        setState(() {
+                          _isPaused = false;
+                          _statusMessage = 'ממשיך אוטומציה...';
+                        });
+                      },
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.replay, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'צעד אחורה',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
-          if (_isPaused &&
-              !_publicationStopped &&
-              !_automationComplete &&
-              !_isManualKeyDataFilling)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 4,
-              right: 16,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(
-                        0xFFC62828,
-                      ), // Premium red color for exit
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 12,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(30),
-                      ),
-                      elevation: 6,
-                    ),
-                    onPressed: () {
-                      Navigator.of(context).popUntil((route) => route.isFirst);
-                    },
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.home, size: 18),
-                        SizedBox(width: 8),
-                        Text(
-                          'סיים',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
+            // Floating Button to Setup Credentials / Preset Login Dialog
+            if (_isLoginRequired &&
+                !_hideOverlayForStep &&
+                !_automationComplete &&
+                !_isManualKeyDataFilling)
+              Positioned(
+                bottom: 24,
+                left: 20,
+                right: 20,
+                child: SafeArea(
+                  child: Center(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFFFF7A00), Color(0xFFFF9E40)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
                         ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(
-                        0xFF3B5BDB,
-                      ), // Premium brand blue
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 12,
-                      ),
-                      shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
-                      ),
-                      elevation: 6,
-                    ),
-                    onPressed: () async {
-                      await _automationService?.stepBack();
-                      if (!mounted || _publicationStopped) return;
-                      final identity = widget.publishData.publicationIdentity;
-                      if (identity != null) {
-                        await FirebaseChatReceiver.setLocalPaused(
-                          identity,
-                          false,
-                        );
-                        return;
-                      }
-                      _publicationPaused = false;
-                      _automationService?.resumeAutomation();
-                      setState(() {
-                        _isPaused = false;
-                        _statusMessage = 'ממשיך אוטומציה...';
-                      });
-                    },
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.replay, size: 18),
-                        SizedBox(width: 8),
-                        Text(
-                          'צעד אחורה',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(
+                              0xFFFF7A00,
+                            ).withValues(alpha: 0.45),
+                            blurRadius: 14,
+                            offset: const Offset(0, 4),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          // Floating Button to Setup Credentials / Preset Login Dialog
-          if (_isLoginRequired &&
-              !_hideOverlayForStep &&
-              !_automationComplete &&
-              !_isManualKeyDataFilling)
-            Positioned(
-              bottom: 24,
-              left: 20,
-              right: 20,
-              child: SafeArea(
-                child: Center(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFFFF7A00), Color(0xFFFF9E40)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+                        ],
                       ),
-                      borderRadius: BorderRadius.circular(30),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(
-                            0xFFFF7A00,
-                          ).withValues(alpha: 0.45),
-                          blurRadius: 14,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(30),
-                        onTap: _openPresetLoginDialog,
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 22,
-                            vertical: 13,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.vpn_key_rounded,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'התחברות מראש לאתרים',
-                                style: TextStyle(
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(30),
+                          onTap: _openPresetLoginDialog,
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 22,
+                              vertical: 13,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.vpn_key_rounded,
                                   color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
+                                  size: 20,
                                 ),
-                              ),
-                            ],
+                                SizedBox(width: 10),
+                                Text(
+                                  'התחברות מראש לאתרים',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -1344,9 +1423,8 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                   ),
                 ),
               ),
-            ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
   }

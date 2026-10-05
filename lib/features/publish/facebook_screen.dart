@@ -1,3 +1,6 @@
+import 'package:publication_protocol/publication_protocol.dart';
+import '../../services/publication_session_deadline.dart';
+import 'resume_phase_dialog.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -45,6 +48,7 @@ const _kDesktopUserAgent =
 // ---------------------------------------------------------------------------
 class FacebookScreen extends StatefulWidget {
   final VehiclePublishData? publishData;
+  final PublicationSessionDeadline? sessionDeadline;
   // [WHATSAPP-DISABLED] startedFromWhatsApp and whatsAppSenderKey disabled.
   // final bool startedFromWhatsApp;
   // final String? whatsAppSenderKey;
@@ -52,6 +56,7 @@ class FacebookScreen extends StatefulWidget {
   const FacebookScreen({
     super.key,
     this.publishData,
+    this.sessionDeadline,
     // this.startedFromWhatsApp = false,
     // this.whatsAppSenderKey,
   });
@@ -80,6 +85,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
   double? _tapX;
   double? _tapY;
 
+  PublicationSessionDeadline? _localDeadline;
   bool _publicationStopped = false;
   bool _publicationPaused = false;
   bool _finishing = false;
@@ -87,6 +93,17 @@ class _FacebookScreenState extends State<FacebookScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.publishData?.publicationIdentity == null) {
+      _localDeadline = widget.sessionDeadline;
+      if (_localDeadline != null) {
+        _localDeadline!.handoff(_expireLocalPublication);
+      } else {
+        _localDeadline = PublicationSessionDeadline(
+          'local/${DateTime.now().microsecondsSinceEpoch}',
+        );
+        unawaited(_localDeadline!.start(_expireLocalPublication));
+      }
+    }
     FirebaseChatReceiver.bindControls(
       widget.publishData?.publicationIdentity,
       this,
@@ -95,30 +112,17 @@ class _FacebookScreenState extends State<FacebookScreen> {
         await _service?.pauseAndWait();
         if (mounted) setState(() => _isPaused = true);
       },
+      expire: _expirePublication,
+      prepareResume: _prepareResume,
+      resumeChoices: _resumeChoices,
       resume: () {
         _publicationPaused = false;
         if (_publicationStopped || _webViewClosed) return;
         _service?.resumeAutomation();
         if (mounted) setState(() => _isPaused = false);
       },
-      stop: () async {
-        _publicationStopped = true;
-        await _closeBrowser();
-        if (mounted) {
-          setState(() {
-            _isPaused = true;
-            _statusMessage = 'הפרסום בוטל';
-          });
-          await WidgetsBinding.instance.endOfFrame;
-          if (mounted) {
-            Navigator.of(context).popUntil((route) => route.isFirst);
-          } else {
-            rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
-          }
-        } else {
-          rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
-        }
-      },
+      shutdown: _shutdownPublication,
+      stop: () => _shutdownPublication('canceled'),
     );
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -126,9 +130,91 @@ class _FacebookScreenState extends State<FacebookScreen> {
     _browserInitialization = _initializeBrowser();
   }
 
+  Future<void> _shutdownPublication(String state) async {
+    _publicationStopped = true;
+    await _closeBrowser();
+    if (mounted) {
+      setState(() {
+        _isPaused = true;
+        _statusMessage = PublicationNotification.textFor(state, '');
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      } else {
+        rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+      }
+    } else {
+      rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+    }
+  }
+
+  Future<void> _expirePublication() async {
+    _publicationStopped = true;
+    await _closeBrowser(expired: true);
+    rootNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+  }
+
+  Future<void> _expireLocalPublication() async {
+    if (!mounted || _webViewClosed || _publicationStopped) return;
+    await _expirePublication();
+  }
+
+  List<Map<String, String>> _resumeChoices() {
+    final service = _service;
+    if (service == null) return [];
+    final current = service.pausedPhase ?? FacebookAutomationPhase.loginGate;
+    final start = (current.index - 2).clamp(
+      0,
+      FacebookAutomationPhase.values.length - 1,
+    );
+    return FacebookAutomationPhase.values
+        .skip(start)
+        .map(
+          (p) => {
+            'name': p.name,
+            'label':
+                p == FacebookAutomationPhase.complete
+                    ? 'בדיקת אישור הפרסום'
+                    : p.descriptionHe,
+          },
+        )
+        .toList();
+  }
+
+  Future<bool> _prepareResume([String? phaseName]) async {
+    final service = _service;
+    if (!mounted || service == null) return false;
+    final phase =
+        phaseName != null
+            ? FacebookAutomationPhase.values
+                .where((p) => p.name == phaseName)
+                .firstOrNull
+            : await selectResumePhase(
+              context,
+              phases: FacebookAutomationPhase.values.toList(),
+              current: service.pausedPhase ?? FacebookAutomationPhase.loginGate,
+              label:
+                  (p) =>
+                      '${p.index + 1}. ${p == FacebookAutomationPhase.complete ? 'בדיקת אישור הפרסום' : p.descriptionHe}',
+            );
+    if (phase == null ||
+        !mounted ||
+        _publicationStopped ||
+        !_resumeChoices().any((choice) => choice['name'] == phase.name))
+      return false;
+    await service.selectResumePhase(phase);
+    return true;
+  }
+
   Future<void> _initializeBrowser() async {
     try {
+      final identity = widget.publishData?.publicationIdentity;
       _browserSession = await AutomationWebViewSession.open(
+        sessionToken:
+            identity == null
+                ? _localDeadline?.token
+                : FirebaseChatReceiver.deadlineToken(identity),
         isCurrent:
             () =>
                 mounted &&
@@ -174,10 +260,15 @@ class _FacebookScreenState extends State<FacebookScreen> {
     await WidgetsBinding.instance.endOfFrame;
   }
 
-  Future<void> _closeBrowser() async {
+  Future<void> _closeBrowser({bool expired = false}) async {
+    unawaited(_localDeadline?.cancel());
     _webViewClosed = true;
     await _browserInitialization;
-    await _browserSession?.close();
+    if (expired) {
+      await _browserSession?.expire();
+    } else {
+      await _browserSession?.close();
+    }
   }
 
   Future<void> _configureBrowser(WebViewController controller) async {
@@ -223,6 +314,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
 
   @override
   void dispose() {
+    unawaited(_localDeadline?.cancel());
     _webViewClosed = true;
     FirebaseChatReceiver.unbindControls(this);
     _browserSession?.closeInBackground();
@@ -318,11 +410,6 @@ class _FacebookScreenState extends State<FacebookScreen> {
           _showControls = true;
           _statusMessage = 'שגיאה: $error';
         });
-
-        // After 5s collapse the error text and show controls
-        Future.delayed(const Duration(seconds: 5), () {
-          if (mounted) setState(() => _statusMessage = '');
-        });
       },
       onAutomationComplete: _finishAutomation,
     );
@@ -342,15 +429,19 @@ class _FacebookScreenState extends State<FacebookScreen> {
     _finishing = true;
     await _closeBrowser();
     if (success && widget.publishData != null) {
-      unawaited(DBService().saveListingFromPublishData(
-        widget.publishData!, platform: 'facebook',
-      ));
+      unawaited(
+        DBService().saveListingFromPublishData(
+          widget.publishData!,
+          platform: 'facebook',
+        ),
+      );
     }
     if (mounted) {
       setState(() {
         _isComplete = true;
         _hasError = !success;
-        _statusMessage = success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
+        _statusMessage =
+            success ? '✓ המודעה פורסמה בהצלחה!' : 'האוטומציה נכשלה';
       });
       // Commit PopScope before navigating, and navigate before reporting the
       // terminal status, which can immediately launch the next queued vehicle.
@@ -363,9 +454,10 @@ class _FacebookScreenState extends State<FacebookScreen> {
       identity: widget.publishData?.publicationIdentity,
       statusType: success ? 'platform_completed' : 'stuck',
       platform: success ? 'facebook' : null,
-      text: success
-          ? '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!'
-          : '⚠️ האוטומציה בפייסבוק נכשלה',
+      text:
+          success
+              ? '🎉 הפרסום בפייסבוק מרקטפלייס הושלם בהצלחה!'
+              : '⚠️ האוטומציה בפייסבוק נכשלה',
     );
   }
 
@@ -515,6 +607,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
                       return;
                     }
                     if (_isPaused) {
+                      if (!await _prepareResume()) return;
                       _service?.resumeAutomation();
                       setState(() {
                         _isPaused = false;
@@ -611,8 +704,9 @@ class _FacebookScreenState extends State<FacebookScreen> {
                         ),
                         elevation: 6,
                       ),
-                      onPressed: () {
+                      onPressed: () async {
                         _service?.stepBack();
+                        if (!await _prepareResume()) return;
                         _service?.resumeAutomation();
                         setState(() {
                           _isPaused = false;

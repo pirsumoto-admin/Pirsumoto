@@ -1,3 +1,5 @@
+import 'publication_description_service.dart';
+import 'publication_result_verifier.dart';
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
 import 'native_image_upload_request.dart';
@@ -11,8 +13,6 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'yad2_automation_models.dart' show VehiclePublishData;
-import 'yad2_accessibility_automation_service_optimized.dart'
-    show Yad2AccessibilityAutomationService;
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Vehicle Listing Automation Service
@@ -47,6 +47,7 @@ enum FacebookAutomationPhase {
   enterMileage('Enter mileage', 'הזנת קילומטראז\' / מיילים'),
   enterPrice('Enter price', 'הזנת מחיר'),
   selectBodyStyle('Select body style', 'בחירת סגנון גוף הרכב'),
+  selectCleanTitle('Select clean title', 'בחירת טייטל נקי'),
   selectCondition('Select condition', 'בחירת מצב הרכב'),
   selectFuelType('Select fuel type', 'בחירת סוג דלק'),
   selectTransmission('Select transmission', 'בחירת תיבת הילוכים'),
@@ -306,6 +307,14 @@ class FacebookAutomationService {
     _pausedPhase = _currentPhase;
   }
 
+  Future<void> selectResumePhase(FacebookAutomationPhase phase) async {
+    await pauseAndWait();
+    if (_stopped) return;
+    _completedPhaseActions.clear();
+    _pausedPhase = phase;
+    _currentPhase = phase;
+  }
+
   void resumeAutomation() {
     if (_stopped || !_isPaused) return;
     _scheduler.invalidate();
@@ -404,6 +413,21 @@ class FacebookAutomationService {
     debugPrint('[FB-A11y] ════════════════════════════════════════');
 
     if (phase == FacebookAutomationPhase.complete) {
+      bool confirmed = false;
+      try {
+        confirmed = await _retryUntil(
+          () => publicationIsConfirmed(controller, 'facebook'),
+          timeout: const Duration(seconds: 20),
+        );
+      } catch (_) {}
+      if (_stopped || _isPaused) return;
+      if (!confirmed) {
+        _handleError(
+          phase,
+          'לא התקבל אישור פרסום מפייסבוק. יש לבדוק את האתר לפני ניסיון נוסף.',
+        );
+        return;
+      }
       WakelockPlus.disable();
       _handlePhaseComplete(FacebookAutomationPhase.complete);
       return;
@@ -540,6 +564,14 @@ class FacebookAutomationService {
           goal: 'Select Body Style',
           action: () async {
             return await _phaseSelectBodyStyle();
+          },
+        );
+      case FacebookAutomationPhase.selectCleanTitle:
+        return _AutomationStepSpec(
+          phase: phase,
+          goal: 'Select Clean Title',
+          action: () async {
+            return await _phaseSelectCleanTitle();
           },
         );
       case FacebookAutomationPhase.selectCondition:
@@ -808,6 +840,7 @@ class FacebookAutomationService {
     double deltaX = 0.0,
     double deltaY = 0.0,
     int offset = 1,
+    String? matchClassName,
   }) async {
     if (_stopped || _isPaused) return false;
     debugPrint('[FB-A11y] 🔍 toolTapNodeAfter("$targetText")');
@@ -817,6 +850,7 @@ class FacebookAutomationService {
         'targetInstance': targetInstance,
         'threshold': threshold,
         'offset': offset,
+        if (matchClassName != null) 'matchClassName': matchClassName,
       });
       if (bounds != null) {
         await _tapBounds(bounds, deltaX: deltaX, deltaY: deltaY);
@@ -2044,6 +2078,45 @@ class FacebookAutomationService {
         : const _StepActionResult.failure('Failed body style');
   }
 
+  // Phase 11.5 — Select Clean Title
+  Future<_StepActionResult> _phaseSelectCleanTitle() async {
+    if (!formData.cleanTitle) {
+      return const _StepActionResult.success();
+    }
+    return await _runOnce('fb_select_clean_title', () async {
+          await _scrollDown(0.1);
+          bool clicked = await _retryUntil(() async {
+            if (await toolTapNodeAfter(
+              'לרכב זה יש טייטל נקי.',
+              matchClassName: 'android.widget.CheckBox',
+            ))
+              return true;
+            if (await toolTapNodeAfter(
+              'לרכב זה יש טייטל נקי',
+              matchClassName: 'android.widget.CheckBox',
+            ))
+              return true;
+            if (await toolTapNodeAfter(
+              'This vehicle has a clean title.',
+              matchClassName: 'android.widget.CheckBox',
+            ))
+              return true;
+            if (await toolTapNodeAfter(
+              'This vehicle has a clean title',
+              matchClassName: 'android.widget.CheckBox',
+            ))
+              return true;
+
+            await _scrollDown(0.15);
+            return false;
+          }, timeout: const Duration(seconds: 6));
+
+          return clicked;
+        })
+        ? const _StepActionResult.success()
+        : const _StepActionResult.failure('Failed to select clean title');
+  }
+
   // Phase 12 — Select condition
   Future<_StepActionResult> _phaseSelectCondition() async {
     return await _runOnce('fb_select_condition', () async {
@@ -2216,16 +2289,9 @@ class FacebookAutomationService {
   // Phase 15 — Enter description
   Future<_StepActionResult> _phaseEnterDescription() async {
     return await _runOnce('fb_enter_description', () async {
-          final hasValidDesc =
-              formData.description.trim().isNotEmpty &&
-              Yad2AccessibilityAutomationService.isValidExtractedDescription(
-                formData.description,
-              );
-
-          final descriptionText =
-              hasValidDesc
-                  ? formData.description.trim()
-                  : 'למכירה: ${formData.maker} ${formData.model} שנת ${formData.year}\nיד: ${formData.hand} | ק"מ: ${formData.kilometers}\nסוג דלק: ${formData.fuelType}';
+          final descriptionText = await PublicationDescriptionService.load(
+            formData,
+          );
 
           await _scrollDown(0.25);
           await Future.delayed(const Duration(milliseconds: 200));
@@ -2493,7 +2559,9 @@ class FacebookAutomationService {
             );
           }
 
-          debugPrint('[FB-A11y] Finished selecting groups. Tapping פרסום button.');
+          debugPrint(
+            '[FB-A11y] Finished selecting groups. Tapping פרסום button.',
+          );
           await toolFindElementAndTap('פרסום', preferClickable: true);
           await Future.delayed(const Duration(milliseconds: 1500));
 
@@ -2549,6 +2617,8 @@ class FacebookAutomationService {
       case FacebookAutomationPhase.enterPrice:
         return FacebookAutomationPhase.selectBodyStyle;
       case FacebookAutomationPhase.selectBodyStyle:
+        return FacebookAutomationPhase.selectCleanTitle;
+      case FacebookAutomationPhase.selectCleanTitle:
         return FacebookAutomationPhase.selectCondition;
       case FacebookAutomationPhase.selectCondition:
         return FacebookAutomationPhase.selectFuelType;
@@ -2580,6 +2650,7 @@ class FacebookAutomationService {
       case FacebookAutomationPhase.enterMileage:
       case FacebookAutomationPhase.enterPrice:
       case FacebookAutomationPhase.selectBodyStyle:
+      case FacebookAutomationPhase.selectCleanTitle:
       case FacebookAutomationPhase.selectCondition:
       case FacebookAutomationPhase.selectFuelType:
       case FacebookAutomationPhase.selectTransmission:
@@ -2616,10 +2687,10 @@ class FacebookAutomationService {
     pauseAutomation();
     _pausedPhase = phase;
     _phaseRetryCount = 0;
-    try {
-      await _beepUser();
-    } catch (_) {}
     onPhaseError?.call(phase, error);
+    // Report the pause immediately; audio initialization must not delay the
+    // remote heads-up notification or the local Resume controls.
+    unawaited(_beepUser().catchError((Object _) {}));
   }
 
   // ── Alerts ────────────────────────────────────────────────────────────────
