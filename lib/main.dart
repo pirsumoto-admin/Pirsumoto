@@ -1,5 +1,4 @@
-// [WHATSAPP-DISABLED] dart:async was used for StreamSubscription of WA bridge events.
-// import 'dart:async';
+import 'dart:async';
 // [WHATSAPP-DISABLED] dart:convert was used to decode image_paths JSON in WA flow.
 // import 'dart:convert';
 import 'dart:io'; // Keep: used in main() for Platform.isAndroid / Platform.isIOS
@@ -37,14 +36,27 @@ import 'firebase_options.dart';
 
 const platform = MethodChannel('com.pirsumoto/accessibility');
 
-void lockDeviceInKioskMode() async {
+Future<void> lockDeviceInKioskMode() async {
   try {
     bool isOwner = await platform.invokeMethod('isDeviceOwner');
     if (isOwner) {
-      await platform.invokeMethod('startKioskMode'); // This pins the app to the screen!
+      await platform.invokeMethod(
+        'startKioskMode',
+      ); // This pins the app to the screen!
     }
   } catch (e) {
     debugPrint('Failed to lock device in kiosk mode: $e');
+  }
+}
+
+Future<void> _configureActivity() async {
+  try {
+    await SystemChrome.setEnabledSystemUIMode(
+      SystemUiMode.immersiveSticky,
+    ).timeout(const Duration(seconds: 2));
+    await lockDeviceInKioskMode();
+  } catch (error) {
+    debugPrint('Activity configuration failed: $error');
   }
 }
 
@@ -52,14 +64,9 @@ void main() async {
   FlutterSkillBinding.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
 
-  if (Platform.isAndroid || Platform.isIOS) {
-    try {
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      lockDeviceInKioskMode();
-    } catch (e) {
-      debugPrint('Failed to set SystemUI: $e');
-    }
-  }
+  // A service-owned engine can start before any Activity is attached.
+  // Activity-dependent platform calls must never gate application startup.
+  debugPrint('[Startup] Initializing localization');
 
   try {
     await EasyLocalization.ensureInitialized();
@@ -67,6 +74,7 @@ void main() async {
     debugPrint('EasyLocalization init failed: $e');
   }
 
+  debugPrint('[Startup] Initializing Firebase');
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -75,6 +83,10 @@ void main() async {
     debugPrint('Firebase init failed (continuing anyway): $e');
   }
 
+  // Receiver startup must also run when the service starts without a Flutter view.
+  unawaited(RemoteControlReceiverService.instance.initialize());
+
+  debugPrint('[Startup] Starting app and remote receiver');
   runApp(
     EasyLocalization(
       supportedLocales: const [Locale('he'), Locale('en')],
@@ -106,12 +118,6 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // [WHATSAPP-DISABLED] WhatsApp bridge event listener disabled.
     // _listenToWhatsAppBridgeEvents();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      // [WHATSAPP-DISABLED] WhatsApp auto-publish consumer and bridge bootstrap disabled.
-      // _consumePendingWhatsAppAutoPublish();
-      // _bootstrapWhatsAppBridge();
-      RemoteControlReceiverService.instance.initialize();
-    });
   }
 
   @override
@@ -124,6 +130,9 @@ class _MyAppState extends ConsumerState<MyApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (Platform.isAndroid) {
+        unawaited(_configureActivity());
+      }
       // [WHATSAPP-DISABLED] WhatsApp bootstrap calls disabled.
       // _consumePendingWhatsAppAutoPublish();
       // _bootstrapWhatsAppBridge();

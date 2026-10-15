@@ -9,6 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -27,6 +30,16 @@ class PirsumotoBackgroundService : Service() {
         const val NOTIFICATION_ID = 20262
         const val ACTION_START = "com.pirsumoto.app.ACTION_START_DAEMON"
         const val ACTION_STOP = "com.pirsumoto.app.ACTION_STOP_DAEMON"
+
+        private var instance: PirsumotoBackgroundService? = null
+        private var receiverState = "starting"
+        private var lastReceiverReport = 0L
+
+        fun reportReceiverHealth(state: String) {
+            receiverState = state
+            lastReceiverReport = SystemClock.elapsedRealtime()
+            instance?.refreshNotification()
+        }
 
         @Volatile
         var isRunning = false
@@ -62,10 +75,41 @@ class PirsumotoBackgroundService : Service() {
         }
     }
 
+    private val healthHandler = Handler(Looper.getMainLooper())
+    private val healthCheck = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            refreshNotification()
+            healthHandler.postDelayed(this, 30000)
+        }
+    }
+
+    private val engineRetry = Runnable { if (isRunning) ensureReceiverEngine() }
+
+    private fun ensureReceiverEngine() {
+        healthHandler.removeCallbacks(engineRetry)
+        try {
+            FlutterEngineManager.getOrCreateSharedEngine(applicationContext)
+        } catch (error: Exception) {
+            Log.e(TAG, "Receiver engine startup failed; retrying in 10 seconds", error)
+            reportReceiverHealth("error")
+            healthHandler.postDelayed(engineRetry, 10000)
+        }
+    }
+
+    private fun refreshNotification() {
+        if (!isRunning) return
+        val notification = buildNotification()
+        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
+        ForegroundServiceNotifications.track(NOTIFICATION_ID, notification)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        if (lastReceiverReport == 0L) lastReceiverReport = SystemClock.elapsedRealtime()
         createNotificationChannel()
     }
 
@@ -78,7 +122,11 @@ class PirsumotoBackgroundService : Service() {
         }
 
         // A null intent is expected when Android recreates a sticky service.
-        return if (startDaemonForeground()) START_STICKY else START_NOT_STICKY
+        if (!startDaemonForeground()) return START_NOT_STICKY
+        ensureReceiverEngine()
+        healthHandler.removeCallbacks(healthCheck)
+        healthHandler.postDelayed(healthCheck, 30000)
+        return START_STICKY
     }
 
     private fun startDaemonForeground(): Boolean {
@@ -128,6 +176,9 @@ class PirsumotoBackgroundService : Service() {
     }
 
     override fun onDestroy() {
+        healthHandler.removeCallbacks(healthCheck)
+        healthHandler.removeCallbacks(engineRetry)
+        instance = null
         stopDaemonForeground()
         super.onDestroy()
     }
@@ -160,7 +211,14 @@ class PirsumotoBackgroundService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("פרסומוטו - שירות פעיל ברקע")
-            .setContentText("ממתין לפקודות פרסום ושליטה מרחוק")
+            .setContentText(when {
+                lastReceiverReport > 0 && SystemClock.elapsedRealtime() - lastReceiverReport > 150000 ->
+                    "אין אישור עדכני מהמאזין — יש לבדוק חיבור"
+                receiverState == "ready" -> "תהליך הקבלה פעיל — חיבור השרת אומת"
+                receiverState == "signed_out" -> "יש להתחבר לחשבון לקבלת פקודות"
+                receiverState == "error" -> "המאזין אינו זמין — מנסה להתחבר מחדש"
+                else -> "מאתחל את המאזין לשליטה מרחוק"
+            })
             .setSmallIcon(R.drawable.ic_pirsumoto_notification)
             .setOngoing(true)
             .setAutoCancel(false)
