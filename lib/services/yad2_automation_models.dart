@@ -33,6 +33,7 @@ class VehiclePublishData {
   final String? testMonth;
   final bool govIl;
   final bool includeYad2;
+  final bool includeFacebook;
 
   const VehiclePublishData({
     this.publicationIdentity,
@@ -67,6 +68,7 @@ class VehiclePublishData {
     this.testMonth,
     this.govIl = true,
     this.includeYad2 = true,
+    this.includeFacebook = true,
   });
 
   VehiclePublishData copyWith({
@@ -101,6 +103,7 @@ class VehiclePublishData {
     String? testMonth,
     bool? govIl,
     bool? includeYad2,
+    bool? includeFacebook,
   }) {
     return VehiclePublishData(
       publicationIdentity: publicationIdentity,
@@ -135,6 +138,7 @@ class VehiclePublishData {
       testMonth: testMonth ?? this.testMonth,
       govIl: govIl ?? this.govIl,
       includeYad2: includeYad2 ?? this.includeYad2,
+      includeFacebook: includeFacebook ?? this.includeFacebook,
     );
   }
 

@@ -2,6 +2,7 @@ import 'publication_description_service.dart';
 import 'publication_result_verifier.dart';
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
+import 'automation_error_formatter.dart';
 import 'native_image_upload_request.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -18,6 +19,7 @@ import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import 'ocr_service.dart';
 import 'ui_context.dart';
+import '../remote_control/remote_session_manager.dart' show RemoteAutomationGate;
 // [WHATSAPP-DISABLED] WhatsApp text validation import disabled in yad2 optimized service.
 // import 'whatsapp_text_validation_service.dart';
 import 'yad2_automation_models.dart' show AutomationPhase, VehiclePublishData;
@@ -513,15 +515,58 @@ class Yad2AccessibilityAutomationService {
       ),
     );
   });
-  Future<bool> _ensureAutomationWindow() async {
-    try {
-      return await _automationChannel.invokeMethod<bool>(
-            'checkAutomationWindow',
-          ) ??
-          false;
-    } catch (_) {
-      return false;
+  static const _transientSystemPackages = {
+    'com.android.systemui',
+    'com.miui.securitycenter',
+    'com.google.android.permissioncontroller',
+  };
+
+  Future<void> _waitIfRemoteBusy() async {
+    final sw = Stopwatch()..start();
+    while ((RemoteAutomationGate.isHandshaking &&
+            sw.elapsed < const Duration(seconds: 5)) ||
+        RemoteAutomationGate.isInteractiveTakeover) {
+      await Future.delayed(const Duration(milliseconds: 250));
     }
+  }
+
+  Future<bool> _ensureAutomationWindow() async {
+    final sw = Stopwatch()..start();
+    while (sw.elapsed < const Duration(seconds: 3)) {
+      try {
+        final activePkg = await _automationChannel.invokeMethod<String>(
+          'getActiveWindowPackage',
+        );
+        if (activePkg != null && _transientSystemPackages.contains(activePkg)) {
+          debugPrint(
+            '[Yad2-A11y] Transient system package active: $activePkg, waiting 500ms...',
+          );
+          await Future.delayed(const Duration(milliseconds: 500));
+          continue;
+        }
+
+        final ready = await _automationChannel.invokeMethod<bool>(
+          'checkAutomationWindow',
+          {'requireAppWindow': true},
+        );
+        if (ready == true) return true;
+      } catch (e) {
+        try {
+          final activePkg = await _automationChannel.invokeMethod<String>(
+            'getActiveWindowPackage',
+          );
+          if (activePkg != null && _transientSystemPackages.contains(activePkg)) {
+            debugPrint(
+              '[Yad2-A11y] Transient system package active on error: $activePkg, waiting 500ms...',
+            );
+            await Future.delayed(const Duration(milliseconds: 500));
+            continue;
+          }
+        } catch (_) {}
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
   }
 
   bool _stopped = false;
@@ -714,6 +759,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> _executePhaseTracked(AutomationPhase phase) async {
+    await _waitIfRemoteBusy();
     _currentPhase = phase;
     if (_isPaused) {
       _pausedPhase = phase;
@@ -1863,10 +1909,19 @@ class Yad2AccessibilityAutomationService {
           ? const _StepActionResult.success()
           : const _StepActionResult.failure('Description page not found.');
     }
-    final requestedDescription = await PublicationDescriptionService.load(
+    final rawRequestedDescription = await PublicationDescriptionService.load(
       formData,
       settingsLoader: settingsLoader,
     );
+    final requestedDescription = AutomationErrorFormatter.stripEmojis(
+          rawRequestedDescription,
+        )
+        .replaceAll(RegExp(r'לרכב זה יש טייטל נקי[.]?'), '')
+        .split('\n')
+        .map((line) => line.replaceAll(RegExp(r'[ \t]{2,}'), ' ').trim())
+        .where((line) => line.isNotEmpty)
+        .join('\n')
+        .trim();
     if (requestedDescription.isNotEmpty &&
         !_completedPhaseActions.contains('description:entry')) {
       // Select the whole Yad2 (AI-prefilled) description and replace it with
@@ -2320,6 +2375,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolReplaceFocusedWebViewText(String value) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     final platform = controller.platform;
     if (platform is! AndroidWebViewController) return false;
@@ -2353,6 +2409,7 @@ class Yad2AccessibilityAutomationService {
     String? viewId,
     String? labels,
   }) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     final args = {'viewId': viewId, 'labels': labels};
     try {
@@ -2387,6 +2444,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<void> toolTapScreen(double x, double y) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) throw StateError('Automation paused before tap');
     _lastTapScreenPhysicalX = x;
     _lastTapScreenPhysicalY = y;
@@ -2398,6 +2456,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolPressBack() async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     try {
       final pressed = await _automationChannel.invokeMethod<bool>('pressBack');
@@ -2409,6 +2468,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolEnterTextAtFocused(String text) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     try {
       final success = await _automationChannel.invokeMethod<bool>(
@@ -2423,6 +2483,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<bool> toolPasteTextAtFocused(String text) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     try {
       await Clipboard.setData(ClipboardData(text: text));
@@ -2694,15 +2755,18 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<_ScreenSnapshot> _snapshotForRecovery() async {
+    await _waitIfRemoteBusy();
     final ui = await _observeUIFresh();
     final nativeTree = await _readTreeString();
     String? bodyText;
     String? url;
     try {
+      await _waitIfRemoteBusy();
       bodyText =
           (await controller.runJavaScriptReturningResult(
             'document.body ? document.body.innerText : ""',
           )).toString();
+      await _waitIfRemoteBusy();
       url =
           (await controller.runJavaScriptReturningResult(
             'location.href',
@@ -2881,6 +2945,7 @@ class Yad2AccessibilityAutomationService {
     double percent, {
     bool accessibilityOnly = false,
   }) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return;
     try {
       await _automationChannel.invokeMethod('scrollNode', {
@@ -2906,6 +2971,7 @@ class Yad2AccessibilityAutomationService {
     while (DateTime.now().isBefore(deadline)) {
       double? current;
       try {
+        await _waitIfRemoteBusy();
         final res = await controller.runJavaScriptReturningResult(
           '(window.scrollY || document.documentElement.scrollTop || 0)',
         );
@@ -2935,6 +3001,7 @@ class Yad2AccessibilityAutomationService {
   }) async {
     Map<String, dynamic>? previous;
     for (var i = 0; i < maxReads; i++) {
+      await _waitIfRemoteBusy();
       final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         method,
         args,
@@ -2972,6 +3039,7 @@ class Yad2AccessibilityAutomationService {
   }
 
   Future<String?> _readTreeString() async {
+    await _waitIfRemoteBusy();
     try {
       return await _automationChannel.invokeMethod<String>('logTree');
     } catch (_) {
@@ -3371,10 +3439,14 @@ class Yad2AccessibilityAutomationService {
     _phaseRetryCount = 0;
     // [WHATSAPP-DISABLED] _notifyDeadlockInterventionRequired disabled.
     // unawaited(_notifyDeadlockInterventionRequired(phase.description, error));
+    final friendlyError = AutomationErrorFormatter.format(
+      error,
+      phaseDescription: phase.description,
+    );
     onPhaseError?.call(
       phase,
-      'האוטומציה מושהית בשלב ${phase.name}: ${phase.description}.\n'
-      '$error\nניתן לקחת שליטה ידנית או מרחוק, לתקן את המסך וללחוץ המשך מאותו שלב.',
+      'האוטומציה מושהית בשלב "${phase.description}".\n'
+      '$friendlyError\nניתן לקחת שליטה ידנית או מרחוק, לתקן את המסך וללחוץ המשך מאותו שלב.',
     );
     // Surface Resume immediately, even if the audio plugin is unavailable.
     unawaited(_beepUser().catchError((Object _) {}));

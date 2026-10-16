@@ -2,6 +2,7 @@ import 'publication_description_service.dart';
 import 'publication_result_verifier.dart';
 import 'automation_task_scheduler.dart';
 import 'automation_accessibility_channel.dart';
+import 'automation_error_formatter.dart';
 import 'native_image_upload_request.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -13,6 +14,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'yad2_automation_models.dart' show VehiclePublishData;
+import '../remote_control/remote_session_manager.dart' show RemoteAutomationGate;
 
 // ---------------------------------------------------------------------------
 // Facebook Marketplace – Vehicle Listing Automation Service
@@ -225,20 +227,67 @@ class FacebookAutomationService {
     if (_stopped || _isPaused) return;
     pauseAutomation();
     debugPrint('[Facebook] Interrupted at ${_currentPhase?.name}: $reason');
+    final friendly = AutomationErrorFormatter.format(
+      reason,
+      phaseDescription: _currentPhase?.descriptionHe,
+    );
     onPhaseError?.call(
       _currentPhase ?? FacebookAutomationPhase.loginGate,
-      'האוטומציה הושהתה בשלב הנוכחי: $reason. החזר את מסך הפרסום ולחץ המשך.',
+      'האוטומציה הושהתה: $friendly. החזר את מסך הפרסום ולחץ המשך.',
     );
   });
-  Future<bool> _ensureAutomationWindow() async {
-    try {
-      return await _automationChannel.invokeMethod<bool>(
-            'checkAutomationWindow',
-          ) ??
-          false;
-    } catch (_) {
-      return false;
+  static const _transientSystemPackages = {
+    'com.android.systemui',
+    'com.miui.securitycenter',
+    'com.google.android.permissioncontroller',
+  };
+
+  Future<void> _waitIfRemoteBusy() async {
+    final sw = Stopwatch()..start();
+    while ((RemoteAutomationGate.isHandshaking &&
+            sw.elapsed < const Duration(seconds: 5)) ||
+        RemoteAutomationGate.isInteractiveTakeover) {
+      await Future.delayed(const Duration(milliseconds: 250));
     }
+  }
+
+  Future<bool> _ensureAutomationWindow() async {
+    final sw = Stopwatch()..start();
+    while (sw.elapsed < const Duration(seconds: 3)) {
+      try {
+        final activePkg = await _automationChannel.invokeMethod<String>(
+          'getActiveWindowPackage',
+        );
+        if (activePkg != null && _transientSystemPackages.contains(activePkg)) {
+          debugPrint(
+            '[Facebook] Transient system package active: $activePkg, waiting 500ms...',
+          );
+          await Future.delayed(const Duration(milliseconds: 500));
+          continue;
+        }
+
+        final ready = await _automationChannel.invokeMethod<bool>(
+          'checkAutomationWindow',
+          {'requireAppWindow': true},
+        );
+        if (ready == true) return true;
+      } catch (e) {
+        try {
+          final activePkg = await _automationChannel.invokeMethod<String>(
+            'getActiveWindowPackage',
+          );
+          if (activePkg != null && _transientSystemPackages.contains(activePkg)) {
+            debugPrint(
+              '[Facebook] Transient system package active on error: $activePkg, waiting 500ms...',
+            );
+            await Future.delayed(const Duration(milliseconds: 500));
+            continue;
+          }
+        } catch (_) {}
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
   }
 
   final Set<Future<void>> _inFlight = {};
@@ -398,6 +447,7 @@ class FacebookAutomationService {
   }
 
   Future<void> _executePhaseTracked(FacebookAutomationPhase phase) async {
+    await _waitIfRemoteBusy();
     _currentPhase = phase;
     if (_isPaused) {
       _pausedPhase = phase;
@@ -754,6 +804,7 @@ class FacebookAutomationService {
   }) async {
     Map<String, dynamic>? previous;
     for (int i = 0; i < maxReads; i++) {
+      await _waitIfRemoteBusy();
       final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         method,
         args,
@@ -791,6 +842,7 @@ class FacebookAutomationService {
   }
 
   Future<void> toolTapScreen(double x, double y) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) throw StateError('Automation paused before tap');
     debugPrint('[FB-A11y] 🖱️ toolTapScreen($x, $y)');
     final tapped = await _automationChannel.invokeMethod<bool>('tapScreen', {
@@ -891,6 +943,7 @@ class FacebookAutomationService {
   // ── Tool: text entry ──────────────────────────────────────────────────────
 
   Future<bool> toolEnterTextAtFocused(String text) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     debugPrint('[FB-A11y] ⌨️ toolEnterTextAtFocused ("$text")');
     try {
@@ -908,6 +961,7 @@ class FacebookAutomationService {
   }
 
   Future<bool> toolReplaceFocusedWebViewText(String value) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return false;
     final platform = controller.platform;
     if (platform is! AndroidWebViewController) return false;
@@ -1237,6 +1291,7 @@ class FacebookAutomationService {
     double percent, {
     bool accessibilityOnly = false,
   }) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return;
     try {
       await _automationChannel.invokeMethod('scrollNode', {
@@ -1257,6 +1312,7 @@ class FacebookAutomationService {
     double percent, {
     bool accessibilityOnly = false,
   }) async {
+    await _waitIfRemoteBusy();
     if (_inputBlocked) return;
     try {
       await _automationChannel.invokeMethod('scrollNode', {
@@ -1286,6 +1342,7 @@ class FacebookAutomationService {
     String target, {
     int targetInstance = 1,
   }) async {
+    await _waitIfRemoteBusy();
     try {
       final bounds = await _automationChannel.invokeMapMethod<String, dynamic>(
         'findAndGetBounds',
@@ -1307,6 +1364,7 @@ class FacebookAutomationService {
     final deadline = DateTime.now().add(timeout);
     do {
       if (_isPaused) return false;
+      await _waitIfRemoteBusy();
       if (await action()) return true;
       await Future.delayed(pollInterval);
     } while (DateTime.now().isBefore(deadline));
@@ -1346,6 +1404,7 @@ class FacebookAutomationService {
   // ── Tool: press back ─────────────────────────────────────────────────────
 
   Future<bool> toolPressBack() async {
+    await _waitIfRemoteBusy();
     if (_stopped || _isPaused) return false;
     try {
       final pressed = await _automationChannel.invokeMethod<bool>('pressBack');
@@ -1429,6 +1488,7 @@ class FacebookAutomationService {
   Future<bool> _isLoggedInAndOnForm() async {
     // Check for the combobox that facebook_screen.dart clicks as Phase 3
     try {
+      await _waitIfRemoteBusy();
       final res = await controller.runJavaScriptReturningResult('''
         (function(){
           var combos=document.querySelectorAll('[role="combobox"]');
@@ -1531,6 +1591,7 @@ class FacebookAutomationService {
 
   Future<void> _applyDesktopViewport() async {
     try {
+      await _waitIfRemoteBusy();
       await controller.runJavaScript('''
         (function(){
           var m=document.querySelector('meta[name=viewport]');
@@ -1585,6 +1646,7 @@ class FacebookAutomationService {
       return;
     debugPrint('[$tag] ════════ ACCESSIBILITY TREE DUMP ════════');
     try {
+      await _waitIfRemoteBusy();
       final String? treeStr = await _automationChannel.invokeMethod<String>(
         'logTree',
       );
@@ -1609,6 +1671,7 @@ class FacebookAutomationService {
     if (!const bool.fromEnvironment('PIRSUMOTO_AUTOMATION_TRACE')) return;
     debugPrint('[$tag] ════════ DOM FORM ELEMENTS DUMP ════════');
     try {
+      await _waitIfRemoteBusy();
       final raw = await controller.runJavaScriptReturningResult('''
         (function() {
           var items = document.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"], [role="button"], label, [aria-label]');
@@ -1804,6 +1867,7 @@ class FacebookAutomationService {
             }
             await Future.delayed(const Duration(milliseconds: 800));
 
+            await _waitIfRemoteBusy();
             final String? treeStr = await _automationChannel
                 .invokeMethod<String>('logTree');
             if (treeStr != null) {
@@ -2398,6 +2462,7 @@ class FacebookAutomationService {
 
             // Loop until reaching the end of the page
             while (true) {
+              await _waitIfRemoteBusy();
               final String? treeStr = await _automationChannel
                   .invokeMethod<String>('logTree');
               if (treeStr == null) {
@@ -2482,6 +2547,7 @@ class FacebookAutomationService {
                   await Future.delayed(const Duration(milliseconds: 700));
 
                   // Verify it got checked; retry once if not
+                  await _waitIfRemoteBusy();
                   final String? treeAfter = await _automationChannel
                       .invokeMethod<String>('logTree');
                   if (treeAfter != null) {
@@ -2687,7 +2753,11 @@ class FacebookAutomationService {
     pauseAutomation();
     _pausedPhase = phase;
     _phaseRetryCount = 0;
-    onPhaseError?.call(phase, error);
+    final friendlyError = AutomationErrorFormatter.format(
+      error,
+      phaseDescription: phase.descriptionHe,
+    );
+    onPhaseError?.call(phase, friendlyError);
     // Report the pause immediately; audio initialization must not delay the
     // remote heads-up notification or the local Resume controls.
     unawaited(_beepUser().catchError((Object _) {}));

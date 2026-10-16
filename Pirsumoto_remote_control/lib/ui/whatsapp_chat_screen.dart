@@ -146,8 +146,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       _allDataFilled =
           saved != null &&
           RemoteValidationService.getMissingFields(saved.vehicleData).isEmpty &&
-          RemoteValidationService.validateValues(saved.vehicleData).isEmpty &&
-          saved.imagePaths.isNotEmpty;
+          RemoteValidationService.validateValues(saved.vehicleData).isEmpty;
       _localStatus = saved?.status;
       _vehicleData = saved?.vehicleData ?? {};
       _currentLicensePlate = saved?.licensePlate ?? '';
@@ -447,7 +446,10 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               .doc(uid)
               .get();
           final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
-          if (settings != null && settings.containsKey('includeYad2')) {
+          if (!saved.vehicleData.containsKey('publish_target') &&
+              !saved.vehicleData.containsKey('includeYad2') &&
+              settings != null &&
+              settings.containsKey('includeYad2')) {
             final bool incYad2 = settings['includeYad2'] ?? true;
             saved.vehicleData['includeYad2'] = incYad2 ? 'true' : 'false';
           }
@@ -791,7 +793,21 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
               final key = entry.key;
               final val = entry.value?.toString().trim() ?? '';
               if (val.isNotEmpty && (mergedVehicleData[key] ?? '').isEmpty) {
-                mergedVehicleData[key] = val;
+                var finalVal = val;
+                final enumKey =
+                    key == 'ownership' ? 'current_ownership' : key;
+                if (vehicleEnums.containsKey(enumKey)) {
+                  final allowed = vehicleEnums[enumKey]!;
+                  if (finalVal == 'פרטי' && allowed.contains('פרטית')) {
+                    finalVal = 'פרטית';
+                  } else if (finalVal == 'פרטית' && allowed.contains('פרטי')) {
+                    finalVal = 'פרטי';
+                  }
+                  if (!allowed.contains(finalVal)) {
+                    continue;
+                  }
+                }
+                mergedVehicleData[key] = finalVal;
               }
             }
           }
@@ -823,11 +839,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final errors = _getFilteredErrors(allErrors, mergedVehicleData, missing);
     final isComplete = missing.isEmpty && allErrors.isEmpty;
 
-    if (isComplete && currentImagePaths.isNotEmpty) {
-      _allDataFilled = true;
-    } else {
-      _allDataFilled = false;
-    }
+    _allDataFilled = isComplete;
 
     String finalBotReply = result.botReply;
     if (plate.isNotEmpty) {
@@ -837,7 +849,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
           ? 'להשלמת פרטי הרכב — אנא מלא את השדות בטופס שלמטה:'
           : (currentImagePaths.isNotEmpty
                 ? '✅ כל פרטי הרכב מלאים ומאומתים!\nלחץ על כפתור הפרסום להתחלת הפרסום ביד2.'
-                : '📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.');
+                : '✅ כל פרטי הרכב מלאים ומאומתים!\nניתן לצרף תמונות של הרכב או ללחוץ על כפתור הפרסום להתחלת הפרסום.');
       final errorLines = errors.map((e) => '⚠️ $e').toList();
       finalBotReply = [
         if (summary.isNotEmpty) summary,
@@ -873,7 +885,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       lastMessage: result.botReply.split('\n').first,
       vehicleData: mergedVehicleData,
       imagePaths: currentImagePaths,
-      isReadyToPublish: isComplete && currentImagePaths.isNotEmpty,
+      isReadyToPublish: isComplete,
     );
     await ChatSessionManager.saveSession(updatedSession);
     await _refreshSession();
@@ -997,24 +1009,35 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       lastMessage: isComplete ? 'פרטי הרכב הושלמו' : 'עודכנו פרטים',
       vehicleData: merged,
       imagePaths: currentImagePaths,
-      isReadyToPublish: isComplete && currentImagePaths.isNotEmpty,
+      isReadyToPublish: isComplete,
     );
 
     await ChatSessionManager.saveSession(updatedSession);
 
     setState(() {
       _vehicleData = merged;
-      _allDataFilled = isComplete && currentImagePaths.isNotEmpty;
+      _allDataFilled = isComplete;
     });
 
     String botReply;
     if (isComplete) {
+      final target = merged['publish_target'] ??
+          (merged['includeYad2'] == 'false'
+              ? 'facebook'
+              : merged['includeFacebook'] == 'false'
+                  ? 'yad2'
+                  : 'both');
+      final targetStr = target == 'yad2'
+          ? 'ביד2'
+          : target == 'facebook'
+              ? 'בפייסבוק'
+              : 'ביד2 ובפייסבוק';
       if (currentImagePaths.isNotEmpty) {
         botReply =
-            '✅ כל פרטי הרכב הושלמו ומאומתים!\nלחץ על כפתור הפרסום להתחלת הפרסום ביד2.';
+            '✅ כל פרטי הרכב הושלמו ומאומתים!\nלחץ על כפתור הפרסום להתחלת הפרסום $targetStr.';
       } else {
         botReply =
-            '✅ כל פרטי הרכב הושלמו ומאומתים!\n📷 אנא צרף לפחות תמונה אחת של הרכב כדי להתחיל בפרסום.';
+            '✅ כל פרטי הרכב הושלמו ומאומתים!\nניתן לצרף תמונות של הרכב או ללחוץ על כפתור הפרסום להתחלת הפרסום $targetStr.';
       }
     } else {
       final errorLines = errors.map((e) => '⚠️ $e').toList();
@@ -1123,7 +1146,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final missing = RemoteValidationService.getMissingFields(vehicleData);
     final errors = RemoteValidationService.validateValues(vehicleData);
     final isNowReady =
-        hasPlate && missing.isEmpty && errors.isEmpty && imgs.isNotEmpty;
+        hasPlate && missing.isEmpty && errors.isEmpty;
 
     if (isNowReady) {
       _allDataFilled = true;
@@ -1320,8 +1343,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final isNowReady =
           hasPlate &&
           missing.isEmpty &&
-          errors.isEmpty &&
-          currentImgs.isNotEmpty;
+          errors.isEmpty;
 
       _allDataFilled = isNowReady;
 
@@ -1353,7 +1375,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
             content: Text(
               currentImgs.isNotEmpty
                   ? 'התמונה נמחקה (נותרו ${currentImgs.length} תמונות)'
-                  : 'התמונה נמחקה. יש לצרף לפחות תמונה אחת כדי לפרסם.',
+                  : 'התמונה נמחקה.',
               textDirection: TextDirection.rtl,
             ),
             duration: const Duration(seconds: 2),
@@ -1447,8 +1469,7 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
       final isNowReady =
           hasPlate &&
           missing.isEmpty &&
-          errors.isEmpty &&
-          currentImgs.isNotEmpty;
+          errors.isEmpty;
 
       _allDataFilled = isNowReady;
 
@@ -2306,66 +2327,79 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.neutral,
-      appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          // Date Separator Pill ("היום")
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceSubtle,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Text(
-              'היום',
-              style: GoogleFonts.heebo(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: AppColors.secondary,
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        backgroundColor: AppColors.neutral,
+        appBar: _buildAppBar(),
+        body: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: () => FocusScope.of(context).unfocus(),
+          child: Column(
+            children: [
+              // Date Separator Pill ("היום")
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceSubtle,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Text(
+                  'היום',
+                  style: GoogleFonts.heebo(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.secondary,
+                  ),
+                ),
               ),
-            ),
-          ),
 
-          if (_messages.length >= 100)
-            TextButton(
-              onPressed: _loadOlderMessages,
-              child: const Text('טען הודעות קודמות'),
-            ),
-          // Messages List
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                final isLast = index == _messages.length - 1;
-                final isLastBotMessage =
-                    index ==
-                    _messages.lastIndexWhere(
-                      (m) =>
-                          m.sender == ChatSender.bot &&
-                          !m.id.startsWith('gov_status_'),
+              if (_messages.length >= 100)
+                TextButton(
+                  onPressed: _loadOlderMessages,
+                  child: const Text('טען הודעות קודמות'),
+                ),
+              // Messages List
+              Expanded(
+                child: ListView.builder(
+                  controller: _scrollController,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  itemCount: _messages.length,
+                  itemBuilder: (context, index) {
+                    final message = _messages[index];
+                    final isLast = index == _messages.length - 1;
+                    final isLastBotMessage =
+                        index ==
+                        _messages.lastIndexWhere(
+                          (m) =>
+                              m.sender == ChatSender.bot &&
+                              !m.id.startsWith('gov_status_'),
+                        );
+                    return _buildMessageBubble(
+                      message,
+                      isLastMessage: isLast,
+                      isLastBotMessage: isLastBotMessage,
                     );
-                return _buildMessageBubble(
-                  message,
-                  isLastMessage: isLast,
-                  isLastBotMessage: isLastBotMessage,
-                );
-              },
-            ),
+                  },
+                ),
+              ),
+
+              if (_isTranscribing || _fetchingGovernment)
+                AudioProcessingIndicator(
+                  fetchingGovernment: _fetchingGovernment,
+                ),
+
+              // Bottom Input Bar
+              _buildInputBar(),
+            ],
           ),
-
-          if (_isTranscribing || _fetchingGovernment)
-            AudioProcessingIndicator(fetchingGovernment: _fetchingGovernment),
-
-          // Bottom Input Bar
-          _buildInputBar(),
-        ],
+        ),
       ),
     );
   }
@@ -2601,9 +2635,6 @@ class _WhatsAppChatScreenState extends State<WhatsAppChatScreen> {
     final missingFields = !isUser
         ? RemoteValidationService.getMissingFields(_vehicleData)
         : <String>[];
-    final hasPlate =
-        (_vehicleData['license_plate'] ?? '').isNotEmpty ||
-        _currentLicensePlate.isNotEmpty;
     final showMissingFieldsForm =
         message.mediaType == 'missing_fields_form' ||
         message.text.contains(
@@ -3749,10 +3780,26 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   bool _isSaving = false;
   bool _noTest = false;
   String? _saveFeedback;
+  String _publishTarget = 'both';
+
+  String _determinePublishTarget(Map<String, String> data) {
+    final pt = data['publish_target'] ?? data['target_platform'];
+    if (pt == 'yad2' || pt == 'facebook' || pt == 'both') {
+      return pt!;
+    }
+    final rawYad2 = data['includeYad2'] ?? data['include_yad2'];
+    final rawFb = data['includeFacebook'] ?? data['include_facebook'];
+    final incYad2 = rawYad2 == null ? true : (rawYad2.toLowerCase() != 'false');
+    final incFb = rawFb == null ? true : (rawFb.toLowerCase() != 'false');
+    if (incYad2 && !incFb) return 'yad2';
+    if (!incYad2 && incFb) return 'facebook';
+    return 'both';
+  }
 
   @override
   void initState() {
     super.initState();
+    _publishTarget = _determinePublishTarget(widget.currentData);
     _initFields();
   }
 
@@ -3768,7 +3815,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             ? 'כן'
             : 'לא';
       } else if (_isDropdownField(field)) {
-        _dropdownValues[field] = value;
+        _dropdownValues[field] = _normalizeDropdownValue(field, value);
       } else {
         _controllers[field]?.text = value;
       }
@@ -3785,6 +3832,16 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
           (month.isNotEmpty && year.isNotEmpty
               ? '${month.padLeft(2, '0')}/$year'
               : '');
+    }
+    if (oldWidget.currentData['publish_target'] !=
+            widget.currentData['publish_target'] ||
+        oldWidget.currentData['target_platform'] !=
+            widget.currentData['target_platform'] ||
+        oldWidget.currentData['includeYad2'] !=
+            widget.currentData['includeYad2'] ||
+        oldWidget.currentData['includeFacebook'] !=
+            widget.currentData['includeFacebook']) {
+      _publishTarget = _determinePublishTarget(widget.currentData);
     }
     _initFields();
   }
@@ -3839,6 +3896,18 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         final val = widget.currentData[f];
         if (val != null && val.isNotEmpty && val != 'null') {
           combined.add(f);
+        }
+      }
+    } else {
+      // If govIl, still show dropdown fields that have invalid values not in the options list (like 'סוחר')
+      for (final f in manuallyFillable) {
+        if (_isDropdownField(f)) {
+          final val = (widget.currentData[f] ?? '').trim();
+          if (val.isNotEmpty && val != 'null') {
+            if (_normalizeDropdownValue(f, val) == null) {
+              combined.add(f);
+            }
+          }
         }
       }
     }
@@ -3927,27 +3996,11 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
         continue;
       }
       if (_isDropdownField(field)) {
-        final options = _getFieldOptions(field);
-        if (options.contains(existingVal)) {
+        final norm = _normalizeDropdownValue(field, existingVal);
+        if (norm != null) {
           if (_dropdownValues[field] == null ||
               _dropdownValues[field]!.isEmpty) {
-            _dropdownValues[field] = existingVal;
-          }
-        } else if (existingVal == 'פרטי' && options.contains('פרטית')) {
-          if (_dropdownValues[field] == null ||
-              _dropdownValues[field]!.isEmpty) {
-            _dropdownValues[field] = 'פרטית';
-          }
-        } else if (existingVal == 'פרטית' && options.contains('פרטי')) {
-          if (_dropdownValues[field] == null ||
-              _dropdownValues[field]!.isEmpty) {
-            _dropdownValues[field] = 'פרטי';
-          }
-        } else if (existingVal.isNotEmpty) {
-          // If the current saved value isn't in the predefined options, we still want to keep it.
-          if (_dropdownValues[field] == null ||
-              _dropdownValues[field]!.isEmpty) {
-            _dropdownValues[field] = existingVal;
+            _dropdownValues[field] = norm;
           }
         }
       } else {
@@ -3976,10 +4029,7 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     }
     if (_isDropdownField(field)) {
       final val = _dropdownValues[field]?.trim();
-      if (val == null || val.isEmpty || val == 'בחר...' || val == '0') {
-        return false;
-      }
-      return true;
+      return _normalizeDropdownValue(field, val) != null;
     } else {
       final val = _controllers[field]?.text.trim() ?? '';
       if (val.isEmpty || (val == '0' && field != 'km') || val == 'הזן...') {
@@ -4022,8 +4072,27 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
     super.dispose();
   }
 
+  String? _normalizeDropdownValue(String field, String? val) {
+    if (val == null) return null;
+    final trimmed = val.trim();
+    if (trimmed.isEmpty || trimmed == 'בחר...' || trimmed == '0') return null;
+    final options = _getFieldOptions(field);
+    if (options.contains(trimmed)) return trimmed;
+    if (trimmed == 'פרטי' && options.contains('פרטית')) return 'פרטית';
+    if (trimmed == 'פרטית' && options.contains('פרטי')) return 'פרטי';
+    if ((trimmed == 'אוטומטי' || trimmed == 'רובוטי' || trimmed == 'רציף') &&
+        options.contains('הילוכים אוטומטיים')) {
+      return 'הילוכים אוטומטיים';
+    }
+    if (trimmed == 'ידני' && options.contains('שידור ידני')) {
+      return 'שידור ידני';
+    }
+    return null;
+  }
+
   bool _isDropdownField(String field) {
     if (field == 'clean_title') return false;
+    if (field == 'ownership') return true;
     if (vehicleEnums.containsKey(field)) return true;
     if (field == 'month' ||
         field == 'test_month' ||
@@ -4035,6 +4104,9 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   }
 
   List<String> _getFieldOptions(String field) {
+    if (field == 'ownership') {
+      return vehicleEnums['current_ownership']!;
+    }
     if (vehicleEnums.containsKey(field)) {
       if (field == 'gear_type' || field == 'gear') {
         return vehicleEnums[field]!
@@ -4080,6 +4152,15 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
       updated['no_test'] = noTestValue ? 'true' : 'false';
       final bool isGovIl = widget.currentData['govIl'] == 'true';
       updated['govIl'] = isGovIl ? 'true' : 'false';
+      updated['publish_target'] = _publishTarget;
+      updated['includeYad2'] =
+          (_publishTarget == 'both' || _publishTarget == 'yad2')
+              ? 'true'
+              : 'false';
+      updated['includeFacebook'] =
+          (_publishTarget == 'both' || _publishTarget == 'facebook')
+              ? 'true'
+              : 'false';
       for (final field in _fieldsToShow) {
         if (field == 'clean_title') {
           updated[field] = _dropdownValues[field] ?? 'לא';
@@ -4229,6 +4310,82 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
             ),
           ),
           _buildFieldRow('highlights'),
+
+          const SizedBox(height: 8),
+          const Divider(key: ValueKey('publish_target_divider')),
+          const SizedBox(height: 6),
+          Text(
+            'יעד פרסום:',
+            textDirection: TextDirection.rtl,
+            style: GoogleFonts.heebo(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Directionality(
+            textDirection: TextDirection.rtl,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                ChoiceChip(
+                  key: const ValueKey('publish_target_both'),
+                  label: Text(
+                    'שניהם (יד2 ופייסבוק)',
+                    style: GoogleFonts.heebo(
+                      fontSize: 12,
+                      fontWeight: _publishTarget == 'both'
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                  selected: _publishTarget == 'both',
+                  selectedColor: AppColors.primary.withValues(alpha: 0.18),
+                  onSelected: (widget.enabled && !_isSaving)
+                      ? (selected) {
+                          if (selected) setState(() => _publishTarget = 'both');
+                        }
+                      : null,
+                ),
+                ChoiceChip(
+                  key: const ValueKey('publish_target_yad2'),
+                  label: Text(
+                    'יד2 בלבד',
+                    style: GoogleFonts.heebo(
+                      fontSize: 12,
+                      fontWeight: _publishTarget == 'yad2'
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                  selected: _publishTarget == 'yad2',
+                  selectedColor: AppColors.primary.withValues(alpha: 0.18),
+                  onSelected: (widget.enabled && !_isSaving)
+                      ? (selected) {
+                          if (selected) setState(() => _publishTarget = 'yad2');
+                        }
+                      : null,
+                ),
+                ChoiceChip(
+                  key: const ValueKey('publish_target_facebook'),
+                  label: Text(
+                    'פייסבוק בלבד',
+                    style: GoogleFonts.heebo(
+                      fontSize: 12,
+                      fontWeight: _publishTarget == 'facebook'
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+                  selected: _publishTarget == 'facebook',
+                  selectedColor: AppColors.primary.withValues(alpha: 0.18),
+                  onSelected: (widget.enabled && !_isSaving)
+                      ? (selected) {
+                          if (selected) setState(() => _publishTarget = 'facebook');
+                        }
+                      : null,
+                ),
+              ],
+            ),
+          ),
 
           const SizedBox(height: 12),
 
@@ -4464,11 +4621,6 @@ class _MissingFieldsInlineFormState extends State<MissingFieldsInlineForm> {
   Widget _buildDropdownInput(String field) {
     final options = List<String>.from(_getFieldOptions(field));
     final currentVal = _dropdownValues[field];
-    if (currentVal != null &&
-        currentVal.isNotEmpty &&
-        !options.contains(currentVal)) {
-      options.add(currentVal);
-    }
 
     return Container(
       height: 38,

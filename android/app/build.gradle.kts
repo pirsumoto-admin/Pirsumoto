@@ -72,6 +72,7 @@ dependencies {
     // flutter_webrtc supplies this at runtime; expose its frame API to our
     // static-screen repeater (same SDK version as flutter_webrtc).
     compileOnly("io.github.webrtc-sdk:android:150.7871.01")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.github.webrtc-sdk:android:150.7871.01")
 }

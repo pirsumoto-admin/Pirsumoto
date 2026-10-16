@@ -23,6 +23,7 @@ class RemoteProtocolConstants {
   static const String typeChatReply = 'chat_reply';
   static const String typeChatStatus = 'chat_status';
   static const String typeReset = 'reset';
+  static const String typeRequestFrame = 'request_frame';
 
   static const String keyBack = 'BACK';
   static const String keyHome = 'HOME';
@@ -97,6 +98,8 @@ abstract class RemoteCommand {
           return RemoteDisconnectCommand();
         case RemoteProtocolConstants.typeReset:
           return const RemoteResetCommand();
+        case RemoteProtocolConstants.typeRequestFrame:
+          return const RemoteRequestFrameCommand();
         case RemoteProtocolConstants.typeDimensions:
           return RemoteDimensionsCommand(
             width: (map['width'] as num).toInt(),
@@ -316,6 +319,14 @@ class RemoteDisconnectCommand extends RemoteCommand {
 class RemoteResetCommand extends RemoteCommand {
   const RemoteResetCommand()
       : super(RemoteProtocolConstants.typeReset);
+
+  @override
+  Map<String, dynamic> toJson() => {'type': type};
+}
+
+class RemoteRequestFrameCommand extends RemoteCommand {
+  const RemoteRequestFrameCommand()
+      : super(RemoteProtocolConstants.typeRequestFrame);
 
   @override
   Map<String, dynamic> toJson() => {'type': type};

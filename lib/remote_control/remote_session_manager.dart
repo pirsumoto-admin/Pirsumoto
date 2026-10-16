@@ -12,6 +12,28 @@ import 'remote_chat_receiver.dart';
 import 'firebase_chat_receiver.dart';
 import '../services/whatsapp_text_validation_service.dart';
 
+/// Shared gate to coordinate automation polling and WebRTC connection contention
+class RemoteAutomationGate {
+  static bool isHandshaking = false;
+  static bool isInteractiveTakeover = false;
+  static Timer? _handshakeTimer;
+
+  static void startHandshake() {
+    isHandshaking = true;
+    _handshakeTimer?.cancel();
+    _handshakeTimer = Timer(const Duration(seconds: 5), () {
+      isHandshaking = false;
+      _handshakeTimer = null;
+    });
+  }
+
+  static void endHandshake() {
+    isHandshaking = false;
+    _handshakeTimer?.cancel();
+    _handshakeTimer = null;
+  }
+}
+
 class RemoteSessionManager extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel(
     'com.pirsumoto/accessibility',
@@ -39,6 +61,8 @@ class RemoteSessionManager extends ChangeNotifier {
   String _sessionType = 'remote_control';
   int _screenWidth = 1080;
   int _screenHeight = 2400;
+  int _captureWidth = 540;
+  int _captureHeight = 1200;
   double _screenDensity = 2.6;
   String? _modelName;
   String? _sessionOwnerUid;
@@ -53,6 +77,50 @@ class RemoteSessionManager extends ChangeNotifier {
       _auth.currentUser?.uid == _sessionOwnerUid;
   String? get modelName => _modelName;
   StreamSubscription<User?>? _authSub;
+
+  RemoteWebRtcReceiver get receiver => _webrtc ??= _createReceiver(
+        onLocalCandidate: (candidate) {
+          final activeId = _sessionInfo.activeSessionId;
+          if (activeId != null) {
+            signaling.sendIceCandidate(candidate, explicitSessionId: activeId);
+          }
+        },
+        onCommandReceived: (command) {
+          final generation = _sessionGeneration;
+          if (_authorizedSession(generation)) {
+            unawaited(_handleIncomingCommand(command));
+          }
+        },
+        onConnectionStateChange: (state) {
+          final generation = _sessionGeneration;
+          if (_authorizedSession(generation)) {
+            _handleWebRtcStateChange(state);
+          }
+        },
+      );
+
+  /// Pre-warms screen capture in the foreground before automation begins
+  Future<bool> prewarmScreenCaptureForAutomation() async {
+    try {
+      await _channel.invokeMethod('startCaptureAutoApproval');
+      try {
+        await _channel.invokeMethod('startRemoteCaptureService');
+      } catch (_) {}
+      final ready = await receiver.ensureScreenCapture(
+        width: _captureWidth,
+        height: _captureHeight,
+        frameRate: 15,
+      );
+      return ready;
+    } catch (e) {
+      debugPrint('[RemoteSessionManager] Error prewarming screen capture: $e');
+      return false;
+    } finally {
+      try {
+        await _channel.invokeMethod('stopCaptureAutoApproval');
+      } catch (_) {}
+    }
+  }
 
   // Callback for automation pause/resume
   Future<void> Function()? onAutomationPauseRequested;
@@ -81,12 +149,16 @@ class RemoteSessionManager extends ChangeNotifier {
         'getScreenDimensions',
       );
       if (dims != null) {
-        _screenWidth = (dims['width'] as num?)?.toInt() ?? _screenWidth;
-        _screenHeight = (dims['height'] as num?)?.toInt() ?? _screenHeight;
+        final rawWidth = (dims['width'] as num?)?.toInt() ?? _screenWidth;
+        final rawHeight = (dims['height'] as num?)?.toInt() ?? _screenHeight;
+        _screenWidth = rawWidth;
+        _screenHeight = rawHeight;
+        _captureWidth = (((rawWidth ~/ 2) ~/ 16) * 16).clamp(16, rawWidth);
+        _captureHeight = (((rawHeight ~/ 2) ~/ 16) * 16).clamp(16, rawHeight);
         _screenDensity =
             (dims['density'] as num?)?.toDouble() ?? _screenDensity;
         debugPrint(
-          '[RemoteSessionManager] Screen size: ${_screenWidth}x$_screenHeight, density: $_screenDensity',
+          '[RemoteSessionManager] Screen size: ${_screenWidth}x$_screenHeight, capture: ${_captureWidth}x$_captureHeight, density: $_screenDensity',
         );
       }
     } catch (e) {
@@ -208,6 +280,7 @@ class RemoteSessionManager extends ChangeNotifier {
     RTCSessionDescription offer, [
     String sessionType = 'remote_control',
   ]) {
+    RemoteAutomationGate.startHandshake();
     final task = _incomingRequests.then(
       (_) => _startIncomingSession(
         sessionId,
@@ -267,6 +340,7 @@ class RemoteSessionManager extends ChangeNotifier {
     _sessionType = sessionType;
     _sessionOwnerUid = controllerUid;
     final generation = ++_sessionGeneration;
+    RemoteAutomationGate.isInteractiveTakeover = false;
     debugPrint(
       '[RemoteSessionManager] AUTO-APPROVED: Controller $controllerId authenticated under same account (${currentUser.email}), sessionType=$sessionType',
     );
@@ -348,37 +422,22 @@ class RemoteSessionManager extends ChangeNotifier {
       }
 
       // Initialize WebRTC receiver
-      final receiver = _createReceiver(
-        onLocalCandidate:
-            (candidate) => signaling.sendIceCandidate(
-              candidate,
-              explicitSessionId: sessionId,
-            ),
-        onCommandReceived: (command) {
-          if (_authorizedSession(generation))
-            unawaited(_handleIncomingCommand(command));
-        },
-        onConnectionStateChange: (state) {
-          if (_authorizedSession(generation)) _handleWebRtcStateChange(state);
-        },
-      );
-
-      _webrtc = receiver;
+      final receiver = this.receiver;
       _chatReceiver?.dispose();
       _chatReceiver = RemoteChatReceiver(
-        webrtc: _webrtc!,
+        webrtc: receiver,
         deviceId: signaling.deviceId,
         controllerId: controllerId,
       );
 
       await receiver.initializePeerConnection(
-        width: _screenWidth,
-        height: _screenHeight,
+        width: _captureWidth,
+        height: _captureHeight,
         enableScreenCapture: true,
       );
 
       if (!_authorizedSession(generation)) {
-        await receiver.close();
+        await receiver.close(releaseScreenCapture: false);
         return;
       }
       // Firestore replays existing candidates after the peer is ready.
@@ -512,6 +571,7 @@ class RemoteSessionManager extends ChangeNotifier {
                 : InputOwner.remoteHuman;
         if (newOwner == _sessionInfo.inputOwner) return;
         if (newOwner == InputOwner.automation) {
+          RemoteAutomationGate.isInteractiveTakeover = false;
           // Lower projection work before allowing automation to resume.
           try {
             await _webrtc?.setInteractive(false);
@@ -532,6 +592,7 @@ class RemoteSessionManager extends ChangeNotifier {
             onAutomationResumeRequested?.call();
             return;
           }
+          RemoteAutomationGate.isInteractiveTakeover = true;
           _updateState(_sessionInfo.copyWith(inputOwner: newOwner));
           // A quality upgrade failure must not prevent manual control.
           await _webrtc?.setInteractive(true);
@@ -562,6 +623,12 @@ class RemoteSessionManager extends ChangeNotifier {
     debugPrint(
       '[RemoteSessionManager] WebRTC connection state changed: $state',
     );
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected ||
+        state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+        state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+        state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+      RemoteAutomationGate.endHandshake();
+    }
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _failureGraceTimer?.cancel();
       _failureGraceTimer = null;
@@ -621,6 +688,8 @@ class RemoteSessionManager extends ChangeNotifier {
     _sessionOwnerUid = null;
     _failureGraceTimer?.cancel();
     _failureGraceTimer = null;
+    RemoteAutomationGate.endHandshake();
+    RemoteAutomationGate.isInteractiveTakeover = false;
 
     final endingSessionId = _sessionInfo.activeSessionId;
     final wasControlling = _sessionInfo.inputOwner == InputOwner.remoteHuman;
@@ -636,17 +705,11 @@ class RemoteSessionManager extends ChangeNotifier {
       _chatReceiver?.dispose();
       _chatReceiver = null;
 
-      await _webrtc?.close();
+      await _webrtc?.close(releaseScreenCapture: false);
       _webrtc = null;
 
-      // Stop MediaProjection foreground service if it was running
-      if (_sessionType != 'chat') {
-        try {
-          await _channel.invokeMethod('stopRemoteCaptureService');
-        } catch (_) {}
-      }
-
-      // Capture is stopped. Network cleanup must not delay automation resuming.
+      // Capture is stopped on WebRTC connection. We retain underlying screen capture
+      // stream for automation reuse and upcoming reconnects without prompting.
       if (wasControlling) onAutomationResumeRequested?.call();
 
       // Update signaling - retain new session request if one arrived during teardown!
@@ -689,7 +752,10 @@ class RemoteSessionManager extends ChangeNotifier {
     _authSub?.cancel();
     _registerDeviceInFirestore(status: 'offline');
     signaling.dispose();
-    _webrtc?.close();
+    _webrtc?.close(releaseScreenCapture: true);
+    try {
+      _channel.invokeMethod('stopRemoteCaptureService');
+    } catch (_) {}
     super.dispose();
   }
 }

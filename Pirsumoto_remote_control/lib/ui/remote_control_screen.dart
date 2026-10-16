@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -18,7 +19,7 @@ class RemoteControlScreen extends StatefulWidget {
     super.key,
     required this.session,
     required this.deviceName,
-    this.ownsSession = false,
+    this.ownsSession = true,
   });
 
   @override
@@ -34,6 +35,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen>
   Offset? _panStartNormalized;
 
   bool _isHumanControl = false;
+  bool _isDisconnectingOrDisconnected = false;
 
   @override
   void initState() {
@@ -41,95 +43,136 @@ class _RemoteControlScreenState extends State<RemoteControlScreen>
     WidgetsBinding.instance.addObserver(this);
   }
 
+  Future<void> _properDisconnect() async {
+    if (_isDisconnectingOrDisconnected) return;
+    _isDisconnectingOrDisconnected = true;
+
+    try {
+      if (_isHumanControl) {
+        _isHumanControl = false;
+        widget.session.sendHandover('automation');
+      }
+    } catch (e) {
+      debugPrint('[RemoteControl] Error sending handover on disconnect: $e');
+    }
+
+    try {
+      await widget.session.disconnect();
+    } catch (e) {
+      debugPrint('[RemoteControl] Error during proper disconnect: $e');
+    }
+
+    if (widget.ownsSession) {
+      try {
+        widget.session.dispose();
+      } catch (e) {
+        debugPrint('[RemoteControl] Error disposing session: $e');
+      }
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        !widget.session.isConnected &&
-        !widget.session.isConnecting) {
-      widget.session.connect();
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      unawaited(_properDisconnect());
     }
+  }
+
+  @override
+  void deactivate() {
+    unawaited(_properDisconnect());
+    super.deactivate();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (_isHumanControl) {
-      widget.session.sendHandover('automation');
-    }
-    if (widget.ownsSession) widget.session.dispose();
+    unawaited(_properDisconnect());
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.session,
-      builder: (context, _) {
-        return Scaffold(
-          backgroundColor: AppColors.neutral,
-          appBar: AppBar(
-            backgroundColor: AppColors.surface,
-            elevation: 0,
-            centerTitle: true,
-            bottom: const PreferredSize(
-              preferredSize: Size.fromHeight(1),
-              child: Divider(height: 1, color: AppColors.border),
-            ),
-            leading: IconButton(
-              icon: const Icon(
-                Icons.chevron_left_rounded,
-                size: 28,
-                color: AppColors.onSurface,
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          unawaited(_properDisconnect());
+        }
+      },
+      child: AnimatedBuilder(
+        animation: widget.session,
+        builder: (context, _) {
+          return Scaffold(
+            backgroundColor: AppColors.neutral,
+            appBar: AppBar(
+              backgroundColor: AppColors.surface,
+              elevation: 0,
+              centerTitle: true,
+              bottom: const PreferredSize(
+                preferredSize: Size.fromHeight(1),
+                child: Divider(height: 1, color: AppColors.border),
               ),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-
-            // Center: Device Name (e.g. xiaomi A30)
-            title: Text(
-              widget.deviceName,
-              textDirection: TextDirection.ltr,
-              style: GoogleFonts.heebo(
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                color: AppColors.onSurface,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-
-            // Physical top left (actions in RTL): Live Stream Indicator
-            actions: [
-              Padding(
-                padding: const EdgeInsets.only(left: 14),
-                child: Center(child: _buildCameraIndicator()),
-              ),
-            ],
-          ),
-          body: SafeArea(
-            child: RemoteKeyboardHandler(
-              onSendText: (text) {
-                if (_isHumanControl) widget.session.sendText(text);
-              },
-              onSendKey: (key) {
-                if (_isHumanControl) widget.session.sendKey(key);
-              },
-              child: Builder(
-                builder: (context) {
-                  return Column(
-                    children: [
-                      // Video Stream Viewport
-                      Expanded(child: _buildVideoArea(context)),
-
-                      // Fixed Bottom Toolbar (4 columns in RTL order)
-                      _buildBottomToolbar(context),
-                    ],
-                  );
+              leading: IconButton(
+                icon: const Icon(
+                  Icons.chevron_left_rounded,
+                  size: 28,
+                  color: AppColors.onSurface,
+                ),
+                onPressed: () {
+                  unawaited(_properDisconnect());
+                  Navigator.of(context).pop();
                 },
               ),
+
+              // Center: Device Name (e.g. xiaomi A30)
+              title: Text(
+                widget.deviceName,
+                textDirection: TextDirection.ltr,
+                style: GoogleFonts.heebo(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.onSurface,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+
+              // Physical top left (actions in RTL): Live Stream Indicator
+              actions: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 14),
+                  child: Center(child: _buildCameraIndicator()),
+                ),
+              ],
             ),
-          ),
-        );
-      },
+            body: SafeArea(
+              child: RemoteKeyboardHandler(
+                onSendText: (text) {
+                  if (_isHumanControl) widget.session.sendText(text);
+                },
+                onSendKey: (key) {
+                  if (_isHumanControl) widget.session.sendKey(key);
+                },
+                child: Builder(
+                  builder: (context) {
+                    return Column(
+                      children: [
+                        // Video Stream Viewport
+                        Expanded(child: _buildVideoArea(context)),
+
+                        // Fixed Bottom Toolbar (4 columns in RTL order)
+                        _buildBottomToolbar(context),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -221,7 +264,10 @@ class _RemoteControlScreenState extends State<RemoteControlScreen>
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
-              onPressed: () => widget.session.connect(),
+              onPressed: () {
+                _isDisconnectingOrDisconnected = false;
+                widget.session.connect();
+              },
               icon: const Icon(Icons.refresh_rounded, size: 18),
               label: Text(
                 'התחבר מחדש',
@@ -352,10 +398,22 @@ class _RemoteControlScreenState extends State<RemoteControlScreen>
                   child: Center(
                     child: AspectRatio(
                       aspectRatio: aspectRatio,
-                      child: RTCVideoView(
-                        widget.session.videoRenderer,
-                        objectFit:
-                            RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          RTCVideoView(
+                            widget.session.videoRenderer,
+                            objectFit:
+                                RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                          ),
+                          if (!widget.session.hasVideoFrame)
+                            const Center(
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.primaryAction,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ),
@@ -603,7 +661,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen>
 
               if (confirm == true && context.mounted) {
                 final nav = Navigator.of(context);
-                await widget.session.disconnect();
+                await _properDisconnect();
                 nav.pop();
               }
             },

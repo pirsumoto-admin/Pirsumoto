@@ -682,7 +682,11 @@ class FirebaseChatReceiver {
           final userDoc =
               await _firestore.collection('users').doc(ownerUid).get();
           final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
-          if (settings != null && settings.containsKey('includeYad2')) {
+          if (!vehicle.containsKey('publish_target') &&
+              !vehicle.containsKey('includeYad2') &&
+              !vehicle.containsKey('include_yad2') &&
+              settings != null &&
+              settings.containsKey('includeYad2')) {
             vehicle['includeYad2'] =
                 (settings['includeYad2'] == true) ? 'true' : 'false';
           }
@@ -758,11 +762,26 @@ class FirebaseChatReceiver {
       final bool includeYad2 =
           rawIncYad2 != null
               ? rawIncYad2.toString().toLowerCase() != 'false'
-              : true;
+              : (vehicle['publish_target'] != 'facebook');
+      final rawIncFb = vehicle['includeFacebook'] ?? vehicle['include_facebook'];
+      final bool includeFacebook =
+          rawIncFb != null
+              ? rawIncFb.toString().toLowerCase() != 'false'
+              : (vehicle['publish_target'] != 'yad2');
+
+      final String statusText;
+      if (includeYad2 && includeFacebook) {
+        statusText = 'מתחיל פרסום ביד2 ובפייסבוק';
+      } else if (includeYad2) {
+        statusText = 'מתחיל פרסום ביד2';
+      } else {
+        statusText = 'מתחיל פרסום בפייסבוק';
+      }
+
       if (!await _report(
         id,
         'publishing',
-        includeYad2 ? 'מתחיל פרסום ביד2' : 'מתחיל פרסום בפייסבוק',
+        statusText,
       )) {
         await _handleControl();
         return;
@@ -1001,15 +1020,27 @@ class FirebaseChatReceiver {
         complete.add(platform);
 
         bool expectsYad2 = true;
+        bool expectsFacebook = true;
         if (r['vehicleData'] != null) {
           final vd = r['vehicleData'] as Map;
-          if (vd['includeYad2'] == 'false' || vd['include_yad2'] == 'false') {
+          if (vd['includeYad2'] == 'false' ||
+              vd['include_yad2'] == 'false' ||
+              vd['publish_target'] == 'facebook') {
             expectsYad2 = false;
+          }
+          if (vd['includeFacebook'] == 'false' ||
+              vd['include_facebook'] == 'false' ||
+              vd['publish_target'] == 'yad2') {
+            expectsFacebook = false;
           }
         }
         final expectedPlatforms =
             (r['platforms'] as List)
-                .where((p) => expectsYad2 || p != 'yad2')
+                .where((p) {
+                  if (p == 'yad2') return expectsYad2;
+                  if (p == 'facebook') return expectsFacebook;
+                  return true;
+                })
                 .toList();
 
         next = expectedPlatforms.every(complete.contains) ? 'completed' : state;

@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -26,6 +27,7 @@ import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 import 'facebook_screen.dart';
 import '../../remote_control/firebase_chat_receiver.dart';
+import '../../remote_control/remote_receiver_service.dart';
 import '../../routing/app_router.dart';
 
 // Shadow AxTree extractor injected into the WebView on each observe() call.
@@ -610,7 +612,9 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       setState(() {
         _automationComplete = true;
         _automationError = false;
-        _statusMessage = 'הפרסום ביד2 הושלם! עובר לפייסבוק...';
+        _statusMessage = widget.publishData.includeFacebook
+            ? 'הפרסום ביד2 הושלם! עובר לפייסבוק...'
+            : 'הפרסום ביד2 הושלם!';
       });
 
       await Future.delayed(const Duration(milliseconds: 600));
@@ -657,15 +661,22 @@ class _Yad2ScreenState extends State<Yad2Screen> {
         ),
       );
 
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder:
-              (_) => FacebookScreen(
-                publishData: updatedPublishData,
-                sessionDeadline: _localDeadline,
-              ),
-        ),
-      );
+      if (widget.publishData.includeFacebook) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder:
+                (_) => FacebookScreen(
+                  publishData: updatedPublishData,
+                  sessionDeadline: _localDeadline,
+                ),
+          ),
+        );
+      } else {
+        await WidgetsBinding.instance.endOfFrame;
+        if (mounted) {
+          Navigator.of(context).popUntil((route) => route.isFirst);
+        }
+      }
     }
   }
 
@@ -703,7 +714,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
     }
   }
 
-  void _startAutomationService(double devicePixelRatio, OcrService ocrService) {
+  Future<void> _startAutomationService(
+    double devicePixelRatio,
+    OcrService ocrService,
+  ) async {
     if (!mounted || _webViewClosed) return;
     if (_publicationStopped ||
         !FirebaseChatReceiver.isCurrent(widget.publishData.publicationIdentity))
@@ -1059,6 +1073,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
       statusType: 'step',
       text: '🚀 התחלת פרסום ביד2...',
     );
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      await RemoteControlReceiverService.instance.manager
+          ?.prewarmScreenCaptureForAutomation();
+    }
     if (_publicationPaused) _automationService!.pauseAutomation();
     _automationService!.startAutomation();
   }
@@ -1110,7 +1128,10 @@ class _Yad2ScreenState extends State<Yad2Screen> {
                     if (!ctx.mounted || !mounted) return;
                     if (checkAgain) {
                       Navigator.of(ctx).pop();
-                      _startAutomationService(devicePixelRatio, ocrService);
+                      await _startAutomationService(
+                        devicePixelRatio,
+                        ocrService,
+                      );
                     } else {
                       ScaffoldMessenger.of(ctx).showSnackBar(
                         const SnackBar(
@@ -1128,7 +1149,7 @@ class _Yad2ScreenState extends State<Yad2Screen> {
             ),
       );
     } else {
-      _startAutomationService(devicePixelRatio, ocrService);
+      await _startAutomationService(devicePixelRatio, ocrService);
     }
   }
 

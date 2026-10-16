@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// Passive observation yields bandwidth and encoder work to automation.
@@ -15,12 +14,10 @@ class RemoteVideoBudget {
     if (encodings == null || encodings.isEmpty) {
       throw StateError('Video sender has no negotiated encodings');
     }
-    final scale =
-        interactive ? 1.0 : math.max(1.0, math.min(width, height) / 720.0);
     for (final encoding in encodings) {
-      encoding.maxFramerate = interactive ? 30 : 10;
-      encoding.maxBitrate = interactive ? 4000000 : 1500000;
-      encoding.scaleResolutionDownBy = scale;
+      encoding.maxFramerate = interactive ? 20 : 8;
+      encoding.maxBitrate = interactive ? 2000000 : 600000;
+      encoding.scaleResolutionDownBy = interactive ? 1.0 : 1.5;
       encoding.priority = RTCPriorityType.low;
     }
     if (!await sender.setParameters(parameters)) {

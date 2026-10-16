@@ -9,6 +9,10 @@ import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Engine-scoped bridge. Never retains an Activity; UI operations resolve it at call time. */
 class PirsumotoEngineChannels(app: Context) : ContextWrapper(app.applicationContext) {
@@ -131,6 +135,18 @@ class PirsumotoEngineChannels(app: Context) : ContextWrapper(app.applicationCont
                 val service = PirsumotoAccessibilityService.instance
                 service?.startAutoApprovingCapture()
                 result.success(service != null)
+                return@setMethodCallHandler
+            }
+            if (call.method == "stopCaptureAutoApproval") {
+                val service = PirsumotoAccessibilityService.instance
+                service?.stopAutoApprovingCapture()
+                result.success(true)
+                return@setMethodCallHandler
+            }
+            if (call.method == "getActiveWindowPackage") {
+                val service = PirsumotoAccessibilityService.instance
+                val pkg = service?.rootInActiveWindow?.packageName?.toString()
+                result.success(pkg)
                 return@setMethodCallHandler
             }
             if (call.method == "startRemoteCaptureService") {
@@ -466,8 +482,65 @@ class PirsumotoEngineChannels(app: Context) : ContextWrapper(app.applicationCont
                     result.success(success)
                 }
                 "logTree" -> {
-                    val treeStr = service.getTreeString(rootNode!!)
-                    result.success(treeStr)
+                    val root = rootNode
+                    CoroutineScope(Dispatchers.Default).launch {
+                        try {
+                            val treeStr = service.getTreeString(root)
+                            withContext(Dispatchers.Main) {
+                                result.success(treeStr)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("A11Y", "Failed to get tree string", e)
+                            withContext(Dispatchers.Main) {
+                                result.error("TREE_STRING_FAILED", e.message, null)
+                            }
+                        }
+                    }
+                }
+                "getAccessibilityTree" -> {
+                    val root = rootNode
+                    CoroutineScope(Dispatchers.Default).launch {
+                        try {
+                            fun serializeNode(node: android.view.accessibility.AccessibilityNodeInfo?): Map<String, Any?>? {
+                                if (node == null) return null
+                                val bounds = android.graphics.Rect()
+                                node.getBoundsInScreen(bounds)
+                                val children = mutableListOf<Map<String, Any?>?>()
+                                for (i in 0 until node.childCount) {
+                                    val child = node.getChild(i)
+                                    if (child != null) {
+                                        val serializedChild = serializeNode(child)
+                                        if (serializedChild != null) {
+                                            children.add(serializedChild)
+                                        }
+                                    }
+                                }
+                                return mapOf(
+                                    "className" to (node.className?.toString() ?: ""),
+                                    "text" to (node.text?.toString() ?: ""),
+                                    "contentDescription" to (node.contentDescription?.toString() ?: ""),
+                                    "isClickable" to node.isClickable,
+                                    "isChecked" to node.isChecked,
+                                    "bounds" to mapOf(
+                                        "left" to bounds.left,
+                                        "top" to bounds.top,
+                                        "right" to bounds.right,
+                                        "bottom" to bounds.bottom
+                                    ),
+                                    "children" to children
+                                )
+                            }
+                            val treeMap = serializeNode(root)
+                            withContext(Dispatchers.Main) {
+                                result.success(treeMap)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("A11Y", "Failed to serialize accessibility tree", e)
+                            withContext(Dispatchers.Main) {
+                                result.error("TREE_SERIALIZATION_FAILED", e.message, null)
+                            }
+                        }
+                    }
                 }
                 "findInputBeforeAndGetBounds" -> {
                     val target = call.argument<String>("target") ?: ""

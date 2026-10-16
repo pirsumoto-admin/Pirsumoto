@@ -1735,12 +1735,18 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
       services: services,
     );
 
-    // Route to Facebook or Yad2 automation based on debug parameter
+    // Route to Facebook or Yad2 automation based on debug parameter and settings
     final bool includeYad2 = settings?['includeYad2'] ?? true;
+    final bool includeFacebook = settings?['includeFacebook'] ?? true;
+    final resolvedPublishData = publishData.copyWith(
+      includeYad2: includeYad2,
+      includeFacebook: includeFacebook,
+    );
+
     if (_mapPublishToFacebook || !includeYad2) {
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => FacebookScreen(publishData: publishData),
+          builder: (_) => FacebookScreen(publishData: resolvedPublishData),
         ),
       );
     } else {
@@ -1748,7 +1754,7 @@ class _HomeFormTabState extends ConsumerState<_HomeFormTab> {
         MaterialPageRoute(
           builder:
               (_) => Yad2Screen(
-                publishData: publishData,
+                publishData: resolvedPublishData,
                 useGemmaAutomation: _useGemmaAutomation,
               ),
         ),

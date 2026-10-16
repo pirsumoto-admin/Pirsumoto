@@ -302,7 +302,9 @@ class VehicleDataService {
   }
 
   static String _mapOwnershipType(String hebrewOwnership) {
+    if (hebrewOwnership.trim() == 'סוחר') return '';
     const map = {
+      'פרטי': 'פרטית',
       'פרטית': 'פרטית',
       'חברה': 'חברה',
       'השכרה': 'השכרה',

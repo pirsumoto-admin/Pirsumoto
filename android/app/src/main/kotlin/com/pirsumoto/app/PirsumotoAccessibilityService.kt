@@ -8,10 +8,13 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.util.Log
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
 
@@ -49,8 +52,93 @@ class PirsumotoAccessibilityService : AccessibilityService() {
     }
 
     private var autoApproveMediaProjection = false
+    private var lastAutoApproveAttemptMs: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
     private var autoApproveTimeoutRunnable: Runnable? = null
+
+    private val isGestureInFlight = AtomicBoolean(false)
+    private val gestureQueue = ConcurrentLinkedQueue<() -> Unit>()
+
+    private fun processNextGesture() {
+        if (!isGestureInFlight.compareAndSet(false, true)) {
+            return
+        }
+        val next = gestureQueue.poll()
+        if (next == null) {
+            isGestureInFlight.set(false)
+            return
+        }
+        next.invoke()
+    }
+
+    fun dispatchGestureSerialized(
+        gesture: GestureDescription,
+        callback: GestureResultCallback? = null,
+        handler: Handler? = null,
+        durationMs: Long = 100L
+    ): Boolean {
+        val targetHandler = handler ?: mainHandler
+        val action = {
+            var finished = false
+            val safetyRunnable = Runnable {
+                if (!finished) {
+                    finished = true
+                    Log.w("A11Y", "Safety reset triggered for in-flight gesture after ${durationMs + 300L}ms")
+                    isGestureInFlight.set(false)
+                    processNextGesture()
+                }
+            }
+            targetHandler.postDelayed(safetyRunnable, durationMs + 300L)
+
+            val wrappedCallback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (!finished) {
+                        finished = true
+                        targetHandler.removeCallbacks(safetyRunnable)
+                        callback?.onCompleted(gestureDescription)
+                        isGestureInFlight.set(false)
+                        processNextGesture()
+                    }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (!finished) {
+                        finished = true
+                        targetHandler.removeCallbacks(safetyRunnable)
+                        callback?.onCancelled(gestureDescription)
+                        isGestureInFlight.set(false)
+                        processNextGesture()
+                    }
+                }
+            }
+
+            try {
+                val accepted = dispatchGesture(gesture, wrappedCallback, targetHandler)
+                if (!accepted) {
+                    if (!finished) {
+                        finished = true
+                        targetHandler.removeCallbacks(safetyRunnable)
+                        callback?.onCancelled(gesture)
+                        isGestureInFlight.set(false)
+                        processNextGesture()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("A11Y", "Error dispatching gesture: $e")
+                if (!finished) {
+                    finished = true
+                    targetHandler.removeCallbacks(safetyRunnable)
+                    callback?.onCancelled(gesture)
+                    isGestureInFlight.set(false)
+                    processNextGesture()
+                }
+            }
+        }
+
+        gestureQueue.add(action)
+        processNextGesture()
+        return true
+    }
 
     fun startAutoApprovingCapture(durationMs: Long = 5000L) {
         Log.d("A11Y", "startAutoApprovingCapture initiated for ${durationMs}ms (event-driven)")
@@ -58,6 +146,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         autoApproveTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
 
         // Attempt once immediately in case the dialog is already open
+        lastAutoApproveAttemptMs = SystemClock.uptimeMillis()
         attemptAutoApproveDialog()
 
         // Safety timeout to turn off auto-approval flag
@@ -76,12 +165,24 @@ class PirsumotoAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (autoApproveMediaProjection && event != null) {
-            val eventType = event.eventType
-            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-                attemptAutoApproveDialog()
-            }
+        if (!autoApproveMediaProjection || event == null) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastAutoApproveAttemptMs < 400L) return
+
+        val pkg = event.packageName?.toString() ?: ""
+        val allowedPackages = setOf(
+            "com.android.systemui",
+            "com.miui.securitycenter",
+            "android",
+            "com.google.android.permissioncontroller"
+        )
+        if (!allowedPackages.contains(pkg)) return
+
+        val eventType = event.eventType
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            lastAutoApproveAttemptMs = now
+            attemptAutoApproveDialog()
         }
     }
 
@@ -137,7 +238,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
         val isSystemPackage = allNodes.any { node ->
             val pkg = (node.packageName?.toString() ?: "").lowercase()
-            pkg.contains("systemui") || pkg.contains("android")
+            pkg.contains("systemui") || pkg.contains("android") || pkg.contains("securitycenter") || pkg.contains("permissioncontroller")
         }
         if (!isSystemPackage) {
             return false
@@ -151,20 +252,71 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             txt.contains("recording") || txt.contains("casting") ||
             txt.contains("screen") || txt.contains("הקלטה") ||
             txt.contains("שידור") || txt.contains("לשדר") ||
-            txt.contains("מסך") || pkg.contains("systemui")
+            txt.contains("מסך") || pkg.contains("systemui") ||
+            pkg.contains("securitycenter") || pkg.contains("permissioncontroller")
         }
 
         if (!hasMediaProjectionContext) {
             return false
         }
 
+        // Handle Android 14 / Xiaomi HyperOS two-step dropdown spinner if present
+        for (node in allNodes) {
+            val txt = (node.text?.toString() ?: "").lowercase()
+            val desc = (node.contentDescription?.toString() ?: "").lowercase()
+            if (txt.contains("a single app") || txt.contains("single app") || txt.contains("אפליקציה אחת") ||
+                desc.contains("a single app") || desc.contains("single app") || desc.contains("אפליקציה אחת")) {
+                Log.i("A11Y", "Detected 'A single app' / 'אפליקציה אחת' spinner. Clicking dropdown...")
+                val clickedSpinner = node.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                    (node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true)
+                if (clickedSpinner) {
+                    try { Thread.sleep(200) } catch (_: Exception) {}
+                    val searchRoots = mutableListOf<AccessibilityNodeInfo>()
+                    rootInActiveWindow?.let { searchRoots.add(it) }
+                    try {
+                        for (w in windows) {
+                            w.root?.let { searchRoots.add(it) }
+                        }
+                    } catch (_: Exception) {}
+
+                    for (sRoot in searchRoots) {
+                        val popupNodes = mutableListOf<AccessibilityNodeInfo>()
+                        fun collectP(n: AccessibilityNodeInfo) {
+                            popupNodes.add(n)
+                            for (i in 0 until n.childCount) {
+                                n.getChild(i)?.let { collectP(it) }
+                            }
+                        }
+                        collectP(sRoot)
+                        for (pNode in popupNodes) {
+                            val pTxt = (pNode.text?.toString() ?: "").lowercase()
+                            val pDesc = (pNode.contentDescription?.toString() ?: "").lowercase()
+                            if (pTxt.contains("entire screen") || pTxt.contains("כל המסך") ||
+                                pDesc.contains("entire screen") || pDesc.contains("כל המסך")) {
+                                Log.i("A11Y", "Selected 'Entire screen' / 'כל המסך' from dropdown")
+                                if (!pNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                    pNode.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                }
+                                try { Thread.sleep(200) } catch (_: Exception) {}
+                                break
+                            }
+                        }
+                    }
+                }
+                break
+            }
+        }
+
         // Auto-check "Don't show again" or "Entire screen" if present
         for (node in allNodes) {
+            val txt = (node.text?.toString() ?: "").lowercase()
+            val desc = (node.contentDescription?.toString() ?: "").lowercase()
             if (node.isCheckable && !node.isChecked) {
-                val txt = (node.text?.toString() ?: "").lowercase()
                 if (txt.contains("don't") || txt.contains("אל תציג") || txt.contains("entire") || txt.contains("כל המסך")) {
                     node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 }
+            } else if (node.isClickable && (txt.contains("entire screen") || txt.contains("כל המסך") || desc.contains("entire screen") || desc.contains("כל המסך"))) {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
         }
 
@@ -178,20 +330,25 @@ class PirsumotoAccessibilityService : AccessibilityService() {
 
             if (idMatch || textMatch) {
                 Log.i("A11Y", "Found MediaProjection consent button: id=$viewId, text=$txt")
-                val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                if (clicked) {
-                    return true
-                }
-                val parent = node.parent
-                if (parent != null && parent.isClickable) {
-                    if (parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                        return true
+                var clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (!clicked) {
+                    val parent = node.parent
+                    if (parent != null && parent.isClickable) {
+                        clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     }
                 }
-                val rect = Rect()
-                node.getBoundsInScreen(rect)
-                if (!rect.isEmpty) {
-                    tapBounds(rect)
+                if (!clicked) {
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    if (!rect.isEmpty) {
+                        tapBounds(rect)
+                        clicked = true
+                    }
+                }
+                if (clicked) {
+                    autoApproveMediaProjection = false
+                    autoApproveTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+                    autoApproveTimeoutRunnable = null
                     return true
                 }
             }
@@ -789,7 +946,7 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             )
             .build()
 
-        dispatchGesture(gesture, null, null)
+        dispatchGestureSerialized(gesture, null, null, durationMs = 50L)
     }
 
     // Unlike dispatchGesture's immediate "accepted" result, this acknowledges
@@ -810,10 +967,10 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
         mainHandler.postDelayed(timeout, duration + 2000L)
-        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+        val accepted = dispatchGestureSerialized(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) { finish(true) }
             override fun onCancelled(gestureDescription: GestureDescription?) { finish(false) }
-        }, mainHandler)
+        }, mainHandler, durationMs = duration)
         if (!accepted) finish(false)
     }
 
@@ -826,14 +983,14 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 50L))
             .build()
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGestureSerialized(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 Log.d("A11Y", "tapAt completed successfully at ($x, $y)")
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 Log.w("A11Y", "tapAt CANCELLED by system at ($x, $y)")
             }
-        }, null)
+        }, null, durationMs = 50L)
         Log.d("A11Y", "tapAt dispatchGesture returned: $dispatched")
         return dispatched
     }
@@ -847,14 +1004,14 @@ class PirsumotoAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGestureSerialized(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 Log.d("A11Y", "longPressAt completed successfully at ($x, $y)")
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 Log.w("A11Y", "longPressAt CANCELLED by system at ($x, $y)")
             }
-        }, null)
+        }, null, durationMs = duration)
         return dispatched
     }
 
@@ -869,24 +1026,25 @@ class PirsumotoAccessibilityService : AccessibilityService() {
             lineTo(endX, endY)
         }
 
+        val actualDuration = duration.coerceAtLeast(30L)
         val gesture = GestureDescription.Builder()
             .addStroke(
                 GestureDescription.StrokeDescription(
                     path,
                     0,
-                    duration.coerceAtLeast(30L)
+                    actualDuration
                 )
             )
             .build()
 
-        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGestureSerialized(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 Log.d("A11Y", "swipe completed successfully from ($startX, $startY) to ($endX, $endY)")
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 Log.w("A11Y", "swipe CANCELLED by system from ($startX, $startY) to ($endX, $endY)")
             }
-        }, null)
+        }, null, durationMs = actualDuration)
         return dispatched
     }
 

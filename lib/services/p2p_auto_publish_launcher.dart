@@ -64,13 +64,17 @@ class P2PAutoPublishLauncher {
 
       // 4. Route to Facebook or Yad2 automation based on includeYad2
       bool includeYad2 = publishData.includeYad2;
+      bool includeFacebook = publishData.includeFacebook;
       try {
         final uid =
             FirebaseChatReceiver.activeOwnerUid ??
             FirebaseAuth.instance.currentUser?.uid;
         if (uid != null && uid.isNotEmpty) {
           final settings = await DBService().getSettingsData(uid);
-          if (publishData.includeYad2 &&
+          if (!data.containsKey('publish_target') &&
+              !data.containsKey('includeYad2') &&
+              !data.containsKey('include_yad2') &&
+              publishData.includeYad2 &&
               settings != null &&
               settings.containsKey('includeYad2')) {
             includeYad2 = settings['includeYad2'] == true;
@@ -81,14 +85,19 @@ class P2PAutoPublishLauncher {
       }
 
       debugPrint(
-        '[P2PAutoPublish] Routing publication: includeYad2 = $includeYad2',
+        '[P2PAutoPublish] Routing publication: includeYad2 = $includeYad2, includeFacebook = $includeFacebook',
       );
       if (!includeYad2) {
         return await _openFacebookScreen(
-          publishData.copyWith(includeYad2: false),
+          publishData.copyWith(includeYad2: false, includeFacebook: true),
         );
       } else {
-        return await _openYad2Screen(publishData.copyWith(includeYad2: true));
+        return await _openYad2Screen(
+          publishData.copyWith(
+            includeYad2: true,
+            includeFacebook: includeFacebook,
+          ),
+        );
       }
     } catch (e, st) {
       debugPrint('[P2PAutoPublish] Error launching auto publish: $e\n$st');
@@ -124,7 +133,13 @@ class P2PAutoPublishLauncher {
     final bool includeYad2 =
         rawIncludeYad2 != null
             ? rawIncludeYad2.toString().toLowerCase() != 'false'
-            : true;
+            : (data['publish_target'] != 'facebook');
+
+    final rawIncludeFb = data['includeFacebook'] ?? data['include_facebook'];
+    final bool includeFacebook =
+        rawIncludeFb != null
+            ? rawIncludeFb.toString().toLowerCase() != 'false'
+            : (data['publish_target'] != 'yad2');
 
     final testUntil = data['test_until']?.toString() ?? '';
     String? testYear = data['test_year']?.toString();
@@ -218,6 +233,7 @@ class P2PAutoPublishLauncher {
       testMonth: testMonth,
       govIl: isGovIl,
       includeYad2: includeYad2,
+      includeFacebook: includeFacebook,
     );
   }
 

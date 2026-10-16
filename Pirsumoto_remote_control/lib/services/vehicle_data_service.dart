@@ -84,6 +84,9 @@ class VehicleDataService {
         forceShowCurrent = true;
         ownership = ownershipHistory['current_ownership'] ?? '';
       }
+      if (ownership.trim() == 'סוחר') {
+        ownership = '';
+      }
 
       return {
         'license_plate': cleanedPlate,
@@ -387,6 +390,7 @@ class VehicleDataService {
       'או"ם': 'או"ם',
       'החכר': 'השכרה / החכר',
     };
+    if (hebrewOwnership.trim() == 'סוחר') return '';
     return map[hebrewOwnership] ?? hebrewOwnership;
   }
 

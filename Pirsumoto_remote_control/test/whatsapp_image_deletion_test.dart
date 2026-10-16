@@ -43,7 +43,7 @@ void main() {
         startTimestamp: 1000,
         vehicleData: completeVehicleData,
         imagePaths: List.from(initialPaths),
-        isReadyToPublish: missing.isEmpty && errors.isEmpty && initialPaths.isNotEmpty,
+        isReadyToPublish: missing.isEmpty && errors.isEmpty,
       );
 
       expect(session.isReadyToPublish, isTrue);
@@ -51,7 +51,7 @@ void main() {
 
       // Simulate deleting first image
       session.imagePaths.remove('/storage/media/img1.jpg');
-      final isStillReady = missing.isEmpty && errors.isEmpty && session.imagePaths.isNotEmpty;
+      final isStillReady = missing.isEmpty && errors.isEmpty;
       session.isReadyToPublish = isStillReady;
 
       expect(session.imagePaths.length, 1);
@@ -60,11 +60,11 @@ void main() {
 
       // Simulate deleting second (last) image
       session.imagePaths.remove('/storage/media/img2.jpg');
-      final isNowReadyWithNoImages = missing.isEmpty && errors.isEmpty && session.imagePaths.isNotEmpty;
+      final isNowReadyWithNoImages = missing.isEmpty && errors.isEmpty;
       session.isReadyToPublish = isNowReadyWithNoImages;
 
       expect(session.imagePaths.isEmpty, isTrue);
-      expect(session.isReadyToPublish, isFalse);
+      expect(session.isReadyToPublish, isTrue);
     });
 
     test('Local file deletion deletes the file on disk if it exists', () async {

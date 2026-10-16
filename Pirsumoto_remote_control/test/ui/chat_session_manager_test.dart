@@ -187,6 +187,12 @@ void main() {
         ChatSessionManager.canStartPublication(ready, ChatSessionStatus.done),
         isFalse,
       );
+      ready.vehicleData['price'] = '70000';
+      ready.imagePaths = [];
+      expect(
+        ChatSessionManager.canStartPublication(ready, ChatSessionStatus.done),
+        isTrue,
+      );
     },
   );
 }

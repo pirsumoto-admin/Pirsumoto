@@ -118,7 +118,7 @@ class RemoteValidationService {
       vehicleData: vehicle,
       botReply: response['botReply']?.toString() ?? '',
       allDataFilled: complete,
-      isReadyToPublish: complete && currentImagePaths.isNotEmpty,
+      isReadyToPublish: complete,
       missingFields: missing,
       validationErrors: errors,
       governmentConflicts: [

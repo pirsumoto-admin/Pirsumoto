@@ -141,11 +141,68 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
         builder: (_) => RemoteControlScreen(
           session: session!,
           deviceName: widget.deviceName,
+          ownsSession: true,
         ),
       ),
     );
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  Future<void> _confirmCancelAndDeleteAllNonActive(
+    List<ChatSession> nonActiveSessions,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'מחיקת שיחות לא פעילות',
+          textDirection: TextDirection.rtl,
+        ),
+        content: Text(
+          'האם לבטל ולמחוק ${nonActiveSessions.length} שיחות שאינן פעילות בריצה?\nפעולה זו תמחק טיוטות ושיחות שהסתיימו, שנכשלו או שבוטלו.',
+          textDirection: TextDirection.rtl,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('ביטול'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('מחק הכל'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _loading = true);
+    int deleted = 0;
+    try {
+      for (final s in nonActiveSessions) {
+        try {
+          await ChatSessionManager.deleteSession(widget.deviceId, s.id);
+          deleted++;
+        } catch (e) {
+          debugPrint('[ChatSessionsList] Error deleting session ${s.id}: $e');
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('נמחקו $deleted שיחות לא פעילות'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        await _load();
+      }
     }
   }
 
@@ -216,38 +273,55 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
   };
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text('בקשות פרסום — ${widget.deviceName}'),
-      actions: [
-        IconButton(
-          tooltip: 'ייבוא היסטוריה מהגרסה הקודמת',
-          icon: const Icon(Icons.history),
-          onPressed: () async {
-            final messenger = ScaffoldMessenger.of(context);
-            try {
-              final count = await ChatSessionManager.importLegacyDevice(
-                widget.deviceId,
-              );
-              if (mounted) {
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'יובאו $count שיחות. בקשות ישנות לא מופעלות מחדש.',
-                    ),
-                  ),
+  Widget build(BuildContext context) {
+    final nonActiveSessions = _sessions.where((s) {
+      final r = ChatSessionManager.request(widget.deviceId, s.id);
+      final isRunning =
+          r != null &&
+          !PublicationState.terminal.contains(r['state']) &&
+          r['state'] != 'canceled';
+      return !isRunning;
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('בקשות פרסום — ${widget.deviceName}'),
+        actions: [
+          if (nonActiveSessions.isNotEmpty)
+            IconButton(
+              tooltip: 'בטל ומחק שיחות לא פעילות',
+              icon: const Icon(Icons.delete_sweep_outlined),
+              onPressed: () =>
+                  _confirmCancelAndDeleteAllNonActive(nonActiveSessions),
+            ),
+          IconButton(
+            tooltip: 'ייבוא היסטוריה מהגרסה הקודמת',
+            icon: const Icon(Icons.history),
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                final count = await ChatSessionManager.importLegacyDevice(
+                  widget.deviceId,
                 );
+                if (mounted) {
+                  messenger.showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'יובאו $count שיחות. בקשות ישנות לא מופעלות מחדש.',
+                      ),
+                    ),
+                  );
+                }
+                await _load();
+              } catch (e) {
+                if (mounted) {
+                  messenger.showSnackBar(SnackBar(content: Text('$e')));
+                }
               }
-              await _load();
-            } catch (e) {
-              if (mounted) {
-                messenger.showSnackBar(SnackBar(content: Text('$e')));
-              }
-            }
-          },
-        ),
-      ],
-    ),
+            },
+          ),
+        ],
+      ),
     floatingActionButton: FloatingActionButton(
       onPressed: () => _open(null),
       child: const Icon(Icons.add),
@@ -541,6 +615,58 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                         ),
                                         const SizedBox(width: 4),
                                       ],
+                                      if (status != ChatSessionStatus.canceled) ...[
+                                        Tooltip(
+                                          message: 'בטל שיחה/פרסום',
+                                          child: TextButton.icon(
+                                            icon: const Icon(
+                                              Icons.cancel_outlined,
+                                              color: AppColors.offline,
+                                              size: 15,
+                                            ),
+                                            label: Text(
+                                              'בטל',
+                                              style: GoogleFonts.heebo(
+                                                color: AppColors.offline,
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                            style: TextButton.styleFrom(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 8,
+                                                    vertical: 3,
+                                              ),
+                                              minimumSize: Size.zero,
+                                              tapTargetSize:
+                                                  MaterialTapTargetSize
+                                                      .shrinkWrap,
+                                              backgroundColor:
+                                                  AppColors.surfaceSubtle,
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                                side: const BorderSide(
+                                                  color: AppColors.border,
+                                                ),
+                                              ),
+                                            ),
+                                            onPressed: _busy.contains(s.id)
+                                                ? null
+                                                : () => _act(
+                                                    s,
+                                                    () =>
+                                                        ChatSessionManager.control(
+                                                          widget.deviceId,
+                                                          s.id,
+                                                          'cancel',
+                                                        ),
+                                                  ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                      ],
                                       IconButton(
                                         tooltip: 'מחק',
                                         icon: const Icon(
@@ -554,14 +680,16 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
                                           minWidth: 32,
                                           minHeight: 32,
                                         ),
-                                        onPressed: () => _act(
-                                          s,
-                                          () =>
-                                              ChatSessionManager.deleteSession(
-                                                widget.deviceId,
-                                                s.id,
+                                        onPressed: _busy.contains(s.id)
+                                            ? null
+                                            : () => _act(
+                                                s,
+                                                () =>
+                                                    ChatSessionManager.deleteSession(
+                                                      widget.deviceId,
+                                                      s.id,
+                                                    ),
                                               ),
-                                        ),
                                       ),
                                     ],
                                   ],
@@ -576,5 +704,6 @@ class _ChatSessionsListScreenState extends State<ChatSessionsListScreen> {
               },
             ),
           ),
-  );
+    );
+  }
 }

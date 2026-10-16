@@ -45,14 +45,15 @@ class ControllerWebRtcSession extends ChangeNotifier {
   Timer? _pingTimer;
   Timer? _connectionTimer;
   Timer? _disconnectionTimer;
+  Timer? _frameCheckTimer;
   bool _disposed = false;
   int _connectionGeneration = 0;
   bool _transportConnected = false;
   bool _hasVideoFrame = false;
+  bool get hasVideoFrame => _hasVideoFrame;
 
   void _updateConnectionReadiness() {
-    if (!_transportConnected ||
-        (sessionType == 'remote_control' && !_hasVideoFrame)) {
+    if (!_transportConnected) {
       return;
     }
     _connectionTimer?.cancel();
@@ -62,6 +63,19 @@ class ControllerWebRtcSession extends ChangeNotifier {
     _isConnecting = false;
     _startPingTimer();
     notifyListeners();
+  }
+
+  void _startFrameCheckTimer() {
+    _frameCheckTimer?.cancel();
+    _frameCheckTimer = Timer(const Duration(seconds: 2), () {
+      if (_disposed || !_transportConnected) return;
+      if (!_hasVideoFrame) {
+        debugPrint(
+          '[ControllerWebRTC] No video frame after 2s, requesting frame repeater trigger',
+        );
+        sendCommand(const RemoteRequestFrameCommand());
+      }
+    });
   }
 
   Future<void> _failConnection(String message) async {
@@ -94,6 +108,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
     videoRenderer.onFirstFrameRendered = () {
       debugPrint('[ControllerWebRTC] videoRenderer onFirstFrameRendered!');
       _hasVideoFrame = true;
+      _frameCheckTimer?.cancel();
+      _frameCheckTimer = null;
       _updateConnectionReadiness();
       notifyListeners();
     };
@@ -111,6 +127,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
     _isConnecting = true;
     _transportConnected = false;
     _hasVideoFrame = false;
+    _frameCheckTimer?.cancel();
+    _frameCheckTimer = null;
     _errorMessage = null;
     notifyListeners();
 
@@ -149,10 +167,13 @@ class ControllerWebRtcSession extends ChangeNotifier {
         if (_peerConnection != peer || _disposed) return;
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
           _transportConnected = true;
+          _startFrameCheckTimer();
           _updateConnectionReadiness();
         } else if (state ==
             RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
           _transportConnected = false;
+          _frameCheckTimer?.cancel();
+          _frameCheckTimer = null;
           _isConnected = false;
           notifyListeners();
           _disconnectionTimer?.cancel();
@@ -169,6 +190,18 @@ class ControllerWebRtcSession extends ChangeNotifier {
           unawaited(
             _failConnection('חיבור הרשת למכשיר נכשל. נסה להתחבר מחדש.'),
           );
+        }
+      };
+
+      peer.onIceConnectionState = (state) {
+        if (_peerConnection != peer || _disposed) return;
+        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+            state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+          if (!_transportConnected) {
+            _transportConnected = true;
+            _startFrameCheckTimer();
+            _updateConnectionReadiness();
+          }
         }
       };
 
@@ -557,6 +590,8 @@ class ControllerWebRtcSession extends ChangeNotifier {
     _disconnectionTimer = null;
     _connectionTimer?.cancel();
     _connectionTimer = null;
+    _frameCheckTimer?.cancel();
+    _frameCheckTimer = null;
     _transportConnected = false;
     _hasVideoFrame = false;
     _remoteWidth = 1080;

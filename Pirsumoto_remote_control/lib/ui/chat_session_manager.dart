@@ -75,8 +75,7 @@ class ChatSessionManager {
         ChatSessionStatus.canceled,
         ChatSessionStatus.failed,
       }.contains(status) &&
-      VehicleSchema.isComplete(session.vehicleData) &&
-      session.imagePaths.isNotEmpty;
+      VehicleSchema.isComplete(session.vehicleData);
 
   static ChatSession sessionFromRequest(
     String deviceId,
@@ -292,13 +291,17 @@ class ChatSessionManager {
     var r = request(deviceId, sessionId);
     if (r == null) {
       // A failed lookup must not make an active remote request disappear locally.
-      final doc = await FirebaseFirestore.instance
-          .collection('remote_chats')
-          .doc(deviceId)
-          .collection('requests')
-          .doc(sessionId)
-          .get(const GetOptions(source: Source.server));
-      r = doc.data();
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('remote_chats')
+            .doc(deviceId)
+            .collection('requests')
+            .doc(sessionId)
+            .get(const GetOptions(source: Source.server));
+        r = doc.data();
+      } catch (e) {
+        debugPrint('[ChatSessionManager] remote request lookup error: $e');
+      }
     }
 
     // Cancellation acknowledgment must precede archival. Writing a terminal
@@ -311,11 +314,15 @@ class ChatSessionManager {
       }
     }
     if (r != null && r['attemptId'] != null) {
-      await RemoteApi.post(deviceId, {
-        'action': 'archive_publication',
-        'requestId': sessionId,
-        'attemptId': r['attemptId'],
-      });
+      try {
+        await RemoteApi.post(deviceId, {
+          'action': 'archive_publication',
+          'requestId': sessionId,
+          'attemptId': r['attemptId'],
+        });
+      } catch (e) {
+        debugPrint('[ChatSessionManager] archive_publication error: $e');
+      }
     }
 
     // Remove from in-memory cache
@@ -471,18 +478,43 @@ class ChatSessionManager {
       final isGovIl = draft.vehicleData['govIl'] == 'true';
       vehiclePayload['govIl'] = isGovIl ? 'true' : 'false';
     }
-    try {
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get();
-      final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
-      final bool includeYad2 = settings?['includeYad2'] ?? true;
-      vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';
-    } catch (_) {
-      if (!vehiclePayload.containsKey('includeYad2') &&
-          !vehiclePayload.containsKey('include_yad2')) {
-        vehiclePayload['includeYad2'] = 'true';
+    final target =
+        vehiclePayload['publish_target'] ?? vehiclePayload['target_platform'];
+    if (target != null && target.isNotEmpty) {
+      vehiclePayload['publish_target'] = target;
+      vehiclePayload['includeYad2'] =
+          (target == 'both' || target == 'yad2') ? 'true' : 'false';
+      vehiclePayload['includeFacebook'] =
+          (target == 'both' || target == 'facebook') ? 'true' : 'false';
+    } else {
+      try {
+        final userDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get();
+        final settings = userDoc.data()?['settings'] as Map<String, dynamic>?;
+        if (!vehiclePayload.containsKey('includeYad2') &&
+            !vehiclePayload.containsKey('include_yad2')) {
+          final bool includeYad2 = settings?['includeYad2'] ?? true;
+          vehiclePayload['includeYad2'] = includeYad2 ? 'true' : 'false';
+        }
+      } catch (_) {
+        if (!vehiclePayload.containsKey('includeYad2') &&
+            !vehiclePayload.containsKey('include_yad2')) {
+          vehiclePayload['includeYad2'] = 'true';
+        }
+      }
+      if (!vehiclePayload.containsKey('includeFacebook') &&
+          !vehiclePayload.containsKey('include_facebook')) {
+        vehiclePayload['includeFacebook'] = 'true';
+      }
+      if (!vehiclePayload.containsKey('publish_target')) {
+        final incYad2 = vehiclePayload['includeYad2'] != 'false';
+        final incFb = vehiclePayload['includeFacebook'] != 'false';
+        vehiclePayload['publish_target'] =
+            (incYad2 && incFb)
+                ? 'both'
+                : (incYad2 ? 'yad2' : 'facebook');
       }
     }
     // try {

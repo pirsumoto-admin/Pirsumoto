@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'remote_protocol.dart';
 import 'webrtc_ice_config.dart';
 import 'remote_video_budget.dart';
+import 'remote_session_manager.dart' show RemoteAutomationGate;
 
 typedef RemoteWebRtcReceiverFactory =
     RemoteWebRtcReceiver Function({
@@ -19,9 +20,10 @@ class RemoteWebRtcReceiver {
   bool _closed = true;
   bool _hasScreenCapture = false;
   bool _frameRepeaterRunning = false;
-  int _captureWidth = 1080;
-  int _captureHeight = 2400;
-  MediaStream? _screenStream;
+  int _captureWidth = 540;
+  int _captureHeight = 1200;
+  static MediaStream? _screenStream;
+  RTCRtpSender? _activeVideoSender;
   RTCDataChannel? _commandsChannel;
   RTCDataChannel? _pointerChannel;
   RTCDataChannel? _chatChannel;
@@ -42,6 +44,37 @@ class RemoteWebRtcReceiver {
   RTCPeerConnectionState? get connectionState =>
       _peerConnection?.connectionState;
 
+  /// Dedicated method to acquire or reuse screen capture stream across WebRTC reconnects
+  Future<bool> ensureScreenCapture({
+    int width = 540,
+    int height = 1200,
+    int frameRate = 15,
+  }) async {
+    final existingTracks = _screenStream?.getVideoTracks() ?? const [];
+    if (_screenStream != null &&
+        existingTracks.isNotEmpty &&
+        existingTracks.first.enabled) {
+      _hasScreenCapture = true;
+      return true;
+    }
+    try {
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {
+          'width': width,
+          'height': height,
+          'frameRate': frameRate,
+        },
+        'audio': false,
+      });
+      _hasScreenCapture =
+          _screenStream != null && _screenStream!.getVideoTracks().isNotEmpty;
+      return _hasScreenCapture;
+    } catch (e) {
+      _hasScreenCapture = false;
+      return false;
+    }
+  }
+
   /// Default WebRTC configuration with Google STUN + GCP TURN
   Map<String, dynamic> _buildRtcConfig({
     List<Map<String, dynamic>>? customIceServers,
@@ -61,13 +94,12 @@ class RemoteWebRtcReceiver {
   /// Initialize WebRTC PeerConnection and attach display capture stream (if enabled)
   Future<void> initializePeerConnection({
     List<Map<String, dynamic>>? iceServers,
-    int width = 1080,
-    int height = 2400,
+    int width = 540,
+    int height = 1200,
     bool enableScreenCapture = true,
   }) async {
-    await close();
+    await close(releaseScreenCapture: false);
     _closed = false;
-    _hasScreenCapture = enableScreenCapture;
     _captureWidth = width;
     _captureHeight = height;
 
@@ -106,31 +138,31 @@ class RemoteWebRtcReceiver {
     };
 
     if (enableScreenCapture) {
-      // Start Screen Capture stream via MediaProjection with native aspect ratio
-      try {
-        _screenStream = await navigator.mediaDevices.getDisplayMedia({
-          'video': {'width': width, 'height': height, 'frameRate': 30},
-          'audio': false,
-        });
-
-        for (final track in _screenStream!.getVideoTracks()) {
-          track.enabled = true;
-          await _peerConnection!.addTrack(track, _screenStream!);
-          if (defaultTargetPlatform == TargetPlatform.android) {
-            await const MethodChannel(
-              'com.pirsumoto/accessibility',
-            ).invokeMethod('startScreenFrameRepeater', {'trackId': track.id});
-            _frameRepeaterRunning = true;
-          }
-        }
-        debugPrint(
-          '[ReceiverWebRTC] Screen video track added to PeerConnection ($width x $height)',
-        );
-      } catch (e) {
-        debugPrint('[ReceiverWebRTC] Error acquiring screen stream: $e');
-        rethrow;
+      final success = await ensureScreenCapture(
+        width: width,
+        height: height,
+        frameRate: 15,
+      );
+      if (!success || _screenStream == null) {
+        throw StateError('Failed to ensure screen capture');
       }
+
+      for (final track in _screenStream!.getVideoTracks()) {
+        track.enabled = true;
+        _activeVideoSender =
+            await _peerConnection!.addTrack(track, _screenStream!);
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          await const MethodChannel(
+            'com.pirsumoto/accessibility',
+          ).invokeMethod('startScreenFrameRepeater', {'trackId': track.id});
+          _frameRepeaterRunning = true;
+        }
+      }
+      debugPrint(
+        '[ReceiverWebRTC] Screen video track added to PeerConnection ($width x $height)',
+      );
     } else {
+      _hasScreenCapture = false;
       debugPrint('[ReceiverWebRTC] Screen capture disabled (chat mode)');
     }
   }
@@ -151,6 +183,8 @@ class RemoteWebRtcReceiver {
           sendReply(
             RemotePongCommand(clientTimestamp: command.clientTimestamp),
           );
+        } else if (command is RemoteRequestFrameCommand) {
+          unawaited(retriggerFrameRepeater());
         }
         onCommandReceived(command);
       }
@@ -162,6 +196,7 @@ class RemoteWebRtcReceiver {
     _pointerChannel = channel;
     _pointerChannel!.onMessage = (data) {
       if (data.isBinary) return;
+      if (!RemoteAutomationGate.isInteractiveTakeover) return;
       final command = RemoteCommand.decode(data.text);
       if (command != null) {
         onCommandReceived(command);
@@ -269,6 +304,22 @@ class RemoteWebRtcReceiver {
     }
   }
 
+  Future<void> retriggerFrameRepeater() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    final track = _screenStream?.getVideoTracks().firstOrNull;
+    if (track != null) {
+      try {
+        await const MethodChannel(
+          'com.pirsumoto/accessibility',
+        ).invokeMethod('startScreenFrameRepeater', {'trackId': track.id});
+        _frameRepeaterRunning = true;
+        debugPrint('[ReceiverWebRTC] Re-triggered ScreenCaptureFrameRepeater');
+      } catch (error) {
+        debugPrint('[ReceiverWebRTC] Could not re-trigger frame repeater: $error');
+      }
+    }
+  }
+
   /// Add remote ICE candidate sent by controller
   Future<void> addCandidate(RTCIceCandidate candidate) async {
     if (_closed) return;
@@ -290,14 +341,12 @@ class RemoteWebRtcReceiver {
   }
 
   /// Stop screen streaming and close WebRTC peer connection
-  Future<void> close() async {
+  Future<void> close({bool releaseScreenCapture = false}) async {
     _closed = true;
     _hasRemoteDescription = false;
     _pendingCandidates.clear();
-    final stream = _screenStream;
     final peer = _peerConnection;
     final channels = [_commandsChannel, _pointerChannel, _chatChannel];
-    _screenStream = null;
     _peerConnection = null;
     _commandsChannel = null;
     _pointerChannel = null;
@@ -313,16 +362,39 @@ class RemoteWebRtcReceiver {
     }
 
     await _stopFrameRepeater();
-    _hasScreenCapture = false;
+
+    if (_activeVideoSender != null) {
+      try {
+        await _activeVideoSender!.replaceTrack(null);
+      } catch (e) {
+        debugPrint(
+          '[ReceiverWebRTC] Error detaching activeVideoSender track: $e',
+        );
+      }
+      if (peer != null) {
+        try {
+          await peer.removeTrack(_activeVideoSender!);
+        } catch (_) {}
+      }
+      _activeVideoSender = null;
+    }
+
     for (final channel in channels) {
       if (channel != null) await release(channel.close);
     }
-    if (stream != null) {
-      for (final track in stream.getTracks()) {
-        await release(track.stop);
+
+    if (releaseScreenCapture) {
+      final stream = _screenStream;
+      _screenStream = null;
+      _hasScreenCapture = false;
+      if (stream != null) {
+        for (final track in stream.getTracks()) {
+          await release(track.stop);
+        }
+        await release(stream.dispose);
       }
-      await release(stream.dispose);
     }
+
     if (peer != null) {
       await release(peer.close);
       await release(peer.dispose);

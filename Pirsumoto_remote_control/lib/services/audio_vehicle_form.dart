@@ -49,7 +49,21 @@ class AudioVehicleForm {
       if (entry.key == 'km') continue;
       final value = entry.value?.toString().trim() ?? '';
       if (value.isNotEmpty && (data[entry.key] ?? '').isEmpty) {
-        data[entry.key] = value;
+        var finalValue = value;
+        final enumKey =
+            entry.key == 'ownership' ? 'current_ownership' : entry.key;
+        if (vehicleEnums.containsKey(enumKey)) {
+          final allowed = vehicleEnums[enumKey]!;
+          if (finalValue == 'פרטי' && allowed.contains('פרטית')) {
+            finalValue = 'פרטית';
+          } else if (finalValue == 'פרטית' && allowed.contains('פרטי')) {
+            finalValue = 'פרטי';
+          }
+          if (!allowed.contains(finalValue)) {
+            continue;
+          }
+        }
+        data[entry.key] = finalValue;
       }
     }
   }

@@ -2,6 +2,7 @@ import 'package:publication_protocol/publication_protocol.dart';
 import '../../services/publication_session_deadline.dart';
 import 'resume_phase_dialog.dart';
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -15,6 +16,7 @@ import '../../services/facebook_automation_service.dart';
 import '../../services/db_service.dart';
 import '../settings/preset_login_dialog.dart';
 import '../../remote_control/firebase_chat_receiver.dart';
+import '../../remote_control/remote_receiver_service.dart';
 import '../../routing/app_router.dart';
 
 // ---------------------------------------------------------------------------
@@ -352,7 +354,7 @@ class _FacebookScreenState extends State<FacebookScreen> {
     _buildAndStartService();
   }
 
-  void _buildAndStartService() {
+  Future<void> _buildAndStartService() async {
     if (!mounted ||
         _webViewClosed ||
         _publicationStopped ||
@@ -420,6 +422,10 @@ class _FacebookScreenState extends State<FacebookScreen> {
       statusType: 'step',
       text: '🚀 מתחיל פרסום בפייסבוק מרקטפלייס...',
     );
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      await RemoteControlReceiverService.instance.manager
+          ?.prewarmScreenCaptureForAutomation();
+    }
     if (_publicationPaused) _service!.pauseAutomation();
     _service!.startAutomation();
   }
